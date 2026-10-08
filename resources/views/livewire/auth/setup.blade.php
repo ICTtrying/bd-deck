@@ -1,6 +1,6 @@
 <div class="grid gap-8">
     <div class="grid gap-5">
-        <img src="{{ asset('images/bd-mark.png') }}" alt="" class="size-12">
+        <img src="{{ asset('images/bd-mark.png') }}" alt="" class="size-12 dark:hidden"><img src="{{ asset('icon.png') }}" alt="" class="size-12 hidden dark:block">
         <div class="grid gap-2">
             <h1 class="text-2xl font-semibold tracking-[-0.015em]">{{ __('Welkom bij BD Deck') }}</h1>
             <p class="text-muted">{{ __('Kies een hoofdwachtwoord. Daarmee open je de app en versleutel je bewaarde wachtwoorden en API-sleutels. Zonder dit wachtwoord zijn ze niet terug te halen.') }}</p>

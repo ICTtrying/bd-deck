@@ -10,7 +10,7 @@
 
 <aside class="flex h-full w-60 shrink-0 flex-col border-r border-line bg-surface" @if ($this->activeRuns->isNotEmpty()) wire:poll.3s @endif>
     <div class="flex items-center gap-2.5 px-4 pt-4 pb-3">
-        <img src="{{ asset('images/bd-mark.png') }}" alt="" class="size-7">
+        <img src="{{ asset('images/bd-mark.png') }}" alt="" class="size-7 dark:hidden"><img src="{{ asset('icon.png') }}" alt="" class="size-7 hidden dark:block">
         <div class="leading-tight">
             <p class="text-[0.9375rem] font-semibold tracking-[-0.01em]">BD Deck</p>
             <p class="text-2xs text-faint">Borgman Digital</p>

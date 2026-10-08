@@ -3,6 +3,7 @@
 namespace App\Livewire\Concerns;
 
 use App\Exceptions\DesktopLaunchException;
+use App\Exceptions\VaultLockedException;
 use App\Exceptions\WpOpenException;
 use App\Models\CommandRun;
 use App\Models\Site;
@@ -91,7 +92,7 @@ trait InteractsWithSites
     {
         try {
             $callback();
-        } catch (WpOpenException|DesktopLaunchException|InvalidArgumentException $exception) {
+        } catch (WpOpenException|DesktopLaunchException|VaultLockedException|InvalidArgumentException $exception) {
             $this->dispatch('toast', title: __('Dat lukte niet'), message: $exception->getMessage(), tone: 'danger');
         }
     }
