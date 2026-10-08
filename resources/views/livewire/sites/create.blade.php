@@ -31,6 +31,7 @@
                         <x-input id="local-title" wire:model="localTitle" :placeholder="__('Bijvoorbeeld: Bakkerij De Korenaar')" />
                     </x-field>
                 </div>
+                <p class="mt-4 text-[0.8125rem] text-muted">{{ __('Enfold en de WPMU DEV-plugins worden automatisch geïnstalleerd en geactiveerd.') }} <a href="{{ route('settings.index') }}#premium" wire:navigate class="font-medium text-local-ink hover:underline">{{ __('Zips beheren in Instellingen') }}</a></p>
             </x-panel>
             <div class="flex items-center justify-end gap-2">
                 <x-button :href="route('dashboard')" wire:navigate variant="ghost">{{ __('Annuleren') }}</x-button>

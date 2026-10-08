@@ -74,6 +74,14 @@ final class AppSettings
         return $this->expand((string) $this->get('sites_directory'));
     }
 
+    /**
+     * Map met de zips van Enfold en de WPMU DEV-plugins; wpopen leest dezelfde map ($HOME/.config/wpsites/premium).
+     */
+    public function premiumDirectory(): string
+    {
+        return $this->homeDirectory().'/.config/wpsites/premium';
+    }
+
     public function backupsDirectory(): string
     {
         return $this->sitesDirectory().'/.wpopen-backups';

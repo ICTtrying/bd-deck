@@ -42,6 +42,7 @@
 #                                             committen op dev (--major: ook nieuwe hoofdversies, zoals Laravel 12 → 13;
 #                                             --package: alleen dat pakket (herhaalbaar), ook bij een nieuwe hoofdversie;
 #                                             --live: daarna meteen live zetten)
+#   wpopen premium <naam>                     Enfold en WPMU DEV-plugins uit de premium-map in een lokale site zetten
 #   wpopen cache <naam> [--live]              cache legen (lokaal of live)
 #   wpopen login <naam> [--live] [--user u]   eenmalige inloglink voor wp-admin
 #   wpopen wp <naam> [--live] <args…>         WP-CLI lokaal of op live
@@ -50,7 +51,7 @@
 #
 #   Algemeen: --yes slaat bevestigingsvragen over (de app vraagt zelf om bevestiging).
 set -euo pipefail
-WPO_VERSION="2.7.0"
+WPO_VERSION="2.8.0"
 DB="${WPO_DB:-$HOME/.config/wpsites/sites}"; mkdir -p "$(dirname "$DB")"; touch "$DB"
 BASE="${WP_SITES_DIR:-$HOME/wp-sites}"
 BACKUPS="${WPO_BACKUP_DIR:-$BASE/.wpopen-backups}"
@@ -1603,8 +1604,88 @@ bootstrap_local() {  # verse WordPress in DDEV, dev/dev als beheerder
   RESTART=0; quiet_php; write_local_mu
   [ $RESTART = 1 ] && ddev_restart >/dev/null
   init_git
+  # na init_git: anders komt het betaalde thema in de (privé) git-repo van deze site terecht
+  install_premium
   touch "$PROJ/.wpopen-ready"
   ok "WordPress staat klaar op $LOCALURL"
+}
+# ───────────── betaalde thema's en plugins (Enfold, WPMU DEV) ─────────────
+# Die zijn niet openbaar te downloaden: de zips staan in een map op deze computer, en per thema/plugin geldt de nieuwste.
+PREMIUM_DIR="${WPO_PREMIUM_DIR:-$HOME/.config/wpsites/premium}"
+# "soort<TAB>map<TAB>zip" per thema of plugin; bij meerdere zips van hetzelfde exemplaar wint de nieuwste.
+# Een ThemeForest-pakket met de echte zip erin (bv. Enfold) wordt uitgepakt.
+premium_list() {  # tijdelijke map voor uitgepakte pakketten
+  DIR="$PREMIUM_DIR" TMP="$1" python3 - <<'PY2'
+import os, re, zipfile
+best = {}
+def inspect(path, tmp, depth=0):
+    try:
+        z = zipfile.ZipFile(path)
+    except (zipfile.BadZipFile, OSError):
+        return
+    names = [n for n in z.namelist() if not n.startswith("__MACOSX")]
+    tops = {n.split("/")[0] for n in names if "/" in n}
+    for top in tops:
+        if re.fullmatch(r"[A-Za-z0-9._-]+", top) is None:
+            continue
+        kind = "theme" if top + "/style.css" in names else ("plugin" if any(n.startswith(top + "/") and n.endswith(".php") and n.count("/") == 1 for n in names) else None)
+        if kind and len(tops) == 1:
+            key = (kind, top)
+            when = os.path.getmtime(path)
+            if key not in best or when > best[key][0]:
+                best[key] = (when, path)
+            return
+    if depth == 0:
+        for n in names:
+            if n.lower().endswith(".zip") and "/" not in n.strip("/").rsplit("/", 1)[-1]:
+                out = os.path.join(tmp, os.path.basename(n))
+                with z.open(n) as src, open(out, "wb") as dst:
+                    dst.write(src.read())
+                os.utime(out, (os.path.getmtime(path), os.path.getmtime(path)))
+                inspect(out, tmp, 1)
+d = os.environ["DIR"]
+if os.path.isdir(d):
+    for f in sorted(os.listdir(d)):
+        if f.lower().endswith(".zip"):
+            inspect(os.path.join(d, f), os.environ["TMP"])
+for (kind, top), (_, path) in sorted(best.items()):
+    print("%s\t%s\t%s" % (kind, top, path))
+PY2
+}
+install_premium() {  # thema's en plugins uit PREMIUM_DIR in deze lokale WordPress zetten en activeren
+  local tmp kind slug zip theme="" f
+  local -a plugins=()
+  tmp=$(mktemp -d)
+  mkdir -p "$LWPC/themes" "$LWPC/plugins"
+  while IFS=$'\t' read -r kind slug zip; do
+    [ -n "$slug" ] || continue
+    if [ "$kind" = theme ]; then
+      rm -rf "$LWPC/themes/$slug"; unzip -qo "$zip" -d "$LWPC/themes" || { warn "Kon $(basename "$zip") niet uitpakken"; continue; }
+      if [ "$slug" = enfold ] || [ -z "$theme" ]; then theme=$slug; fi
+      ok "Thema $slug geïnstalleerd ($(basename "$zip"))"
+    else
+      rm -rf "$LWPC/plugins/$slug"; unzip -qo "$zip" -d "$LWPC/plugins" || { warn "Kon $(basename "$zip") niet uitpakken"; continue; }
+      # de Dashboard-plugin eerst: de andere plugins halen daar hun licentie en updates
+      if [ "$slug" = wpmudev-updates ]; then plugins=("$slug" "${plugins[@]}"); else plugins+=("$slug"); fi
+      ok "Plugin $slug geïnstalleerd ($(basename "$zip"))"
+    fi
+  done < <(premium_list "$tmp")
+  rm -rf "$tmp"
+  if [ -z "$theme" ] && [ ${#plugins[@]} -eq 0 ]; then
+    note "Geen Enfold of WPMU DEV-plugins gevonden in $PREMIUM_DIR. Zet de zips daar neer, dan komen ze bij een volgende nieuwe site vanzelf mee (of draai: wpopen premium $NAME)."
+    return 0
+  fi
+  cd "$PROJ"
+  [ -z "$theme" ] || { ddev wp theme activate "$theme" >/dev/null 2>&1 && ok "Thema $theme actief" || warn "Kon thema $theme niet activeren"; }
+  for f in "${plugins[@]}"; do
+    ddev wp plugin activate "$f" >/dev/null 2>&1 && ok "Plugin $f actief" || warn "Kon plugin $f niet activeren (laat hem uit staan; kijk of hij een licentie of API-sleutel vraagt)"
+  done
+}
+cmd_premium() {  # Enfold en WPMU DEV-plugins in een bestaande lokale site zetten
+  [ $# -ge 1 ] || die "Gebruik: wpopen premium <naam>"
+  need ddev unzip python3; get "$1"; need_wordpress; built
+  ddev_up >/dev/null 2>&1 || true
+  install_premium
 }
 cmd_new() {
   local name="" TITLE=""
@@ -1614,7 +1695,7 @@ cmd_new() {
   valid_field "$TITLE"
   db_has "$name" && die "Er bestaat al een site '$name'."
   [ ! -e "$BASE/$(slug "$name")" ] || die "De map $BASE/$(slug "$name") bestaat al. Kies een andere naam."
-  need ddev git
+  need ddev git unzip python3
   db_write "$name" "$name||||local|||wordpress"
   get "$name"
   bootstrap_local
@@ -2478,6 +2559,7 @@ case "$(basename "$0")" in wplive) cmd_live "$@"; exit;; esac
 case "${1:-}" in
   setup)    shift; cmd_setup "$@";;
   install)  cmd_install;;
+  premium)  shift; cmd_premium "$@";;
   version|--version) echo "$WPO_VERSION";;
   help|-h|--help) usage;;
   import)   cmd_import;;

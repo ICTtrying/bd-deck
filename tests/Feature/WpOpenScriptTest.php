@@ -227,6 +227,49 @@ describe('lokale sites', function (): void {
         'ssh' => [['ssh', 'nieuw']],
     ]);
 
+    it('zet Enfold en de WPMU DEV-plugins uit de premium-map in een lokale site, de nieuwste versie per plugin', function (): void {
+        $wpContent = $this->server->buildLocalSite();
+        $premium = $this->server->root.'/premium';
+        mkdir($premium);
+
+        $zip = function (string $path, array $files, int $mtime) use ($premium): void {
+            $archive = new ZipArchive;
+            $archive->open($premium.'/'.$path, ZipArchive::CREATE);
+            foreach ($files as $name => $contents) {
+                $archive->addFromString($name, $contents);
+            }
+            $archive->close();
+            touch($premium.'/'.$path, $mtime);
+        };
+
+        // ThemeForest-pakket: documentatie plus de echte thema-zip
+        $zip('inner-enfold.zip', ['enfold/style.css' => '/* Theme Name: Enfold */
+', 'enfold/functions.php' => '<?php'], 1000);
+        $inner = file_get_contents($premium.'/inner-enfold.zip');
+        unlink($premium.'/inner-enfold.zip');
+        $zip('Enfold Package.zip', ['documentation/readme.txt' => 'lees mij', 'enfold.zip' => $inner], 1000);
+        $zip('wpmudev-updates-4.0.zip', ['wpmudev-updates/plugin.php' => '<?php // versie oud'], 1000);
+        $zip('wpmudev-updates-4.1.zip', ['wpmudev-updates/plugin.php' => '<?php // versie nieuw'], 2000);
+        $zip('smush-pro.zip', ['wp-smush-pro/smush.php' => '<?php'], 1500);
+
+        $result = $this->server->run(['premium', 'demo'], ['WPO_PREMIUM_DIR' => $premium]);
+
+        expect($result->successful())->toBeTrue($result->output().$result->errorOutput())
+            ->and($wpContent.'/themes/enfold/style.css')->toBeFile()
+            ->and(file_get_contents($wpContent.'/plugins/wpmudev-updates/plugin.php'))->toContain('versie nieuw')
+            ->and($wpContent.'/plugins/wp-smush-pro/smush.php')->toBeFile()
+            ->and($this->server->calls())->toContain('ddev wp theme activate enfold', 'ddev wp plugin activate wpmudev-updates', 'ddev wp plugin activate wp-smush-pro');
+    });
+
+    it('meldt netjes dat de premium-map leeg is', function (): void {
+        $this->server->buildLocalSite();
+
+        $result = $this->server->run(['premium', 'demo'], ['WPO_PREMIUM_DIR' => $this->server->root.'/bestaat-niet']);
+
+        expect($result->successful())->toBeTrue()
+            ->and($result->output())->toContain('Geen Enfold of WPMU DEV-plugins gevonden');
+    });
+
     it('weigert een naam die al bestaat', function (): void {
         $result = $this->server->run(['new', 'demo']);
 
