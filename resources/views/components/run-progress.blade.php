@@ -32,6 +32,6 @@
     @endif
 
     @if ($tail->isNotEmpty())
-        <pre class="overflow-x-auto rounded-lg bg-console px-3 py-2 font-mono text-xs leading-5 text-console-ink">@foreach ($tail as $line)<x-log-line :line="$line" />@endforeach</pre>
+        <div role="log" class="overflow-x-auto rounded-lg bg-console px-3 py-2 font-mono text-xs leading-5 text-console-ink">@foreach ($tail as $line)<x-log-line :line="$line" />@endforeach</div>
     @endif
 </section>

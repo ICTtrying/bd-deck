@@ -81,7 +81,14 @@ class Index extends Component
         $credential = Credential::query()->findOrFail($id);
         $this->resetForm();
         $this->editingId = $credential->id;
-        $this->fill($credential->only(['label', 'username', 'url', 'notes']) + ['kind' => $credential->kind->value, 'siteId' => $credential->site_id]);
+        $this->fill([
+            'label' => $credential->label,
+            'kind' => $credential->kind->value,
+            'siteId' => $credential->site_id,
+            'username' => (string) $credential->username,
+            'url' => (string) $credential->url,
+            'notes' => (string) $credential->notes,
+        ]);
         $this->dispatch('open-modal', 'credential');
     }
 

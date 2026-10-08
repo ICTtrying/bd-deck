@@ -44,7 +44,13 @@ class Login extends Component
         RateLimiter::clear($key);
         Auth::login($user);
         session()->regenerate();
-        $vault->unlock($user, $this->password);
+
+        // een eigenaar uit een oudere versie heeft nog geen kluis: die maken we bij het inloggen aan
+        if ($user->vault_key === null) {
+            $vault->initialize($user, $this->password);
+        } else {
+            $vault->unlock($user, $this->password);
+        }
 
         rescue(fn (): int => $registry->sync(), report: false);
 

@@ -34,7 +34,7 @@
                 <x-badge :tone="$run->status->tone()" :dot="$run->status->isActive()">{{ $run->status->label() }}</x-badge>
                 <a href="{{ route('activity.show', $run) }}" wire:navigate class="text-[0.8125rem] text-muted hover:text-ink">{{ $run->created_at->diffForHumans(short: true) }}</a>
             </div>
-            <pre class="max-h-80 overflow-auto bg-console px-4 py-3 font-mono text-xs leading-5 text-console-ink">@forelse (explode("\n", rtrim((string) $run->output)) as $line)<x-log-line :line="$line" />@empty<span class="text-faint">{{ __('Wacht op uitvoer…') }}</span>@endforelse</pre>
+            <div role="log" class="max-h-80 overflow-auto bg-console px-4 py-3 font-mono text-xs leading-5 text-console-ink">@forelse (explode("\n", rtrim((string) $run->output)) as $line)<x-log-line :line="$line" />@empty<span class="text-faint">{{ __('Wacht op uitvoer…') }}</span>@endforelse</div>
         </section>
     @endforeach
 </div>

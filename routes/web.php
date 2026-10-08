@@ -31,5 +31,6 @@ Route::middleware(['owner', 'auth'])->group(function (): void {
     Route::livewire('/kluis', Vault\Index::class)->name('vault.index');
     Route::livewire('/instellingen', Settings\Index::class)->name('settings.index');
 
-    Route::post('/vergrendelen', LockController::class)->name('lock');
+    // GET ook toegestaan: het native menu kan alleen naar een adres navigeren. Uitloggen is onschuldig.
+    Route::match(['get', 'post'], '/vergrendelen', LockController::class)->name('lock');
 });

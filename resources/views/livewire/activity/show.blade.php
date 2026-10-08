@@ -43,11 +43,11 @@
                 <span class="font-mono text-xs text-[#5f758d]">{{ __('code :code', ['code' => $run->exit_code]) }}</span>
             @endif
         </div>
-        <pre
+        <div role="log"
             class="max-h-[65vh] min-h-48 overflow-auto bg-console px-4 py-3 font-mono text-xs leading-5 text-console-ink"
             x-data="{ follow: true }"
             x-init="$el.scrollTop = $el.scrollHeight; new MutationObserver(() => { if (follow) $el.scrollTop = $el.scrollHeight }).observe($el, { childList: true, subtree: true })"
             x-on:scroll="follow = $el.scrollTop + $el.clientHeight >= $el.scrollHeight - 24"
-        >@if (trim((string) $run->output) === '')<span class="text-[#5f758d]">{{ $run->status === \App\Enums\RunStatus::Queued ? __('Wacht tot een vorige actie op deze site klaar is…') : __('Nog geen uitvoer…') }}</span>@else @foreach ($lines as $line)<x-log-line :line="$line" />@endforeach @endif</pre>
+        >@if (trim((string) $run->output) === '')<span class="text-[#5f758d]">{{ $run->status === \App\Enums\RunStatus::Queued ? __('Wacht tot een vorige actie op deze site klaar is…') : __('Nog geen uitvoer…') }}</span>@else @foreach ($lines as $line)<x-log-line :line="$line" />@endforeach @endif</div>
     </section>
 </div>
