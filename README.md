@@ -120,6 +120,14 @@ Resultaat in `nativephp/electron/dist/`:
 - `BD Deck-<versie>.AppImage`: direct uitvoerbaar (`chmod +x`, dubbelklikken).
 - `bd-deck_<versie>_amd64.deb`: installeren met `sudo apt install ./bd-deck_*.deb`; daarna staat **BD Deck** in het Mint-menu.
 
+**Als app op je computer zetten (zonder sudo)**
+
+```bash
+bin/install-desktop            # of: bin/install-desktop --no-desktop
+```
+
+Dit zet de nieuwste AppImage in `~/Applications/BD-Deck.AppImage`, het icoon in `~/.local/share/icons`, en een starter in het app-menu (categorie Programmeren) en op het bureaublad. Draai het na elke nieuwe build opnieuw; een geopende app hoeft daarvoor niet dicht. Vastzetten in het paneel: rechtsklik op BD Deck in het menu → *Aan paneel toevoegen*.
+
 Het app-icoon komt uit `public/icon.png` (je favicon), het tray-icoon uit `resources/images/menuBarIcon*.png`. De build:
 
 - draait `npm run build` vooraf (`prebuild` in `config/nativephp.php`);
@@ -241,6 +249,7 @@ php artisan test --compact
 
 | Probleem | Oplossing |
 | --- | --- |
+| BD Deck staat niet in het menu | `bin/install-desktop` draaien; eventueel uit- en inloggen zodat Cinnamon het menu opnieuw inleest. |
 | Een actie blijft "In de wachtrij" | Er loopt al een actie op die site (acties per site lopen na elkaar), of de queue-worker draait niet. In de browserversie: `php artisan queue:work --queue=default,quick --timeout=7200`. |
 | "Unable to locate file in Vite manifest" | `npm run build`. |
 | Lokale site start traag | `ddev start` kan de eerste keer of na een Docker-herstart een minuut duren. |
