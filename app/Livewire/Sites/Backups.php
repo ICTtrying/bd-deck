@@ -104,7 +104,7 @@ class Backups extends Component
         $this->restoreParts = collect($backup['parts'])->map(fn (string $part): ?string => $this->partLabels()[$part]['restore'] ?? null)->filter()->values()->all();
         $this->confirmText = '';
         $this->resetValidation();
-        $this->dispatch('open-modal', 'restore');
+        $this->dispatch('open-modal', name: 'restore');
     }
 
     public function restore(CommandRunner $runner): void
@@ -119,7 +119,7 @@ class Backups extends Component
 
         $this->attempt(function () use ($runner): void {
             $this->queueCommand($runner, WpOpenCommand::restore($this->site, (string) $this->restoring, $this->restoreParts));
-            $this->dispatch('close-modal', 'restore');
+            $this->dispatch('close-modal', name: 'restore');
         });
     }
 

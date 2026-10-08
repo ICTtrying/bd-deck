@@ -27,12 +27,13 @@ trait InteractsWithSites
             match ($target) {
                 'local-site' => $launcher->openUrl($this->requireBuilt($site)->localUrl('/')),
                 'live-site' => $launcher->openUrl($site->liveUrl('/')),
-                'local-admin' => $launcher->openUrl($settings->autoLoginLocal()
+                // Laravel heeft geen vaste beheerpagina: dan gewoon de site
+                'local-admin' => $launcher->openUrl($site->isLaravel() ? $this->requireBuilt($site)->localUrl('/') : ($settings->autoLoginLocal()
                     ? $wpopen->loginUrl($this->requireBuilt($site)->name, live: false)
-                    : $site->localUrl('/wp-admin/')),
-                'live-admin' => $launcher->openUrl($settings->autoLoginLive()
+                    : $site->localUrl('/wp-admin/'))),
+                'live-admin' => $launcher->openUrl($site->isLaravel() ? $site->liveUrl('/') : ($settings->autoLoginLive()
                     ? $wpopen->loginUrl($site->name, live: true, user: $site->live_login_user)
-                    : $site->liveUrl('/wp-admin/')),
+                    : $site->liveUrl('/wp-admin/'))),
                 'editor' => $launcher->openEditor($this->requireBuilt($site)->wpContentDirectory()),
                 'terminal' => $launcher->openTerminal($this->requireBuilt($site)->projectDirectory()),
                 'folder' => $launcher->openFolder($this->requireBuilt($site)->projectDirectory()),

@@ -3,17 +3,17 @@
     <x-panel :title="__('Verbinding')" :description="__('De SSH- of SFTP-gegevens uit het hostingpaneel.')">
         <div class="grid gap-4">
             @if ($creating)
-                <x-field :label="__('Plak een verbinding (optioneel)')" for="connection" :hint="__('Bijvoorbeeld sftp://wesley@klant.tempurl.host of ssh -p 65002 u123@1.2.3.4. De velden hieronder worden dan ingevuld.')">
+                <x-field :label="__('Plak een verbinding (optioneel)')" for="connection" :hint="__('Bijvoorbeeld sftp://jij@klant.tempurl.host of ssh -p 65002 u123@1.2.3.4. De velden hieronder worden dan ingevuld.')">
                     <x-input id="connection" wire:model.live.debounce.400ms="connection" mono placeholder="sftp://gebruiker@server:poort" autocomplete="off" spellcheck="false" />
                 </x-field>
             @endif
 
             <div class="grid gap-4 sm:grid-cols-[1fr_2fr_6rem]">
                 <x-field :label="__('Gebruiker')" for="user" error="form.user">
-                    <x-input id="user" wire:model="form.user" mono autocomplete="off" spellcheck="false" />
+                    <x-input id="user" wire:model.blur="form.user" mono autocomplete="off" spellcheck="false" />
                 </x-field>
                 <x-field :label="__('Server')" for="host" error="form.host">
-                    <x-input id="host" wire:model="form.host" mono placeholder="klant.tempurl.host" autocomplete="off" spellcheck="false" />
+                    <x-input id="host" wire:model.blur="form.host" mono placeholder="klant.tempurl.host" autocomplete="off" spellcheck="false" />
                 </x-field>
                 <x-field :label="__('Poort')" for="port" error="form.port">
                     <x-input id="port" type="number" min="1" max="65535" wire:model="form.port" mono />
@@ -38,11 +38,11 @@
         </div>
     </x-panel>
 
-    <x-panel :title="__('WordPress op de server')">
+    <x-panel :title="__('Project op de server')" :description="__('BD Deck herkent zelf of het WordPress of Laravel is.')">
         <div class="grid gap-4">
             @if ($creating)
                 <div class="grid gap-2 sm:grid-cols-2" role="radiogroup">
-                    @foreach ([true => [__('Zelf zoeken'), __('BD Deck zoekt op de server naar wp-content. Vindt het er meer, dan wordt elke installatie een eigen site.')], false => [__('Pad opgeven'), __('Je weet waar wp-content staat, of de server laat zoeken niet toe.')]] as $value => [$label, $text])
+                    @foreach ([true => [__('Zelf zoeken'), __('BD Deck zoekt op de server naar WordPress (wp-content) of Laravel (artisan). Kopieën slaat hij over; meerdere echte sites worden elk een eigen site.')], false => [__('Pad opgeven'), __('Je weet waar het project staat, of de server laat zoeken niet toe.')]] as $value => [$label, $text])
                         <label @class(['grid cursor-pointer gap-1 rounded-lg border p-3 transition-colors', 'border-local bg-local-soft' => $form->discover === (bool) $value, 'border-line hover:border-line-strong' => $form->discover !== (bool) $value])>
                             <span class="flex items-center gap-2 text-sm font-medium">
                                 <input type="radio" wire:model.live="form.discover" value="{{ $value ? '1' : '0' }}" class="accent-[var(--local)]">
@@ -56,7 +56,7 @@
 
             @if (! $form->discover)
                 <div class="grid gap-4 sm:grid-cols-[2fr_1fr]">
-                    <x-field :label="__('Pad naar wp-content')" for="remote" error="form.remotePath" :hint="__('Absoluut of ten opzichte van de SFTP-map, bijvoorbeeld site/public_html/wp-content')">
+                    <x-field :label="__('Pad naar het project')" for="remote" error="form.remotePath" :hint="__('WordPress: de map wp-content of de map erboven (public_html). Laravel: de map met artisan. Absoluut of ten opzichte van de SFTP-map.')">
                         <x-input id="remote" wire:model="form.remotePath" mono autocomplete="off" spellcheck="false" />
                     </x-field>
                     <x-field :label="__('Toegang')" for="mode" error="form.mode">

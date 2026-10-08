@@ -56,3 +56,13 @@ it('toont de app in het Engels als die taal gekozen is', function (): void {
 
     $this->get(route('dashboard'))->assertSee('Connect your first site')->assertDontSee('Koppel je eerste site');
 });
+
+it('toont meervoudsvormen in het Nederlands als de app Nederlands is', function (): void {
+    app()->setLocale('nl');
+
+    expect(trans_choice(':count lokaal gebouwd|:count lokaal gebouwd', 2))->toBe('2 lokaal gebouwd');
+
+    app()->setLocale('en');
+
+    expect(trans_choice(':count lokaal gebouwd|:count lokaal gebouwd', 2))->toBe('2 built locally');
+});

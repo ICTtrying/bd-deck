@@ -44,6 +44,11 @@ final readonly class WpOpenCommand
         return new self(WpOpenAction::PullDatabase, ['pull', $site->name, '--db'], $site);
     }
 
+    public static function pullUploads(Site $site): self
+    {
+        return new self(WpOpenAction::PullUploads, ['pull', $site->name, '--uploads'], $site);
+    }
+
     public static function push(
         Site $site,
         ?string $message = null,
@@ -169,6 +174,33 @@ final readonly class WpOpenCommand
         return new self(WpOpenAction::WpCli, ['wp', $site->name, ...($live ? ['--live'] : []), '--', ...$wpArguments], $site);
     }
 
+    /**
+     * @param  list<string>  $artisanArguments
+     */
+    public static function artisan(Site $site, array $artisanArguments, bool $live = false): self
+    {
+        if (! $site->isLaravel()) {
+            throw new InvalidArgumentException(__('Artisan kan alleen bij Laravel-sites.'));
+        }
+
+        if ($live && ! $site->mode->hasShell()) {
+            throw new InvalidArgumentException(__('Artisan op live kan alleen bij SSH-sites.'));
+        }
+
+        // "php artisan" ervoor is overbodig; mensen typen het uit gewoonte toch
+        if (array_slice($artisanArguments, 0, 2) === ['php', 'artisan']) {
+            $artisanArguments = array_slice($artisanArguments, 2);
+        } elseif (($artisanArguments[0] ?? null) === 'artisan') {
+            array_shift($artisanArguments);
+        }
+
+        if ($artisanArguments === []) {
+            throw new InvalidArgumentException(__('Geef een artisan-commando op.'));
+        }
+
+        return new self(WpOpenAction::Artisan, ['artisan', $site->name, ...($live ? ['--live'] : []), '--', ...$artisanArguments], $site);
+    }
+
     public static function addSite(
         string $name,
         string $target,
@@ -193,6 +225,81 @@ final readonly class WpOpenCommand
         }
 
         return new self(WpOpenAction::AddSite, $arguments);
+    }
+
+    public static function newSite(string $name, ?string $title = null): self
+    {
+        if (! preg_match('/^[A-Za-z0-9._-]+$/', $name)) {
+            throw new InvalidArgumentException(__('Gebruik alleen letters, cijfers, punt, - en _.'));
+        }
+
+        $arguments = ['new', $name];
+
+        if ($title !== null && trim($title) !== '') {
+            array_push($arguments, '--title', trim($title));
+        }
+
+        return new self(WpOpenAction::NewSite, $arguments);
+    }
+
+    /**
+     * Lokale site in één keer naar een nieuwe WordPress-installatie: bestanden, uploads en database.
+     */
+    public static function migrate(
+        Site $site,
+        string $target,
+        string $liveUrl,
+        string $sshOptions = '',
+        ?string $remotePath = null,
+        ?SiteMode $mode = null,
+        ?SiteProvider $provider = null,
+        bool $keepOld = true,
+        bool $pullUploads = true,
+    ): self {
+        if (! preg_match('/^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+$/', $target)) {
+            throw new InvalidArgumentException(__('Server moet de vorm gebruiker@host hebben.'));
+        }
+
+        if (! preg_match('#^https?://[A-Za-z0-9.-]+/?$#', $liveUrl)) {
+            throw new InvalidArgumentException(__('Gebruik een volledig adres zonder pad, bijvoorbeeld https://klant.nl'));
+        }
+
+        $arguments = ['migrate', $site->name, ...self::splitOptions($sshOptions), $target, '--url', rtrim($liveUrl, '/'), '--yes'];
+
+        if ($remotePath !== null && $remotePath !== '') {
+            array_push($arguments, '--remote', $remotePath);
+        }
+
+        if ($mode !== null && $mode !== SiteMode::Local) {
+            array_push($arguments, '--mode', $mode->value);
+        }
+
+        if ($provider !== null) {
+            array_push($arguments, '--provider', $provider->value);
+        }
+
+        if ($keepOld && ! $site->isLocalOnly()) {
+            $arguments[] = '--keep-old';
+        }
+
+        if (! $pullUploads) {
+            $arguments[] = '--no-uploads';
+        }
+
+        return new self(WpOpenAction::Migrate, $arguments, $site);
+    }
+
+    public static function changeDomain(Site $site, string $liveUrl): self
+    {
+        if (! preg_match('#^https?://[A-Za-z0-9.-]+/?$#', $liveUrl)) {
+            throw new InvalidArgumentException(__('Gebruik een volledig adres zonder pad, bijvoorbeeld https://klant.nl'));
+        }
+
+        if (! $site->mode->hasShell()) {
+            throw new InvalidArgumentException(__('Domein omzetten kan alleen bij SSH-sites.'));
+        }
+
+        return new self(WpOpenAction::ChangeDomain, ['domain', $site->name, rtrim($liveUrl, '/'), '--yes'], $site);
     }
 
     public static function removeSite(Site $site, bool $purgeLocal = false): self

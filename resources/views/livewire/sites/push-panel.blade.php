@@ -45,7 +45,9 @@
             <div class="grid gap-2 rounded-lg border border-line p-3">
                 <x-toggle wire:model="flushCache" :label="__('Cache legen na de push')" :description="__('Nodig om de wijziging meteen te zien; zonder dit kan de servercache de oude pagina blijven tonen.')" />
                 <x-toggle wire:model="uploads" :label="__('Nieuwe uploads meesturen')" :description="__('Alleen bestanden die op live nog niet bestaan. Live-uploads worden nooit overschreven.')" />
-                @if ($site->mode->hasShell())
+                @if ($site->isLaravel())
+                    <p class="py-1 text-[0.8125rem] text-faint">{{ __('Laravel: de database blijft op live staan. Nieuwe migraties draaien automatisch na het uploaden (live wordt eerst bewaard), en bij een gewijzigde composer.lock volgt composer install.') }}</p>
+                @elseif ($site->mode->hasShell())
                     <x-toggle wire:model.live="database" :label="__('Ook de database')" :description="__('Overschrijft de live database met je lokale. Live wordt eerst bewaard, live-plugins blijven aan en de lokale dev-gebruiker komt nooit op live.')" />
                 @else
                     <p class="py-1 text-[0.8125rem] text-faint">{{ __('Database pushen kan alleen bij SSH-sites; deze site heeft alleen SFTP.') }}</p>

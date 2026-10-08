@@ -7,6 +7,7 @@ use App\Services\StaleQueueWorkers;
 use App\Services\WpOpen\ScriptInstaller;
 use App\Services\WpOpen\SiteRegistry;
 use App\Support\MainWindow;
+use Illuminate\Filesystem\Filesystem;
 use Native\Desktop\Contracts\ProvidesPhpIni;
 use Native\Desktop\Facades\Menu;
 use Native\Desktop\Facades\MenuBar;
@@ -17,6 +18,7 @@ class NativeAppServiceProvider implements ProvidesPhpIni
         private readonly ScriptInstaller $installer,
         private readonly SiteRegistry $registry,
         private readonly StaleQueueWorkers $staleWorkers,
+        private readonly Filesystem $files,
     ) {}
 
     /**
@@ -25,6 +27,7 @@ class NativeAppServiceProvider implements ProvidesPhpIni
      */
     public function boot(): void
     {
+        $this->forgetSessions();
         rescue(fn (): array => $this->staleWorkers->reap(), report: false);
 
         // terminal en app moeten hetzelfde script draaien; een nieuwere app levert een nieuwere wpopen
@@ -35,6 +38,18 @@ class NativeAppServiceProvider implements ProvidesPhpIni
         $this->registerTray();
 
         MainWindow::open();
+    }
+
+    /**
+     * Een sessie bevat de ontgrendelde kluissleutel; bij elke start dus opnieuw het hoofdwachtwoord.
+     */
+    private function forgetSessions(): void
+    {
+        foreach ($this->files->glob(storage_path('framework/sessions/*')) as $session) {
+            if (basename($session) !== '.gitignore') {
+                $this->files->delete($session);
+            }
+        }
     }
 
     private function registerMenu(): void
@@ -62,6 +77,8 @@ class NativeAppServiceProvider implements ProvidesPhpIni
                 ...(config('app.debug') ? [Menu::devTools(__('Ontwikkelaarstools'))] : []),
             )->label(__('Beeld')),
             Menu::make(
+                Menu::route('onboarding', __('Aan de slag')),
+                Menu::separator(),
                 Menu::link('https://borgmandigital.nl', 'borgmandigital.nl')->openInBrowser(),
                 Menu::link('https://wpmudev.com/hub2/', 'WPMU DEV Hub')->openInBrowser(),
                 Menu::link('https://hpanel.hostinger.com/', 'Hostinger hPanel')->openInBrowser(),

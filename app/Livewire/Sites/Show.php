@@ -72,7 +72,20 @@ class Show extends Component
                 'danger' => false,
                 'typed' => false,
             ],
-            'fix-plugins' => [
+            'pull-uploads' => [
+                'title' => __('Uploads ophalen van live'),
+                'body' => __('Alle uploads (afbeeldingen, pdf\'s) worden van live naar je computer gekopieerd. Normaal komen ze via de live server binnen; voor verhuizen of offline werken moeten ze echt lokaal staan. Dit kan even duren. Live verandert niet.'),
+                'button' => __('Uploads ophalen'),
+                'danger' => false,
+                'typed' => false,
+            ],
+            'fix-plugins' => $this->site->isLaravel() ? [
+                'title' => __('Site repareren'),
+                'body' => __('Zet de lokale .env, de storage-mappen, Composer-pakketten, de storage-link en de caches recht. Live verandert niet.'),
+                'button' => __('Repareren'),
+                'danger' => false,
+                'typed' => false,
+            ] : [
                 'title' => __('Repareren en plugins uitzetten'),
                 'body' => __('Herstelt prefix, URL\'s, uploads-proxy en kapotte plugins, en zet lokaal cache-, beveiligings-, back-up- en SMTP-plugins uit. Live verandert niet.'),
                 'button' => __('Repareren'),
@@ -97,7 +110,7 @@ class Show extends Component
 
         $this->confirming = $action;
         $this->confirmText = '';
-        $this->dispatch('open-modal', 'confirm-action');
+        $this->dispatch('open-modal', name: 'confirm-action');
     }
 
     public function proceed(CommandRunner $runner): void
@@ -120,14 +133,15 @@ class Show extends Component
                 'rebuild' => WpOpenCommand::rebuild($this->site),
                 'reset' => WpOpenCommand::reset($this->site, $this->pullBeforeReset),
                 'pull-database' => WpOpenCommand::pullDatabase($this->site),
-                'fix-plugins' => WpOpenCommand::fix($this->site, disableEnvironmentPlugins: true),
+                'pull-uploads' => WpOpenCommand::pullUploads($this->site),
+                'fix-plugins' => WpOpenCommand::fix($this->site, disableEnvironmentPlugins: ! $this->site->isLaravel()),
                 'cache-live' => WpOpenCommand::cache($this->site, live: true),
                 default => throw new InvalidArgumentException(__('Onbekende actie.')),
             });
         });
 
         $this->confirming = null;
-        $this->dispatch('close-modal', 'confirm-action');
+        $this->dispatch('close-modal', name: 'confirm-action');
         unset($this->activeRun);
     }
 
@@ -190,7 +204,8 @@ class Show extends Component
     {
         return match ($this->activeRun?->action) {
             WpOpenAction::Push => 'push',
-            WpOpenAction::PullCode, WpOpenAction::PullDatabase, WpOpenAction::Build, WpOpenAction::Rebuild => 'pull',
+            WpOpenAction::PullCode, WpOpenAction::PullDatabase, WpOpenAction::PullUploads, WpOpenAction::Build, WpOpenAction::Rebuild => 'pull',
+            WpOpenAction::Migrate => 'push',
             default => null,
         };
     }

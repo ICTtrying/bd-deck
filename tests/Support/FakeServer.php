@@ -77,8 +77,36 @@ final class FakeServer
             echo "wp $*" >> "$FAKE_LOG"
             case "$*" in
               *"core version"*) echo "6.8.1";;
+              *"core is-installed"*) exit 0;;
+              *"config get table_prefix"*) echo "${FAKE_REMOTE_PREFIX:-wp_}";;
+              *"db import"*) cat > "$FAKE_IMPORTED";;
+              *"option get home"*domains/tweede.test*) echo "https://tweede.test";;
+              *"option get home"*) echo "https://tijdelijk.example.test";;
               *eval*) echo "✓ Cache geleegd (0 transients)";;
             esac
+            BASH);
+
+        // lokaal DDEV: alleen wat verhuizen nodig heeft; de export schrijft een herkenbare dump
+        $server->stub('ddev', <<<'BASH'
+            #!/usr/bin/env bash
+            echo "ddev $*" >> "$FAKE_LOG"
+            case "$*" in
+              *"db prefix"*) echo "lokaal_";;
+              *"search-replace"*)
+                for a in "$@"; do case "$a" in --export=*) printf 'DROP TABLE IF EXISTS `lokaal_options`;\nINSERT INTO `lokaal_options` VALUES (1,\x27siteurl\x27,\x27https://nieuw.example.test\x27);\n' > "${a#--export=}";; esac; done;;
+            esac
+            exit 0
+            BASH);
+
+        // database- en composer-gereedschap op de "server": loggen wat er gebeurt, inclusief of het wachtwoord via de omgeving komt
+        $server->stub('mysqldump', <<<'BASH'
+            #!/usr/bin/env bash
+            echo "mysqldump $* (MYSQL_PWD=${MYSQL_PWD:-})" >> "$FAKE_LOG"
+            echo "-- dump van $(pwd)"
+            BASH);
+        $server->stub('composer', <<<'BASH'
+            #!/usr/bin/env bash
+            echo "composer $* in $(pwd)" >> "$FAKE_LOG"
             BASH);
 
         $server->writeFile('themes/demo/style.css', "/* Theme Name: Demo */\n");
@@ -109,6 +137,46 @@ final class FakeServer
     }
 
     /**
+     * Laravel-project op de "server" en een lokale kopie zoals `wpopen build` die achterlaat.
+     *
+     * @return array{remote: string, local: string}
+     */
+    public function laravelSite(): array
+    {
+        $remote = $this->home.'/domains/shop.test/laravel';
+        $files = [
+            'artisan' => "<?php file_put_contents(getenv('FAKE_LOG'), 'artisan '.implode(' ', array_slice(\$argv, 1)).\"\\n\", FILE_APPEND);\n",
+            'composer.json' => '{"require": {"laravel/framework": "^12.0"}}',
+            'composer.lock' => '{"v": 1}',
+            '.env' => "APP_URL=https://shop.test\nDB_CONNECTION=mysql\nDB_DATABASE=shop\nDB_USERNAME=shop\nDB_PASSWORD=\"geheim wachtwoord\"\nSTRIPE_SECRET=sk_live_123\n",
+            'app/Http/Controllers/HomeController.php' => "<?php // home\n",
+            'routes/web.php' => "<?php // routes\n",
+            'vendor/autoload.php' => "<?php // vendor\n",
+        ];
+
+        foreach ($files as $path => $contents) {
+            File::ensureDirectoryExists(dirname($remote.'/'.$path));
+            file_put_contents($remote.'/'.$path, $contents);
+        }
+
+        $local = $this->sites.'/shop';
+        File::copyDirectory($remote, $local);
+        File::deleteDirectory($local.'/vendor');
+        unlink($local.'/.env');
+        file_put_contents($local.'/.wpopen-ready', '');
+        $this->git($local, ['init', '-q', '-b', 'main']);
+        file_put_contents($local.'/.git/info/exclude', "/.wpopen-*\n/vendor/\n/.env\n");
+        $this->git($local, ['add', '-A']);
+        $this->git($local, ['commit', '-qm', 'Start: live-staat']);
+        $this->git($local, ['tag', 'deployed']);
+        $this->git($local, ['checkout', '-q', '-b', 'dev']);
+
+        file_put_contents($this->home.'/.config/wpsites/sites', "shop|u1@shop.test||{$remote}|ssh|other|https://shop.test|laravel\n", FILE_APPEND);
+
+        return ['remote' => $remote, 'local' => $local];
+    }
+
+    /**
      * @param  list<string>  $arguments
      */
     public function git(string $directory, array $arguments): string
@@ -122,16 +190,22 @@ final class FakeServer
 
     /**
      * @param  list<string>  $arguments
+     * @param  array<string, string>  $environment
      */
-    public function run(array $arguments): ProcessResult
+    public function run(array $arguments, array $environment = []): ProcessResult
     {
         return Process::env([
             'HOME' => $this->home,
             'PATH' => $this->bin.':/usr/local/bin:/usr/bin:/bin',
             'WP_SITES_DIR' => $this->sites,
             'WPO_NONINTERACTIVE' => '1',
+            'WPO_SKIP_HOSTS' => '1',
+            // alleen in de nep-server zoeken, nooit in /var/www van de testcomputer
+            'WPO_SEARCH_ROOTS' => $this->home,
             'FAKE_LOG' => $this->log,
+            'FAKE_IMPORTED' => $this->root.'/imported.sql',
             'LC_ALL' => 'C.UTF-8',
+            ...$environment,
         ])->timeout(60)->run(['bash', base_path('bin/wpopen'), ...$arguments]);
     }
 
@@ -146,6 +220,16 @@ final class FakeServer
         return is_file($this->remote.'/'.$path) ? (string) file_get_contents($this->remote.'/'.$path) : null;
     }
 
+    public function calls(): string
+    {
+        return is_file($this->log) ? (string) file_get_contents($this->log) : '';
+    }
+
+    public function imported(): ?string
+    {
+        return is_file($this->root.'/imported.sql') ? (string) file_get_contents($this->root.'/imported.sql') : null;
+    }
+
     public function sitesFile(): string
     {
         return (string) file_get_contents($this->home.'/.config/wpsites/sites');
@@ -154,9 +238,9 @@ final class FakeServer
     /**
      * @return list<string>
      */
-    public function backups(): array
+    public function backups(string $site = 'demo'): array
     {
-        return collect(glob($this->sites.'/.wpopen-backups/demo/*', GLOB_ONLYDIR) ?: [])->map(fn (string $path): string => basename($path))->sort()->values()->all();
+        return collect(glob($this->sites.'/.wpopen-backups/'.$site.'/*', GLOB_ONLYDIR) ?: [])->map(fn (string $path): string => basename($path))->sort()->values()->all();
     }
 
     public function destroy(): void

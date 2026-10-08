@@ -9,15 +9,16 @@
         default => ['label' => __('Gestopt'), 'tone' => 'muted'],
     };
     $liveHealth = collect($site->health ?? [])->firstWhere('key', 'http');
-    $liveState = match ($liveHealth['status'] ?? null) {
-        'ok' => ['label' => __('Online'), 'tone' => 'ok'],
-        'fail' => ['label' => __('Niet bereikbaar'), 'tone' => 'bad'],
+    $liveState = match (true) {
+        $site->isLocalOnly() => ['label' => __('Nog niet live'), 'tone' => 'muted'],
+        ($liveHealth['status'] ?? null) === 'ok' => ['label' => __('Online'), 'tone' => 'ok'],
+        ($liveHealth['status'] ?? null) === 'fail' => ['label' => __('Niet bereikbaar'), 'tone' => 'bad'],
         default => ['label' => __('Niet getest'), 'tone' => 'muted'],
     };
     $middle = match (true) {
         $flow === 'push' => __('Naar live…'),
         $flow === 'pull' => __('Ophalen…'),
-        ! $site->isBuilt() => __('—'),
+        ! $site->isBuilt() || $site->isLocalOnly() => __('—'),
         $pending > 0 => trans_choice(':count wijziging klaar|:count wijzigingen klaar', $pending),
         default => __('Gelijk'),
     };
@@ -75,7 +76,7 @@
         </div>
         <div @class(['flex items-center gap-1.5 text-xs text-ink/80', 'justify-end' => ! $large])>
             <span class="size-1.5 shrink-0 rounded-full {{ $dot($liveState['tone']) }}"></span>
-            <span class="truncate">{{ $large ? $site->data('live_host') : $liveState['label'] }}</span>
+            <span class="truncate">{{ $large ? ($site->data('live_host') ?: $liveState['label']) : $liveState['label'] }}</span>
         </div>
         @if ($large && isset($live))
             <div class="flex flex-wrap gap-1.5">{{ $live }}</div>

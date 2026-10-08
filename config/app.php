@@ -80,7 +80,12 @@ return [
 
     'locale' => env('APP_LOCALE', 'en'),
 
-    'fallback_locale' => env('APP_FALLBACK_LOCALE', 'en'),
+    /*
+    | GitHub-repository met de releases; het installatiescript en de pagina Aan de slag verwijzen ernaar.
+    */
+    'repository' => env('BD_DECK_REPOSITORY', 'ICTtrying/bd-deck'),
+
+    'fallback_locale' => env('APP_FALLBACK_LOCALE', 'nl'),
 
     'faker_locale' => env('APP_FAKER_LOCALE', 'en_US'),
 

@@ -40,3 +40,10 @@ it('houdt het geheim bij bewerken als het veld leeg blijft', function (): void {
     expect($credential->fresh()->label)->toBe('Nieuw')
         ->and($credential->fresh()->secret->reveal(app(Vault::class)))->toBe('oud');
 });
+
+it('opent het venster met de naam die de modal verwacht', function (): void {
+    // een positionele parameter komt in de browser als array binnen en opent dan niets
+    Livewire::test(Index::class)
+        ->call('create')
+        ->assertDispatched('open-modal', name: 'credential');
+});

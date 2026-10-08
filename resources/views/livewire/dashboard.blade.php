@@ -43,21 +43,40 @@
         </div>
     @endif
 
+    @if ($this->pendingSiteChanges->isNotEmpty())
+        <div wire:poll.2s="pollSiteChanges" class="grid gap-1.5 rounded-xl border border-live/30 bg-live-soft px-4 py-3">
+            @foreach ($this->pendingSiteChanges as $run)
+                <a href="{{ route('activity.show', $run) }}" wire:navigate wire:key="pending-{{ $run->id }}" class="flex items-center gap-2.5 text-sm text-live-ink hover:underline">
+                    <x-icon name="loader" :size="14" class="animate-spin" />
+                    <span class="font-medium">{{ $run->label }}</span>
+                    <span class="truncate opacity-80">{{ $run->site_name ?? implode(' ', array_slice($run->arguments, 1, 1)) }}</span>
+                    <span class="ml-auto text-xs opacity-70">{{ __('Log bekijken') }}</span>
+                </a>
+            @endforeach
+        </div>
+    @endif
+
     @if ($this->stats['total'] === 0)
-        <x-empty-state icon="globe" :title="__('Koppel je eerste site')" :description="__('Voeg een site toe met de SSH- of SFTP-gegevens van WPMU DEV of Hostinger. Of laat BD Deck zelf zoeken in je SSH-config, FileZilla en VS Code sftp.json.')">
-            <x-button variant="primary" icon="plus" :href="route('sites.create')" wire:navigate>{{ __('Site toevoegen') }}</x-button>
-            <x-button icon="search" wire:click="import">{{ __('Bestaande verbindingen zoeken') }}</x-button>
+        <x-empty-state icon="globe" :title="__('Koppel je eerste site')" :description="__('Voeg een site toe met de SSH- of SFTP-gegevens van WPMU DEV of Hostinger, begin met een nieuwe lokale site, of laat BD Deck zelf zoeken in je SSH-config, FileZilla en VS Code sftp.json. Nieuw met BD Deck? Loop eerst de stappen bij Aan de slag door.')">
+            <div class="flex flex-wrap gap-2">
+                <x-button variant="primary" icon="flag" :href="route('onboarding')" wire:navigate>{{ __('Aan de slag') }}</x-button>
+                <x-button icon="plus" :href="route('sites.create')" wire:navigate>{{ __('Site toevoegen') }}</x-button>
+                <x-button icon="laptop" :href="route('sites.create', ['soort' => 'lokaal'])" wire:navigate>{{ __('Nieuwe lokale site') }}</x-button>
+                <x-button icon="search" wire:click="import">{{ __('Bestaande verbindingen zoeken') }}</x-button>
+            </div>
         </x-empty-state>
     @elseif ($this->sites->isEmpty())
         <x-empty-state icon="search" :title="__('Niets gevonden')" :description="__('Geen site past bij deze zoekopdracht of dit filter.')">
             <x-button wire:click="$set('search', ''); $set('scope', 'all'); $set('provider', '')">{{ __('Filters wissen') }}</x-button>
         </x-empty-state>
     @else
-        <div class="grid gap-4 [grid-template-columns:repeat(auto-fill,minmax(20rem,1fr))]">
-            @foreach ($this->sites as $site)
-                <x-site-card :site="$site" wire:key="site-{{ $site->id }}" />
-            @endforeach
-        </div>
+        <x-panel :padding="false">
+            <ul class="divide-y divide-line">
+                @foreach ($this->sites as $site)
+                    <x-site-row :site="$site" wire:key="site-{{ $site->id }}" />
+                @endforeach
+            </ul>
+        </x-panel>
     @endif
 
     @if ($this->recentRuns->isNotEmpty())
@@ -72,4 +91,6 @@
             </ul>
         </x-panel>
     @endif
+
+    <livewire:sites.delete-dialog />
 </div>

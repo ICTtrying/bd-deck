@@ -1,5 +1,7 @@
 <?php
 
+use Illuminate\Support\Facades\File;
+use Illuminate\Support\Facades\Process;
 use Tests\Support\FakeServer;
 
 beforeEach(function (): void {
@@ -41,7 +43,7 @@ describe('sitelijst', function (): void {
     it('voegt een site handmatig toe, werkt hem bij en haalt hem weg', function (): void {
         $add = $this->server->run(['add', 'klant', 'sftp://wesley@klant.tempurl.host', '--remote', 'site/public_html/wp-content', '--mode', 'sftp', '--url', 'https://klant.nl']);
         expect($add->successful())->toBeTrue($add->errorOutput())
-            ->and($this->server->sitesFile())->toContain("klant|wesley@klant.tempurl.host||site/public_html/wp-content|sftp|wpmudev|https://klant.nl\n");
+            ->and($this->server->sitesFile())->toContain("klant|wesley@klant.tempurl.host||site/public_html/wp-content|sftp|wpmudev|https://klant.nl|wordpress\n");
 
         $this->server->run(['update', 'klant', '--provider', 'hostinger'])->throw();
         expect($this->server->sitesFile())->toContain('|sftp|hostinger|https://klant.nl');
@@ -184,4 +186,218 @@ describe('controles', function (): void {
 
         expect(file_get_contents($this->server->log))->toContain("wp --path={$this->server->remoteRoot} plugin list");
     });
+});
+
+describe('lokale sites', function (): void {
+    beforeEach(function (): void {
+        file_put_contents($this->server->home.'/.config/wpsites/sites', "nieuw||||local||\n", FILE_APPEND);
+    });
+
+    it('geeft een lokale site zonder live-gegevens door aan de app', function (): void {
+        $sites = collect(json_decode($this->server->run(['list', '--json'])->output(), true))->keyBy('name');
+
+        expect($sites['nieuw'])->toMatchArray([
+            'local_only' => true,
+            'mode' => 'local',
+            'live_host' => null,
+            'live_site_url' => null,
+        ])->and($sites['demo']['local_only'])->toBeFalse();
+    });
+
+    it('weigert live-acties en wijst naar verhuizen', function (array $arguments): void {
+        $result = $this->server->run($arguments);
+
+        expect($result->failed())->toBeTrue()
+            ->and($result->errorOutput())->toContain('lokale site zonder live-server', 'wpopen migrate nieuw');
+    })->with([
+        'push' => [['push', 'nieuw', '--yes']],
+        'ophalen' => [['pull', 'nieuw', '--code']],
+        'live cache' => [['cache', 'nieuw', '--live']],
+        'ssh' => [['ssh', 'nieuw']],
+    ]);
+
+    it('weigert een naam die al bestaat', function (): void {
+        $result = $this->server->run(['new', 'demo']);
+
+        expect($result->failed())->toBeTrue()
+            ->and($result->errorOutput())->toContain("Er bestaat al een site 'demo'");
+    });
+});
+
+describe('verhuizen', function (): void {
+    beforeEach(function (): void {
+        $this->wpContent = $this->server->buildLocalSite();
+        mkdir($this->wpContent.'/mu-plugins');
+        file_put_contents($this->wpContent.'/mu-plugins/wpopen-local.php', "<?php // lokaal\n");
+        $this->server->writeFile('uploads/2026/10/foto.jpg', 'jpg');
+
+        $this->destination = $this->server->root.'/nieuw/public_html/wp-content';
+        mkdir($this->destination.'/plugins/host-plugin', 0777, true);
+        file_put_contents(dirname($this->destination).'/wp-config.php', "<?php \$table_prefix = 'wp_';\n");
+        file_put_contents($this->destination.'/plugins/host-plugin/host.php', "<?php // van de host\n");
+    });
+
+    it('zet code, uploads en database in één keer op een nieuwe server', function (): void {
+        $result = $this->server->run([
+            'migrate', 'demo', '-p', '2222', 'nieuw@nieuw.example.test',
+            '--url', 'https://nieuw.example.test', '--remote', $this->destination, '--keep-old', '--yes',
+        ]);
+
+        expect($result->successful())->toBeTrue($result->output().$result->errorOutput())
+            ->and(file_get_contents($this->destination.'/themes/demo/functions.php'))->toContain('telefoon 020')
+            ->and(file_get_contents($this->destination.'/uploads/2026/10/foto.jpg'))->toBe('jpg')
+            ->and($this->destination.'/plugins/host-plugin/host.php')->toBeFile()
+            ->and($this->destination.'/mu-plugins/wpopen-local.php')->not->toBeFile()
+            ->and($this->destination.'/.git')->not->toBeDirectory()
+            ->and($this->server->imported())->toStartWith("SET NAMES utf8mb4;\nSET FOREIGN_KEY_CHECKS=0;\n")->toContain('lokaal_options', 'https://nieuw.example.test')
+            ->and($this->server->calls())->toContain('config set table_prefix lokaal_', '--export=.wpopen-migrate.sql')
+            ->and($this->server->sitesFile())
+            ->toContain("demo|nieuw@nieuw.example.test|-p 2222|{$this->destination}|ssh|other|https://nieuw.example.test|wordpress\n")
+            ->toContain("demo-oud|wesley@demo.test||{$this->server->remote}|ssh|other|https://demo.test|wordpress\n")
+            ->and(trim($this->server->git($this->wpContent, ['rev-parse', 'deployed'])))->toBe(trim($this->server->git($this->wpContent, ['rev-parse', 'dev'])))
+            ->and(collect($this->server->backups())->last())->toEndWith('-migrate');
+    });
+
+    it('laat de tabelprefix staan als die al overeenkomt', function (): void {
+        $this->server->run([
+            'migrate', 'demo', 'nieuw@nieuw.example.test', '--url', 'https://nieuw.example.test', '--remote', $this->destination, '--yes',
+        ], ['FAKE_REMOTE_PREFIX' => 'lokaal_'])->throw();
+
+        expect($this->server->calls())->not->toContain('config set table_prefix')
+            ->and($this->server->sitesFile())->not->toContain('demo-oud');
+    });
+
+    it('vraagt om bevestiging en het adres van de nieuwe site', function (array $extra, string $message): void {
+        $result = $this->server->run(['migrate', 'demo', 'nieuw@nieuw.example.test', '--remote', $this->destination, ...$extra]);
+
+        expect($result->failed())->toBeTrue()
+            ->and($result->errorOutput())->toContain($message)
+            ->and($this->destination.'/themes/demo')->not->toBeDirectory();
+    })->with([
+        'zonder adres' => [[], '--url https://'],
+        'zonder bevestiging' => [['--url', 'https://nieuw.example.test'], 'Bevestiging nodig'],
+    ]);
+
+    it('zet live om naar het definitieve domein', function (): void {
+        $result = $this->server->run(['domain', 'demo', 'https://klant.example.test', '--yes']);
+
+        expect($result->successful())->toBeTrue($result->errorOutput())
+            ->and($this->server->calls())->toContain('search-replace //tijdelijk.example.test //klant.example.test')
+            ->and($this->server->sitesFile())->toContain('|ssh|other|https://klant.example.test');
+    });
+});
+
+describe('sites zoeken op een server', function (): void {
+    beforeEach(function (): void {
+        $this->account = $this->server->home.'/domains';
+        foreach (['klant.nl/public_html/wp-content', 'klant.nl/public_html/old files/wp-content'] as $path) {
+            mkdir($this->account.'/'.$path, 0777, true);
+        }
+    });
+
+    it('slaat een kopie over die naar hetzelfde adres wijst en houdt de gekozen naam', function (): void {
+        $result = $this->server->run(['add', 'rijschool', '-p', '65002', 'u123@1.2.3.4']);
+
+        expect($result->successful())->toBeTrue($result->errorOutput())
+            ->and($result->output())->toContain('overgeslagen', 'old files')
+            ->and($this->server->sitesFile())
+            ->toContain("rijschool|u123@1.2.3.4|-p 65002|{$this->account}/klant.nl/public_html/wp-content|ssh|hostinger|https://tijdelijk.example.test|wordpress\n")
+            ->not->toContain('old files');
+    });
+
+    it('noemt meerdere echte sites op één account naar hun domein', function (): void {
+        mkdir($this->account.'/tweede.test/public_html/wp-content', 0777, true);
+
+        $this->server->run(['add', 'rijschool', 'u123@1.2.3.4'])->throw();
+
+        expect($this->server->sitesFile())
+            ->toContain("klant.nl|u123@1.2.3.4||{$this->account}/klant.nl/public_html/wp-content|")
+            ->toContain("tweede.test|u123@1.2.3.4||{$this->account}/tweede.test/public_html/wp-content|ssh|other|https://tweede.test|wordpress\n")
+            ->not->toContain('rijschool-');
+    });
+});
+
+describe('Laravel', function (): void {
+    it('herkent een Laravel-project en neemt het adres uit de .env over', function (): void {
+        $site = $this->server->laravelSite();
+        file_put_contents($this->server->home.'/.config/wpsites/sites', "demo|wesley@demo.test||{$this->server->remote}|ssh|other|https://demo.test\n");
+        File::deleteDirectory($this->server->remote);
+        File::deleteDirectory($site['local']);
+
+        $result = $this->server->run(['add', 'webshop', 'u1@shop.test']);
+
+        expect($result->successful())->toBeTrue($result->output().$result->errorOutput())
+            ->and($result->output())->toContain('webshop (Laravel)')
+            ->and($this->server->sitesFile())->toContain("webshop|u1@shop.test||{$site['remote']}|ssh|other|https://shop.test|laravel\n");
+
+        $json = collect(json_decode($this->server->run(['list', '--json'])->output(), true))->keyBy('name');
+        expect($json['webshop'])->toMatchArray(['type' => 'laravel', 'root' => $site['remote']]);
+    });
+
+    it('leest de database van live zonder het wachtwoord als argument mee te geven', function (): void {
+        $this->server->laravelSite();
+
+        $this->server->run(['backup', 'shop', '--live-db'])->throw();
+
+        expect($this->server->calls())->toContain('mysqldump --single-transaction', '-u shop shop (MYSQL_PWD=geheim wachtwoord)')
+            ->not->toContain('-pgeheim');
+    });
+
+    it('zet code live en doet daarna wat een Laravel-deploy nodig heeft', function (): void {
+        $site = $this->server->laravelSite();
+        file_put_contents($site['local'].'/app/Http/Controllers/HomeController.php', "<?php // nieuw\n");
+        file_put_contents($site['local'].'/composer.lock', '{"v": 2}');
+        File::ensureDirectoryExists($site['local'].'/database/migrations');
+        file_put_contents($site['local'].'/database/migrations/2026_10_08_000000_create_orders.php', "<?php // migratie\n");
+        $this->server->git($site['local'], ['add', '-A']);
+        $this->server->git($site['local'], ['commit', '-qm', 'Bestellingen']);
+
+        $preview = $this->server->run(['push', 'shop', '-n']);
+        expect($preview->output())->toContain('composer install --no-dev', 'php artisan migrate --force');
+
+        $result = $this->server->run(['push', 'shop', '--yes']);
+
+        expect($result->successful())->toBeTrue($result->output().$result->errorOutput())
+            ->and(file_get_contents($site['remote'].'/app/Http/Controllers/HomeController.php'))->toBe("<?php // nieuw\n")
+            ->and($site['remote'].'/database/migrations/2026_10_08_000000_create_orders.php')->toBeFile()
+            ->and($this->server->calls())->toContain('mysqldump', 'composer install --no-dev', 'artisan migrate --force --no-interaction', 'artisan optimize:clear')
+            ->and(collect($this->server->backups('shop'))->last())->toEndWith('-push');
+    });
+
+    it('maakt een lokale .env met DDEV-database en zonder betaalsleutels van live', function (): void {
+        $site = $this->server->laravelSite();
+        mkdir($site['local'].'/.ddev');
+
+        $this->server->run(['fix', 'shop'])->throw();
+        $env = file_get_contents($site['local'].'/.env');
+
+        expect($env)->toContain("APP_URL=https://shop.ddev.site\n", "DB_HOST=db\n", "DB_PASSWORD=db\n", "APP_ENV=local\n", 'MAIL_MAILER=log', "STRIPE_SECRET=\n")
+            ->not->toContain('sk_live_123')
+            ->not->toContain('geheim wachtwoord')
+            ->and(fileperms($site['local'].'/.env') & 0777)->toBe(0600);
+    });
+
+    it('draait artisan op live met losse argumenten', function (): void {
+        $this->server->laravelSite();
+
+        $this->server->run(['artisan', 'shop', '--live', '--', 'route:list', '--path=admin users'])->throw();
+
+        expect($this->server->calls())->toContain('artisan route:list --path=admin users --no-interaction');
+    });
+
+    it('weigert WordPress-acties bij een Laravel-site', function (): void {
+        $this->server->laravelSite();
+
+        $result = $this->server->run(['wp', 'shop', '--live', 'plugin', 'list']);
+
+        expect($result->failed())->toBeTrue()
+            ->and($result->errorOutput())->toContain('Laravel-site');
+    });
+});
+
+it('toont de hulp van het installatiescript zonder iets te installeren', function (): void {
+    $result = Process::run(['bash', base_path('bin/install-mint'), '--help']);
+
+    expect($result->successful())->toBeTrue()
+        ->and($result->output())->toContain('curl -fsSL https://raw.githubusercontent.com/ICTtrying/bd-deck/main/bin/install-mint | bash');
 });

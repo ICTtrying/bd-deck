@@ -3,6 +3,7 @@
 namespace App\Livewire;
 
 use App\Enums\SiteProvider;
+use App\Enums\WpOpenAction;
 use App\Livewire\Concerns\InteractsWithSites;
 use App\Models\CommandRun;
 use App\Models\Site;
@@ -58,9 +59,10 @@ class Dashboard extends Component
     }
 
     #[On('sites-changed')]
+    #[On('run-started')]
     public function sitesChanged(): void
     {
-        unset($this->sites, $this->stats);
+        unset($this->sites, $this->stats, $this->pendingSiteChanges);
     }
 
     /**
@@ -97,6 +99,26 @@ class Dashboard extends Component
             'running' => $all->filter->isRunning()->count(),
             'pending' => $all->filter(fn (Site $site): bool => $site->pendingChanges() > 0)->count(),
         ];
+    }
+
+    /**
+     * Toevoegen, maken en verwijderen die nog lopen: de lijst ververst zichzelf tot ze klaar zijn.
+     *
+     * @return Collection<int, CommandRun>
+     */
+    #[Computed]
+    public function pendingSiteChanges(): Collection
+    {
+        return CommandRun::query()
+            ->active()
+            ->whereIn('action', [WpOpenAction::AddSite, WpOpenAction::NewSite, WpOpenAction::RemoveSite, WpOpenAction::Import])
+            ->latestFirst()
+            ->get();
+    }
+
+    public function pollSiteChanges(): void
+    {
+        unset($this->sites, $this->stats, $this->pendingSiteChanges, $this->recentRuns);
     }
 
     /**

@@ -4,6 +4,7 @@ namespace App\Services\WpOpen;
 
 use App\Exceptions\WpOpenException;
 use App\Services\AppSettings;
+use App\Support\HostEnvironment;
 use Illuminate\Contracts\Process\ProcessResult;
 use Illuminate\Process\PendingProcess;
 use Illuminate\Support\Facades\Process;
@@ -28,16 +29,19 @@ final class WpOpen
 
     /**
      * @param  array<string, string>  $extra
-     * @return array<string, string>
+     * @return array<string, string|false>
      */
     public function environment(array $extra = []): array
     {
         $home = $this->settings->homeDirectory();
+        $host = HostEnvironment::overrides();
+        $inheritedPath = is_string($host['PATH'] ?? null) ? $host['PATH'] : (string) getenv('PATH');
         $path = array_unique(array_filter([
-            $home.'/.local/bin', '/usr/local/bin', '/usr/bin', '/bin', ...explode(':', (string) getenv('PATH')),
+            $home.'/.local/bin', '/usr/local/bin', '/usr/bin', '/bin', ...explode(':', $inheritedPath),
         ]));
 
         return [
+            ...$host,
             'HOME' => $home,
             'PATH' => implode(':', $path),
             'WP_SITES_DIR' => $this->settings->sitesDirectory(),

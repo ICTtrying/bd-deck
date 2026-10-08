@@ -1,5 +1,5 @@
 <div class="grid gap-6">
-    <x-page-header :title="__('SSH-sleutels')" :description="__('Je publieke sleutels uit ~/.ssh. Plak de standaardsleutel in de WPMU DEV Hub of het SSH-scherm van Hostinger om zonder wachtwoord te verbinden. Private sleutels worden nooit getoond.')">
+    <x-page-header :title="__('SSH-sleutels')" :description="__('De publieke sleutels uit ~/.ssh op deze computer. Iemand anders met BD Deck ziet alleen zijn eigen sleutels; er zit niets van jou in de app. Publieke sleutels mag je delen: plak de standaardsleutel in de WPMU DEV Hub of bij Hostinger om zonder wachtwoord te verbinden. Private sleutels worden nooit gelezen of getoond.')">
         <x-slot:actions>
             <x-button variant="primary" icon="plus" x-on:click="$dispatch('open-modal', 'generate-key')">{{ __('Nieuwe sleutel') }}</x-button>
         </x-slot:actions>

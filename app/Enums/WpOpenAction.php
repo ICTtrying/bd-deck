@@ -8,6 +8,7 @@ enum WpOpenAction: string
     case Rebuild = 'rebuild';
     case PullCode = 'pull-code';
     case PullDatabase = 'pull-database';
+    case PullUploads = 'pull-uploads';
     case Push = 'push';
     case PushPreview = 'push-preview';
     case Reset = 'reset';
@@ -21,7 +22,11 @@ enum WpOpenAction: string
     case CacheLocal = 'cache-local';
     case CacheLive = 'cache-live';
     case WpCli = 'wp-cli';
+    case Artisan = 'artisan';
     case AddSite = 'add-site';
+    case NewSite = 'new-site';
+    case Migrate = 'migrate';
+    case ChangeDomain = 'change-domain';
     case RemoveSite = 'remove-site';
     case Import = 'import';
     case InstallScript = 'install-script';
@@ -34,6 +39,7 @@ enum WpOpenAction: string
             self::Rebuild => __('Opnieuw migreren'),
             self::PullCode => __('Code ophalen van live'),
             self::PullDatabase => __('Database ophalen van live'),
+            self::PullUploads => __('Uploads ophalen van live'),
             self::Push => __('Naar live zetten'),
             self::PushPreview => __('Proefrun naar live'),
             self::Reset => __('Terugzetten naar main'),
@@ -47,7 +53,11 @@ enum WpOpenAction: string
             self::CacheLocal => __('Lokale cache legen'),
             self::CacheLive => __('Live cache legen'),
             self::WpCli => __('WP-CLI-commando'),
+            self::Artisan => __('Artisan-commando'),
             self::AddSite => __('Site toevoegen'),
+            self::NewSite => __('Lokale site maken'),
+            self::Migrate => __('Verhuizen naar nieuwe server'),
+            self::ChangeDomain => __('Domein omzetten'),
             self::RemoveSite => __('Site verwijderen'),
             self::Import => __('Sites importeren'),
             self::InstallScript => __('wpopen installeren'),
@@ -59,7 +69,9 @@ enum WpOpenAction: string
     {
         return match ($this) {
             self::Build, self::Rebuild => 'hammer',
-            self::PullCode, self::PullDatabase => 'download',
+            self::PullCode, self::PullDatabase, self::PullUploads => 'download',
+            self::Migrate => 'rocket',
+            self::ChangeDomain => 'globe',
             self::Push, self::PushPreview => 'upload',
             self::Reset, self::Restore => 'rotate-ccw',
             self::Fix => 'wrench',
@@ -69,8 +81,8 @@ enum WpOpenAction: string
             self::Test => 'activity',
             self::Updates => 'refresh',
             self::CacheLocal, self::CacheLive => 'zap',
-            self::WpCli => 'terminal',
-            self::AddSite, self::Import => 'plus',
+            self::WpCli, self::Artisan => 'terminal',
+            self::AddSite, self::Import, self::NewSite => 'plus',
             self::RemoveSite => 'trash',
             self::InstallScript, self::Setup => 'settings',
         };
@@ -81,7 +93,7 @@ enum WpOpenAction: string
      */
     public function locksSite(): bool
     {
-        return ! in_array($this, [self::Test, self::Updates, self::PushPreview, self::CacheLive, self::CacheLocal, self::WpCli], true);
+        return ! in_array($this, [self::Test, self::Updates, self::PushPreview, self::CacheLive, self::CacheLocal, self::WpCli, self::Artisan], true);
     }
 
     /**
@@ -90,6 +102,14 @@ enum WpOpenAction: string
     public function queue(): string
     {
         return $this->locksSite() ? 'default' : 'quick';
+    }
+
+    /**
+     * Na deze acties kan de sitelijst zelf veranderd zijn (nieuwe, hernoemde of verwijderde sites).
+     */
+    public function changesSiteList(): bool
+    {
+        return in_array($this, [self::AddSite, self::Import, self::InstallScript, self::NewSite, self::Migrate, self::RemoveSite], true);
     }
 
     /**

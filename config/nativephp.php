@@ -97,6 +97,13 @@ return [
         'tests',
         '.claude',
         '.agents',
+        // ontwikkeldocumentatie en -instellingen horen niet in een gedeelde app
+        'AGENTS.md',
+        'CLAUDE.md',
+        'README.md',
+        'boost.json',
+        'phpunit.xml',
+        'storage/app/installation.key',
     ],
 
     /**
@@ -108,26 +115,29 @@ return [
          * updater will only work when your application is bundled
          * for production.
          */
-        'enabled' => env('NATIVEPHP_UPDATER_ENABLED', false),
+        // releases staan publiek op GitHub; de app haalt nieuwe versies daar zelf op
+        'enabled' => env('NATIVEPHP_UPDATER_ENABLED', true),
 
         /**
          * The updater provider to use.
          * Supported: "github", "s3", "spaces"
          * Note: The "s3" provider is compatible with S3-compatible services like Cloudflare R2.
          */
-        'default' => env('NATIVEPHP_UPDATER_PROVIDER', 'spaces'),
+        'default' => env('NATIVEPHP_UPDATER_PROVIDER', 'github'),
 
         'providers' => [
             'github' => [
                 'driver' => 'github',
-                'repo' => env('GITHUB_REPO'),
-                'owner' => env('GITHUB_OWNER'),
+                'repo' => env('GITHUB_REPO', 'bd-deck'),
+                'owner' => env('GITHUB_OWNER', 'ICTtrying'),
+                // alleen bij publiceren nodig, en dan als omgevingsvariabele: GITHUB_TOKEN=$(gh auth token) bin/release
                 'token' => env('GITHUB_TOKEN'),
                 'vPrefixedTagName' => env('GITHUB_V_PREFIXED_TAG_NAME', true),
                 'private' => env('GITHUB_PRIVATE', false),
                 'autoupdate_token' => env('GITHUB_AUTOUPDATE_TOKEN'), // Read-only token used by the updater for private repos
                 'channel' => env('GITHUB_CHANNEL', 'latest'),
-                'releaseType' => env('GITHUB_RELEASE_TYPE', 'draft'),
+                // direct een echte release: het installatiescript en de updater kijken naar de nieuwste
+                'releaseType' => env('GITHUB_RELEASE_TYPE', 'release'),
             ],
 
             's3' => [

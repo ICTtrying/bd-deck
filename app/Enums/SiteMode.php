@@ -6,12 +6,24 @@ enum SiteMode: string
 {
     case Ssh = 'ssh';
     case Sftp = 'sftp';
+    case Local = 'local';
+
+    /**
+     * Toegangsvormen die je bij een server kunt kiezen; Local betekent juist: geen server.
+     *
+     * @return list<self>
+     */
+    public static function remote(): array
+    {
+        return [self::Ssh, self::Sftp];
+    }
 
     public function label(): string
     {
         return match ($this) {
             self::Ssh => 'SSH',
             self::Sftp => __('Alleen SFTP'),
+            self::Local => __('Alleen lokaal'),
         };
     }
 

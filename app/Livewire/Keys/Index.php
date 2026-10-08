@@ -62,7 +62,7 @@ class Index extends Component
         $this->generated = $key['name'];
         $this->reset('passphrase');
         unset($this->all);
-        $this->dispatch('close-modal', 'generate-key');
+        $this->dispatch('close-modal', name: 'generate-key');
         $this->dispatch('toast', title: __('Sleutel aangemaakt'), message: $key['name'].'.pub', tone: 'success');
     }
 

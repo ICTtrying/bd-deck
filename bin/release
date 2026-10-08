@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Nieuwe versie van BD Deck publiceren als GitHub-release. Het installatiescript en de updater in de app halen hem daar op.
+#
+#   1. verhoog NATIVEPHP_APP_VERSION in .env (en WPO_VERSION in bin/wpopen als het script veranderd is)
+#   2. commit alles
+#   3. bin/release
+set -euo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.."
+die() { echo "✗ $*" >&2; exit 1; }
+step() { echo "→ $*"; }
+
+version=$(grep -m1 '^NATIVEPHP_APP_VERSION=' .env | cut -d= -f2)
+[ -n "$version" ] || die "NATIVEPHP_APP_VERSION ontbreekt in .env."
+[ -z "$(git status --porcelain)" ] || die "Commit eerst je wijzigingen."
+gh auth status >/dev/null 2>&1 || die "Log eerst in bij GitHub: gh auth login"
+git fetch -q --tags origin
+! git rev-parse -q --verify "refs/tags/v$version" >/dev/null || die "Versie $version bestaat al. Verhoog NATIVEPHP_APP_VERSION in .env."
+
+step "Tests draaien…"
+php artisan test --compact >/dev/null || die "Tests falen; los dat eerst op (php artisan test --compact)."
+
+step "Code naar GitHub…"
+git push -q origin HEAD
+
+step "Bouwen en publiceren als v$version…"
+# het token alleen als omgevingsvariabele: het komt nooit in .env of in de app
+GITHUB_TOKEN="$(gh auth token)" php artisan native:publish linux x64 --no-interaction
+
+git fetch -q --tags origin
+bin/install-desktop
+echo "✓ BD Deck $version staat op https://github.com/$(gh repo view --json nameWithOwner -q .nameWithOwner)/releases"

@@ -37,11 +37,15 @@ class CommandPalette extends Component
 
         // snelacties alleen voor de beste treffer: dat is bijna altijd de site die je zoekt
         if ($this->query !== '' && ($first = $sites->first())) {
-            if ($first->isBuilt()) {
+            if ($first->isBuilt() && ! $first->isLaravel()) {
                 $items[] = ['type' => 'launch', 'label' => __('WP-admin lokaal'), 'hint' => $first->name, 'icon' => 'wordpress', 'site' => $first->id, 'target' => 'local-admin'];
+            }
+            if ($first->isBuilt()) {
                 $items[] = ['type' => 'launch', 'label' => __('Openen in editor'), 'hint' => $first->name, 'icon' => 'code', 'site' => $first->id, 'target' => 'editor'];
             }
-            $items[] = ['type' => 'launch', 'label' => __('WP-admin live'), 'hint' => $first->name, 'icon' => 'external', 'site' => $first->id, 'target' => 'live-admin'];
+            if (! $first->isLaravel()) {
+                $items[] = ['type' => 'launch', 'label' => __('WP-admin live'), 'hint' => $first->name, 'icon' => 'external', 'site' => $first->id, 'target' => 'live-admin'];
+            }
             $items[] = ['type' => 'launch', 'label' => __('Live website openen'), 'hint' => $first->name, 'icon' => 'globe', 'site' => $first->id, 'target' => 'live-site'];
             $items[] = ['type' => 'launch', 'label' => __('SSH-sessie'), 'hint' => $first->name, 'icon' => 'server', 'site' => $first->id, 'target' => 'ssh'];
         }

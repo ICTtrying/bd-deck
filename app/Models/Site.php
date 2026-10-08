@@ -4,6 +4,7 @@ namespace App\Models;
 
 use App\Enums\SiteMode;
 use App\Enums\SiteProvider;
+use App\Enums\SiteType;
 use Database\Factories\SiteFactory;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Attributes\Scope;
@@ -117,6 +118,30 @@ class Site extends Model
         return Attribute::get(fn (): SiteMode => SiteMode::tryFrom((string) $this->data('mode')) ?? SiteMode::Ssh);
     }
 
+    /**
+     * @return Attribute<SiteType, never>
+     */
+    protected function type(): Attribute
+    {
+        return Attribute::get(fn (): SiteType => SiteType::tryFrom((string) $this->data('type')) ?? SiteType::WordPress);
+    }
+
+    /**
+     * Laravel-sites beheer je in BD Deck alleen op live: SSH, test, cache en artisan.
+     */
+    public function isLaravel(): bool
+    {
+        return $this->type === SiteType::Laravel;
+    }
+
+    /**
+     * Gemaakt met "Nieuwe lokale site": er is (nog) geen live-server.
+     */
+    public function isLocalOnly(): bool
+    {
+        return (bool) $this->data('local_only', false) || $this->mode === SiteMode::Local;
+    }
+
     public function isBuilt(): bool
     {
         return (bool) $this->data('built', false);
@@ -129,7 +154,7 @@ class Site extends Model
 
     public function liveUrl(string $path = ''): string
     {
-        return rtrim((string) $this->data('live_site_url', 'https://'.$this->data('host')), '/').$path;
+        return rtrim((string) ($this->data('live_site_url') ?? 'https://'.$this->data('host')), '/').$path;
     }
 
     public function localUrl(string $path = ''): string

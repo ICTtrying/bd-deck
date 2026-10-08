@@ -19,6 +19,7 @@ it('toont uit de proefrun welke bestanden live gaan', function (): void {
 
     Livewire::test(PushPanel::class, ['site' => $site])
         ->call('open')
+        ->assertDispatched('open-modal', name: 'push')
         ->assertSet('files', ['themes/demo/functions.php', 'themes/demo/style.css'])
         ->assertSee('themes/demo/style.css');
 });

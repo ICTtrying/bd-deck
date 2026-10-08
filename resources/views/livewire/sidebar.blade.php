@@ -5,6 +5,7 @@
         ['route' => 'keys.index', 'match' => ['keys.*'], 'icon' => 'key', 'label' => __('SSH-sleutels')],
         ['route' => 'vault.index', 'match' => ['vault.*'], 'icon' => 'shield', 'label' => __('Kluis')],
         ['route' => 'settings.index', 'match' => ['settings.*'], 'icon' => 'settings', 'label' => __('Instellingen')],
+        ['route' => 'onboarding', 'match' => ['onboarding'], 'icon' => 'flag', 'label' => __('Aan de slag')],
     ];
 @endphp
 

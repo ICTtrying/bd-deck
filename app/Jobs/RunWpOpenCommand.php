@@ -101,9 +101,12 @@ class RunWpOpenCommand implements ShouldBeEncrypted, ShouldQueue
                 $run->appendOutput($buffer);
             }
 
+            // eerst de sitelijst bijwerken, dan pas klaar melden: anders ververst het dashboard te vroeg
+            $this->syncSiteList($run, $registry);
             $run->finish((int) $result->exitCode(), $cancelled);
         } catch (Throwable $exception) {
             $run->appendOutput(($buffer !== '' ? $buffer : '')."\n✗ ".$exception->getMessage()."\n");
+            $this->syncSiteList($run, $registry);
             $run->finish(1);
         }
 
@@ -111,15 +114,18 @@ class RunWpOpenCommand implements ShouldBeEncrypted, ShouldQueue
         $notifier->runFinished($run);
     }
 
+    private function syncSiteList(CommandRun $run, SiteRegistry $registry): void
+    {
+        if ($run->action->changesSiteList()) {
+            rescue(fn (): int => $registry->sync(), report: false);
+        }
+    }
+
     private function afterRun(CommandRun $run, SiteRegistry $registry): void
     {
-        $site = $run->site;
+        $site = $run->action->changesSiteList() ? $run->site?->fresh() : $run->site;
 
         if ($site === null) {
-            if (in_array($run->action, [WpOpenAction::AddSite, WpOpenAction::Import, WpOpenAction::InstallScript], true)) {
-                rescue(fn (): int => $registry->sync(), report: false);
-            }
-
             return;
         }
 

@@ -34,6 +34,18 @@ class Console extends Component
      */
     public function suggestions(): array
     {
+        if ($this->site->isLaravel()) {
+            return [
+                'about' => __('Overzicht'),
+                'migrate:status' => __('Migraties'),
+                'route:list --except-vendor' => __('Routes'),
+                'schedule:list' => __('Geplande taken'),
+                'queue:failed' => __('Mislukte jobs'),
+                'optimize:clear' => __('Caches legen'),
+                'db:show' => __('Database'),
+            ];
+        }
+
         return [
             'plugin list' => __('Plugins'),
             'theme list' => __('Thema\'s'),
@@ -51,7 +63,10 @@ class Console extends Component
         $this->validate(['command' => ['required', 'string', 'max:1000']]);
 
         $this->attempt(function () use ($runner): void {
-            $this->queueCommand($runner, WpOpenCommand::wpCli($this->site, self::tokenize($this->command), $this->live));
+            $arguments = self::tokenize($this->command);
+            $this->queueCommand($runner, $this->site->isLaravel()
+                ? WpOpenCommand::artisan($this->site, $arguments, $this->live)
+                : WpOpenCommand::wpCli($this->site, $arguments, $this->live));
             $this->reset('command');
             unset($this->history);
         });
@@ -85,7 +100,7 @@ class Console extends Component
     #[Computed]
     public function history(): Collection
     {
-        return $this->site->runs()->where('action', WpOpenAction::WpCli)->latestFirst()->limit(5)->get();
+        return $this->site->runs()->whereIn('action', [WpOpenAction::WpCli, WpOpenAction::Artisan])->latestFirst()->limit(5)->get();
     }
 
     #[On('run-started')]

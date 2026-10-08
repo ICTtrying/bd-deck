@@ -6,18 +6,20 @@
 #   wpopen version                            versie van dit script
 #
 #   wpopen import                             zoekt zelf SSH/SFTP-verbindingen en voegt alle WordPress-sites toe
-#   wpopen add <naam> ssh -p 65002 u@host     1 site toevoegen (zoekt zelf wp-content)
+#   wpopen add <naam> ssh -p 65002 u@host     1 site toevoegen (zoekt zelf WordPress of Laravel)
 #   wpopen add sftp://u@host[:poort]          idem, naam uit de host
 #     [--remote pad] [--mode ssh|sftp] [--provider wpmudev|hostinger|other] [--url https://…]
 #   wpopen update <naam> [--name|--target|--opts|--remote|--mode|--provider|--url waarde]
 #   wpopen remove <naam> [--purge]            uit de lijst halen (--purge: ook lokale site weggooien)
 #   wpopen list [--json] | info <naam> [--json]
+#   wpopen new <naam> [--title "Titel"]        nieuwe lokale WordPress-site, nog zonder live-server
 #
 #   wpopen <naam> [--pull] [--dbpull] [--db bestand] [--live] [--no-launch]
 #                                             site lokaal openen (bouwt hem de 1e keer zelf)
 #   wpopen build <naam>                       bouwen/bijwerken zonder VS Code en browser te openen
 #   wpopen start|stop <naam>                  lokale DDEV-omgeving starten/stoppen
-#   wpopen pull <naam> [--code] [--db]        code en/of database van live ophalen (lokale db eerst bewaard)
+#   wpopen pull <naam> [--code] [--db] [--uploads]
+#                                             code, database en/of alle uploads van live ophalen (lokale db eerst bewaard)
 #   wpopen reset <naam> [--pull]              dev terugzetten naar main (huidige werk in backup-branch)
 #   wpopen rebuild <naam>                     lokale site volledig opnieuw migreren vanaf live
 #   wpopen fix <naam> [--plugins]             bestaande site repareren (prefix, URL's, uploads, constanten, plugins)
@@ -28,20 +30,28 @@
 #   wpopen backups <naam> [--json]
 #   wpopen restore <naam> <back-up> [--local-db] [--live-db] [--live-files]
 #
+#   wpopen migrate <naam> [ssh-opties] user@host --url https://nieuw [--remote pad] [--mode ssh|sftp]
+#     [--provider p] [--keep-old] [--no-uploads]
+#                                             lokale site in één keer naar een nieuwe (lege) WordPress-installatie
+#   wpopen domain <naam> https://klant.nl      live omzetten naar het definitieve domein (na DNS, alleen SSH)
+#
 #   wpopen test <naam> [--json]               verbinding, WP-CLI en HTTP controleren
 #   wpopen updates <naam> [--local] [--json]  beschikbare updates (standaard live)
 #   wpopen cache <naam> [--live]              cache legen (lokaal of live)
 #   wpopen login <naam> [--live] [--user u]   eenmalige inloglink voor wp-admin
 #   wpopen wp <naam> [--live] <args…>         WP-CLI lokaal of op live
 #   wpopen ssh <naam>                         SSH- (of SFTP-)sessie naar live
+#   wpopen artisan <naam> <args…>             php artisan op live (Laravel-sites)
 #
 #   Algemeen: --yes slaat bevestigingsvragen over (de app vraagt zelf om bevestiging).
 set -euo pipefail
-WPO_VERSION="2.0.0"
+WPO_VERSION="2.2.0"
 DB="${WPO_DB:-$HOME/.config/wpsites/sites}"; mkdir -p "$(dirname "$DB")"; touch "$DB"
 BASE="${WP_SITES_DIR:-$HOME/wp-sites}"
 BACKUPS="${WPO_BACKUP_DIR:-$BASE/.wpopen-backups}"
 KEY="${WPO_SSH_KEY:-$HOME/.ssh/id_ed25519}"
+# mappen op de server waarin naar WordPress gezocht wordt (shell-tekst, wordt op de server uitgevoerd)
+SEARCH_ROOTS="${WPO_SEARCH_ROOTS:-\"\$HOME\" /var/www /srv}"
 EXC=(--exclude=uploads --exclude=cache --exclude=upgrade --exclude='/*backup*' --exclude=updraft
      --exclude=ai1wm-backups --exclude=wflogs --exclude=debug.log
      --exclude=object-cache.php --exclude=advanced-cache.php)
@@ -68,6 +78,29 @@ gitc() {
   else git -c user.name="${GIT_AUTHOR_NAME:-wpopen}" -c user.email="${GIT_AUTHOR_EMAIL:-wpopen@localhost}" "$@"; fi
 }
 
+# DDEV wil een onbekende *.ddev.site-naam met sudo in /etc/hosts zetten; zonder terminal kan dat niet.
+# Daarom vooraf zelf: grafische wachtwoordvraag (pkexec) of, in een terminal, sudo.
+ensure_hostname() {
+  local h="${1:-$SLUG.ddev.site}" helper
+  [ -z "${WPO_SKIP_HOSTS:-}" ] || return 0
+  timeout 3 getent hosts "$h" 2>/dev/null | grep -qE '^(127\.|::1)' && return 0
+  helper=$(command -v ddev-hostname || true)
+  [ -n "$helper" ] || return 0   # oudere DDEV: die regelt het zelf
+  step "$h wordt aan /etc/hosts toegevoegd (je netwerk lost *.ddev.site niet op)…"
+  if [ -t 0 ] && command -v sudo >/dev/null && sudo "$helper" "$h" 127.0.0.1 >/dev/null; then ok "$h toegevoegd"; return 0; fi
+  if command -v pkexec >/dev/null && pkexec "$helper" "$h" 127.0.0.1 >/dev/null 2>&1; then ok "$h toegevoegd"; return 0; fi
+  die "Kon $h niet aan /etc/hosts toevoegen. Draai één keer in een terminal: sudo $helper $h 127.0.0.1"
+}
+ddev_up() { ensure_hostname; ddev start "$@"; }
+ddev_restart() { ensure_hostname; ddev restart "$@"; }
+
+# sites zonder live-server (wpopen new) kunnen niets met live
+is_local() { [ "$MODE" = local ]; }
+need_live() {
+  is_local || return 0
+  die "$NAME is een lokale site zonder live-server. Zet hem live met: wpopen migrate $NAME user@host --url https://…"
+}
+
 provider_of() {  # target opts
   case "$1" in
     *tempurl.host*|*wpmudev*|*wpmu.host*) echo wpmudev;;
@@ -76,7 +109,8 @@ provider_of() {  # target opts
   esac
 }
 
-# ───────────── sitelijst: naam|target|opts|remote wp-content|modus|provider|live-url ─────────────
+# ───────────── sitelijst: naam|target|opts|remote|modus|provider|live-url|type ─────────────
+# remote is bij WordPress de map wp-content, bij Laravel de projectmap (met artisan)
 migrate_db() {  # oude regels (4-5 velden) aanvullen met modus en provider
   awk -F'|' 'NF && NF<7{x=1} END{exit !x}' "$DB" || return 0
   local tmp n t o r m p u; tmp=$(mktemp "$DB.XXXX")
@@ -100,15 +134,26 @@ valid_field() { [[ "$1" != *"|"* && "$1" != *$'\n'* ]] || die "'|' en enters zij
 get() {
   local l; l=$(awk -F'|' -v n="$1" '$1==n{print; exit}' "$DB")
   [ -n "$l" ] || die "Site '$1' onbekend. Zie: wpopen list  (of: wpopen import)"
-  IFS='|' read -r NAME TARGET OPTS REMOTE MODE PROVIDER LIVEURL <<<"$l"
+  IFS='|' read -r NAME TARGET OPTS REMOTE MODE PROVIDER LIVEURL TYPE <<<"$l"
+  TYPE="${TYPE:-wordpress}"
+  if [ -z "$TARGET" ]; then MODE=local; fi
   MODE="${MODE:-ssh}"; PROVIDER="${PROVIDER:-$(provider_of "$TARGET" "$OPTS")}"
   SLUG=$(slug "$NAME"); PROJ="$BASE/$SLUG"; LWPC="$PROJ/wp-content"
-  ROOT="$(dirname "$REMOTE")"; SSHE="ssh $OPTS"
+  if [ "$TYPE" = laravel ]; then LWPC="$PROJ"; fi
+  if [ "$TYPE" = laravel ]; then ROOT="$REMOTE"; else ROOT="$(dirname "$REMOTE")"; fi
+  SSHE="ssh $OPTS"
   LOCALURL="https://$SLUG.ddev.site"
   # host waarop live draait: ingestelde URL > host uit de live database > SSH-host
   ORIGHOST=""; [ -f "$PROJ/.wpopen-livehost" ] && ORIGHOST=$(cat "$PROJ/.wpopen-livehost")
   if [ -n "$LIVEURL" ]; then LIVEHOST="${LIVEURL#*//}"; LIVEHOST="${LIVEHOST%%/*}"
   else LIVEHOST="${ORIGHOST:-${TARGET#*@}}"; fi
+  is_local && LIVEHOST=""
+  return 0
+}
+is_laravel() { [ "$TYPE" = laravel ]; }
+need_wordpress() {
+  is_laravel || return 0
+  die "$NAME is een Laravel-site. Dit kan alleen bij WordPress-sites; voor Laravel: SSH, verbindingstest, cache en artisan."
 }
 built() { [ -f "$PROJ/.wpopen-ready" ] || die "$NAME is nog niet lokaal gebouwd. Draai eerst: wpopen build $NAME"; }
 
@@ -152,7 +197,7 @@ PHP
     printf '%s\n' "$body"
     echo 'echo "\n-- wpopen-done\n";'
   } | sed -e "s/__TOKEN__/$tok/" -e "s/__EXPIRES__/$(( $(date +%s) + 900 ))/" > "$tmp/$name"
-  base="${WPO_BASE:-https://${TARGET#*@}}"
+  base="${WPO_BASE:-https://${LIVEHOST:-${TARGET#*@}}}"
   lf "put -O '$ROOT' '$tmp/$name'" >/dev/null 2>&1 || { rm -rf "$tmp"; echo "✗ Hulpbestand uploaden mislukt" >&2; return 1; }
   code=$(curl -sS -L --post301 --post302 --post303 --compressed --max-time 3600 -d "t=$tok" -o "$tmp/out" -w '%{http_code}' "$base/$name" 2>/dev/null || true)
   lf "rm -f '$ROOT/$name'" >/dev/null 2>&1 || true
@@ -239,6 +284,7 @@ cmd_info() {
   [ $# -ge 1 ] || die "Gebruik: wpopen info <naam> [--json]"
   get "$1"
   if [ "${2:-}" = --json ]; then sites_json "$NAME"; return; fi
+  if is_local; then echo "$NAME  (lokaal, nog geen live-server)"; echo "  lokaal:  $LOCALURL  →  $PROJ"; return; fi
   echo "$NAME  ($PROVIDER, $MODE)"
   echo "  server:  $TARGET ${OPTS:+($OPTS)}"
   echo "  remote:  $REMOTE"
@@ -281,23 +327,27 @@ for line in open(dbf, errors="ignore"):
     f = line.rstrip("\n").split("|")
     if not f or not f[0]:
         continue
-    f += [""] * (7 - len(f))
-    name, target, opts, remote, mode, provider, liveurl = f[:7]
+    f += [""] * (8 - len(f))
+    name, target, opts, remote, mode, provider, liveurl, kind = f[:8]
+    kind = kind or "wordpress"
     if only and name != only:
         continue
     s = slug(name)
     proj = os.path.join(base, s)
-    wpc = os.path.join(proj, "wp-content")
+    wpc = proj if kind == "laravel" else os.path.join(proj, "wp-content")
     user, _, host = target.rpartition("@")
     port = re.search(r"-p\s+(\d+)", opts)
     orig = read(os.path.join(proj, ".wpopen-livehost"))
-    livehost = re.sub(r"^https?://", "", liveurl).split("/")[0] if liveurl else (orig or host)
+    local_only = not target
+    livehost = "" if local_only else (re.sub(r"^https?://", "", liveurl).split("/")[0] if liveurl else (orig or host))
     d = ddev.get(s, {})
     site = {
         "name": name, "slug": s, "target": target, "user": user, "host": host,
         "port": int(port.group(1)) if port else 22, "opts": opts, "remote": remote,
-        "root": os.path.dirname(remote), "mode": mode or "ssh", "provider": provider or "other",
-        "live_url": liveurl or None, "live_host": livehost, "live_site_url": "https://" + livehost,
+        "root": remote if kind == "laravel" else os.path.dirname(remote), "mode": "local" if local_only else (mode or "ssh"), "provider": provider or "other",
+        "type": kind,
+        "local_only": local_only,
+        "live_url": liveurl or None, "live_host": livehost or None, "live_site_url": ("https://" + livehost) if livehost else None,
         "local_url": "https://%s.ddev.site" % s, "project_dir": proj, "wp_content_dir": wpc,
         "built": os.path.exists(os.path.join(proj, ".wpopen-ready")),
         "ddev_status": d.get("status") or ("absent" if not os.path.isdir(os.path.join(proj, ".ddev")) else "stopped"),
@@ -363,28 +413,59 @@ ensure_key() {  # target opts [pw] — wachtwoord mag ook via WPO_PASS (de app g
   # shellcheck disable=SC2086
   ssh-copy-id -i "$KEY.pub" -o StrictHostKeyChecking=accept-new $opts "$target"
 }
-suffix() {
-  local p b; p="$(dirname "$1")"; b="$(basename "$p")"
-  case "$b" in public_html|www|htdocs|html|httpdocs) b="$(basename "$(dirname "$p")")";; esac
+suffix() {  # pad naar wp-content of Laravel-projectmap → korte naam (domein of map)
+  local p b; p="$1"; [ "$(basename "$p")" = wp-content ] && p="$(dirname "$p")"
+  b="$(basename "$p")"
+  case "$b" in public_html|www|htdocs|html|httpdocs|current) b="$(basename "$(dirname "$p")")";; esac
+  b=$(printf '%s' "$b" | tr -cs 'A-Za-z0-9._-' '-' | sed 's/^-*//; s/-*$//')
   case "$b" in .|/|"") b="site";; esac
   echo "$b"
 }
-add_line() {  # naam target opts remote modus
-  local n="$1"
+remote_home() {  # target opts remote type → live-adres uit WordPress of APP_URL uit .env (alleen SSH)
+  local url
+  if [ "$4" = laravel ]; then
+    # shellcheck disable=SC2086
+    url=$(ssh -n $2 -o BatchMode=yes -o ConnectTimeout=10 "$1" "grep -m1 '^APP_URL=' $(printf %q "$3/.env")" 2>/dev/null | cut -d= -f2- | tr -d "\"'\r" || true)
+  else
+    # shellcheck disable=SC2086
+    url=$(ssh -n $2 -o BatchMode=yes -o ConnectTimeout=10 "$1" "wp option get home --path=$(printf %q "$(dirname "$3")") --skip-plugins --skip-themes" 2>/dev/null | tr -d '\r' | tail -1 || true)
+  fi
+  [[ "$url" =~ ^https?://[A-Za-z0-9.-]+(/[^|[:space:]]*)?$ ]] && echo "${url%/}"
+  return 0
+}
+add_line() {  # naam target opts remote modus [live-url] [type]
+  local n="$1" url="${6:-}" kind="${7:-wordpress}"
   if db_has "$n"; then echo "  = $n staat er al in"; return 0; fi
-  db_write "$n" "$n|$2|$3|$4|$5|$(provider_of "$2" "$3")|"
-  REGISTERED+=("$n"); echo "  ✓ $n$([ "$5" = sftp ] && echo ' (SFTP-modus)')"
+  if [ "$5" = ssh ] && [ -z "$url" ]; then url=$(remote_home "$2" "$3" "$4" "$kind"); fi
+  db_write "$n" "$n|$2|$3|$4|$5|$(provider_of "$2" "$3")|$url|$kind"
+  REGISTERED+=("$n")
+  echo "  ✓ $n$([ "$kind" = laravel ] && echo ' (Laravel)')$([ "$5" = sftp ] && echo ' (SFTP-modus)')${url:+ — $url}"
+}
+# naam voor één van meerdere installaties op hetzelfde account: het domein of de map, anders naam-map
+site_name_for() {  # gegeven-naam pad aantal
+  local s; [ "$3" -gt 1 ] || { echo "$1"; return; }
+  s=$(suffix "$2"); db_has "$s" && s="$1-$s"; echo "$s"
+}
+# installaties binnen de map van een andere installatie (bv. public_html/old files) zijn kopieën
+drop_nested() {  # paden op stdin → zonder geneste
+  awk '{ print length($0) "\t" $0 }' | sort -n | cut -f2- | awk '
+    { root=$0; sub(/\/wp-content$/, "", root); sub(/\/public$/, "", root); nested=0
+      for (i=1; i<=n; i++) if (index(root "/", roots[i] "/") == 1) nested=1
+      if (!nested) { roots[++n]=root; print } }'
 }
 register_sftp() {  # naam target opts  (server staat alleen SFTP toe)
-  local name="$1" TARGET="$2" OPTS="$3" found=() f n
+  local name="$1" TARGET="$2" OPTS="$3" found=() f
   need lftp
-  echo "  · $name: alleen SFTP (geen SSH) — zoeken naar wp-content…"
-  mapfile -t found < <(lf "find -d 5 ." 2>/dev/null | sed 's#^\./##; s#/$##' | awk '/(^|\/)wp-content$/ && !/wp-content\/./' | head -20)
-  [ ${#found[@]} -gt 0 ] || { echo "  ✗ $name: wp-content niet gevonden via SFTP"; return 0; }
-  for f in "${found[@]}"; do
-    n="$name"; [ ${#found[@]} -gt 1 ] && n="$name-$(suffix "$f")"
-    add_line "$n" "$TARGET" "$OPTS" "$f" sftp
-  done
+  echo "  · $name: alleen SFTP (geen SSH) — zoeken naar WordPress of Laravel…"
+  local listing; listing=$(lf "find -d 5 ." 2>/dev/null | sed 's#^\./##; s#/$##' || true)
+  mapfile -t found < <(awk '/(^|\/)wp-content$/ && !/wp-content\/./' <<<"$listing" | head -20 | drop_nested)
+  if [ ${#found[@]} -gt 0 ]; then
+    for f in "${found[@]}"; do add_line "$(site_name_for "$name" "$f" ${#found[@]})" "$TARGET" "$OPTS" "$f" sftp "" wordpress; done
+    return 0
+  fi
+  mapfile -t found < <(awk '/(^|\/)artisan$/ && !/(^|\/)(vendor|node_modules)\//' <<<"$listing" | sed -E 's#/?artisan$##; s#^$#.#' | head -20 | drop_nested)
+  [ ${#found[@]} -gt 0 ] || { echo "  ✗ $name: geen WordPress of Laravel gevonden via SFTP"; return 0; }
+  for f in "${found[@]}"; do add_line "$(site_name_for "$name" "$f" ${#found[@]})" "$TARGET" "$OPTS" "$f" sftp "" laravel; done
 }
 register() {  # naam target opts [pw] [hint]
   local name="$1" target="$2" opts="$3" pw="${4:-}" hint="${5:-}" found=() f n probe roots
@@ -392,18 +473,60 @@ register() {  # naam target opts [pw] [hint]
   probe=$(ssh -n $opts -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "$target" true 2>&1 || true)
   if grep -qi "sftp connections only" <<<"$probe"; then register_sftp "$name" "$target" "$opts"; return 0; fi
   ensure_key "$target" "$opts" "$pw" || { echo "  ✗ $name: inloggen mislukt"; return 0; }
+  if [ -n "$hint" ]; then
+    local at; at=$(detect_type_at "$target" "$opts" "$hint" ssh)
+    if [ -n "$at" ]; then add_line "$name" "$target" "$opts" "${at#* }" ssh "" "${at%% *}"; return 0; fi
+  fi
   # eerst in het pad uit sftp.json (als bekend), anders in je home-map, /var/www en /srv
-  for roots in "${hint:+$(printf %q "$hint")}" '"$HOME" /var/www /srv'; do
+  for roots in "${hint:+$(printf %q "$hint")}" "$SEARCH_ROOTS"; do
     [ -n "$roots" ] || continue
     # shellcheck disable=SC2086
     mapfile -t found < <(ssh -n $opts "$target" "for d in $roots; do [ -d \"\$d\" ] && find \"\$d\" -maxdepth 7 -type d -name wp-content -not -path '*/wp-content/*' 2>/dev/null; done | awk '!s[\$0]++' | head -20")
     [ ${#found[@]} -gt 0 ] && break
   done
-  [ ${#found[@]} -gt 0 ] || { echo "  · $name: geen WordPress gevonden"; return 0; }
-  for f in "${found[@]}"; do
-    n="$name"; [ ${#found[@]} -gt 1 ] && n="$name-$(suffix "$f")"
-    add_line "$n" "$target" "$opts" "$f" ssh
+  if [ ${#found[@]} -eq 0 ]; then register_laravel "$name" "$target" "$opts" "$hint"; return 0; fi
+  # een kopie (bv. public_html/old files) wijst naar hetzelfde adres als de echte site: kortste pad wint
+  local kept=() urls=() seen=" " home
+  while IFS= read -r f; do
+    # shellcheck disable=SC2086
+    home=$(ssh -n $opts -o BatchMode=yes -o ConnectTimeout=10 "$target" "wp option get home --path=$(printf %q "$(dirname "$f")") --skip-plugins --skip-themes" 2>/dev/null | tr -d '\r' | tail -1 || true)
+    [[ "$home" =~ ^https?://[A-Za-z0-9.-]+(/[^|[:space:]]*)?$ ]] || home=""
+    if [ -n "$home" ] && [[ "$seen" == *" $home "* ]]; then echo "  · overgeslagen: $f (kopie van $home)"; continue; fi
+    [ -n "$home" ] && seen+="$home "
+    kept+=("$f"); urls+=("$home")
+  done < <(printf '%s\n' "${found[@]}" | awk '{ print length($0) "\t" $0 }' | sort -n | cut -f2-)
+  local i
+  for i in "${!kept[@]}"; do
+    add_line "$(site_name_for "$name" "${kept[$i]}" ${#kept[@]})" "$target" "$opts" "${kept[$i]}" ssh "${urls[$i]}" wordpress
   done
+}
+# Laravel herkennen aan artisan + laravel/framework in composer.json; releases/<x> van Deployer/Envoyer → current
+register_laravel() {  # naam target opts [hint]
+  local name="$1" target="$2" opts="$3" hint="${4:-}" found=() roots f
+  for roots in "${hint:+$(printf %q "$(dirname "$hint")") $(printf %q "$hint")}" "$SEARCH_ROOTS"; do
+    [ -n "$roots" ] || continue
+    # shellcheck disable=SC2086
+    mapfile -t found < <(ssh -n $opts "$target" "for d in $roots; do [ -d \"\$d\" ] && find \"\$d\" -maxdepth 6 -type f -name artisan -not -path '*/vendor/*' -not -path '*/node_modules/*' 2>/dev/null; done | while IFS= read -r a; do r=\$(dirname \"\$a\"); grep -qs 'laravel/framework' \"\$r/composer.json\" && echo \"\$r\"; done | sed -E 's#/releases/[^/]+\$#/current#' | awk '!s[\$0]++' | head -20" | drop_nested)
+    [ ${#found[@]} -gt 0 ] && break
+  done
+  [ ${#found[@]} -gt 0 ] || { echo "  · $name: geen WordPress of Laravel gevonden"; return 0; }
+  for f in "${found[@]}"; do
+    add_line "$(site_name_for "$name" "$f" ${#found[@]})" "$target" "$opts" "$f" ssh "" laravel
+  done
+}
+detect_type_at() {  # target opts pad modus → "wordpress <wp-content>" of "laravel <projectmap>"
+  local t="$1" o="$2" r="$3" m="$4" out
+  if [ "$m" = sftp ]; then
+    local TARGET="$t" OPTS="$o"
+    out=$(lf "cls -1 '$r/'" 2>/dev/null || true)
+    if [ "$(basename "$r")" = wp-content ] || grep -qx 'themes/\?' <<<"$out"; then echo "wordpress $r"
+    elif grep -qx 'wp-content/\?' <<<"$out"; then echo "wordpress $r/wp-content"
+    elif grep -qx 'artisan' <<<"$out"; then echo "laravel $r"
+    fi
+    return 0
+  fi
+  # shellcheck disable=SC2086
+  ssh -n $o -o BatchMode=yes "$t" "r=$(printf %q "$r"); if [ \"\$(basename \"\$r\")\" = wp-content ] && [ -d \"\$r\" ]; then echo \"wordpress \$r\"; elif [ -d \"\$r/wp-content\" ]; then echo \"wordpress \$r/wp-content\"; elif [ -f \"\$r/artisan\" ]; then echo \"laravel \$r\"; elif [ -f \"\$(dirname \"\$r\")/artisan\" ]; then echo \"laravel \$(dirname \"\$r\")\"; fi" 2>/dev/null || true
 }
 cmd_add() {
   # Snelkoppeling: wpopen add sftp://gebruiker@host[:poort]  (naam wordt uit de host gehaald)
@@ -436,7 +559,11 @@ cmd_add() {
     # handmatig: pad is bekend, dus niet zoeken; bij SSH wel de sleutel regelen
     mode="${mode:-ssh}"
     [ "$mode" = sftp ] || ensure_key "$target" "$opts" || die "Inloggen op $target mislukt."
-    add_line "$name" "$target" "$opts" "$remote" "$mode"
+    local found kind
+    found=$(detect_type_at "$target" "$opts" "$remote" "$mode")
+    [ -n "$found" ] || die "Geen WordPress (wp-content) of Laravel (artisan) gevonden in $remote."
+    kind="${found%% *}"; remote="${found#* }"
+    add_line "$name" "$target" "$opts" "$remote" "$mode" "" "$kind"
   else
     register "$name" "$target" "$opts"
   fi
@@ -458,17 +585,21 @@ cmd_update() {
     esac; shift 2
   done
   [[ "$n" =~ ^[A-Za-z0-9._-]+$ ]] || die "Naam mag alleen letters, cijfers, punt, - en _ bevatten."
-  [[ "$t" == *@* ]] || die "Server moet de vorm gebruiker@host hebben."
-  [[ "$m" =~ ^(ssh|sftp)$ ]] || die "Modus moet ssh of sftp zijn."
-  [[ "$p" =~ ^(wpmudev|hostinger|other)$ ]] || die "Provider moet wpmudev, hostinger of other zijn."
-  [ -n "$r" ] || die "Remote pad mag niet leeg zijn."
+  if [ "$m" = local ]; then
+    [ -z "$t" ] && [ -z "$r" ] || die "Een lokale site heeft geen server; zet hem live met: wpopen migrate $NAME …"
+  else
+    [[ "$t" == *@* ]] || die "Server moet de vorm gebruiker@host hebben."
+    [[ "$m" =~ ^(ssh|sftp)$ ]] || die "Modus moet ssh of sftp zijn."
+    [ -n "$r" ] || die "Remote pad mag niet leeg zijn."
+  fi
+  [[ "$p" =~ ^(wpmudev|hostinger|other|)$ ]] || die "Provider moet wpmudev, hostinger of other zijn."
   local f; for f in "$t" "$o" "$r" "$u"; do valid_field "$f"; done
   if [ "$n" != "$NAME" ]; then
     db_has "$n" && die "Er bestaat al een site '$n'."
     # de map en het DDEV-project heten naar de naam: hernoemen zou een gebouwde site loskoppelen
     [ "$(slug "$n")" = "$SLUG" ] || [ ! -d "$PROJ" ] || die "Hernoemen kan alleen zolang de site nog niet lokaal gebouwd is."
   fi
-  db_write "$NAME" "$n|$t|$o|$r|$m|$p|$u"
+  db_write "$NAME" "$n|$t|$o|$r|$m|$p|$u|$TYPE"
   ok "$n bijgewerkt"
 }
 cmd_remove() {
@@ -574,7 +705,9 @@ backup_local() {  # lokale database + git-repo (inclusief niet-gecommit werk)
 }
 backup_live_db() {
   step "Back-up van de live database…"
-  if [ "$MODE" = sftp ]; then
+  if is_laravel; then
+    laravel_db_dump | gzip > "$BK/live-db.sql.gz" || { rm -f "$BK/live-db.sql.gz"; return 1; }
+  elif [ "$MODE" = sftp ]; then
     local f; f=$(fetch_db_sftp) || return 1
     gzip -c "$f" > "$BK/live-db.sql.gz"; rm -rf "$(dirname "$f")"
   else
@@ -606,16 +739,11 @@ cmd_backup() {
   local loc=0 ldb=0 lfiles=0
   [ $# -gt 0 ] || loc=1
   while [ $# -gt 0 ]; do case "$1" in --local) loc=1;; --live-db) ldb=1;; --live-files) lfiles=1;; *) die "Onbekende optie: $1";; esac; shift; done
+  [ $ldb = 0 ] && [ $lfiles = 0 ] || need_live
   new_backup manual
-  if [ $loc = 1 ]; then built; (cd "$PROJ" && ddev start >/dev/null 2>&1); backup_local; fi
+  if [ $loc = 1 ]; then built; (cd "$PROJ" && ddev_up >/dev/null 2>&1); backup_local; fi
   [ $ldb = 1 ] && { backup_live_db || warn "Live database niet bewaard"; }
-  if [ $lfiles = 1 ]; then
-    step "Back-up van live thema's en plugins…"
-    mkdir -p "$BK/live-full"
-    if [ "$MODE" = sftp ]; then lf "mirror --parallel=4 -x '^(uploads|cache|upgrade|backups?|ai1wm-backups|updraft|wflogs)(/|\$)' '$REMOTE' '$BK/live-full'" >/dev/null || true
-    else rsync -az -e "$SSHE" "${EXC[@]}" "$TARGET:$REMOTE/" "$BK/live-full/"; fi
-    ok "Live wp-content (zonder uploads) bewaard"
-  fi
+  [ $lfiles = 1 ] && backup_live_full
   ok "Back-up klaar: $(basename "$BK")"
 }
 cmd_backups() {
@@ -658,18 +786,20 @@ cmd_restore() {
   [ $((ldb + livedb + lfiles)) -gt 0 ] || die "Kies wat je wilt terugzetten: --local-db, --live-db en/of --live-files"
   if [ $ldb = 1 ]; then
     [ -f "$src/local-db.sql.gz" ] || die "Deze back-up bevat geen lokale database."
-    built; cd "$PROJ"; ddev start >/dev/null 2>&1
+    built; cd "$PROJ"; ddev_up >/dev/null 2>&1
     new_backup pre-restore; backup_local
     step "Lokale database terugzetten…"
     ddev import-db --file="$src/local-db.sql.gz" >/dev/null && fix_site && ok "Lokale database teruggezet"
   fi
+  [ $livedb = 0 ] && [ $lfiles = 0 ] || need_live
   if [ $livedb = 1 ]; then
     [ -f "$src/live-db.sql.gz" ] || die "Deze back-up bevat geen live database."
     [ "$MODE" != sftp ] || die "Database terugzetten op live kan alleen bij SSH-sites."
     confirm "De live database van $LIVEHOST overschrijven met $id?" || die "Afgebroken."
     new_backup pre-restore; backup_live_db || die "Kon eerst geen back-up van live maken; niets veranderd."
     step "Live database terugzetten…"
-    gunzip -c "$src/live-db.sql.gz" | rssh_in "wp db import - --path='$ROOT'" >/dev/null && ok "Live database teruggezet"
+    if is_laravel; then gunzip -c "$src/live-db.sql.gz" | laravel_db_import >/dev/null && ok "Live database teruggezet"
+    else gunzip -c "$src/live-db.sql.gz" | rssh_in "wp db import - --path='$ROOT'" >/dev/null && ok "Live database teruggezet"; fi
     flush_live || true
   fi
   if [ $lfiles = 1 ]; then
@@ -705,7 +835,7 @@ bootstrap() {
 
   mkdir -p "$PROJ/.ddev/nginx"; cd "$PROJ"
   ddev config --project-type=wordpress --project-name="$SLUG" --docroot=. ${php:+--php-version="$php"} >/dev/null
-  ddev start
+  ddev_up
   [ -f wp-load.php ] || ddev wp core download ${ver:+--version="$ver"} --skip-content
   step "Code ophalen…"
   mkdir -p "$LWPC"; rsync -az -e "$SSHE" "${EXC[@]}" "$TARGET:$REMOTE/" "$LWPC/"
@@ -825,7 +955,7 @@ import_db() {   # bestand (.sql, .sql.gz of .zip) → lokale DDEV-site
   ddev wp user create dev dev@example.test --role=administrator --user_pass=dev $W >/dev/null 2>&1 \
     || ddev wp user update dev --user_pass=dev $W >/dev/null 2>&1 || true
   quiet_php; write_local_mu
-  ddev restart >/dev/null
+  ddev_restart >/dev/null
   activate_all_plugins
   fix_site refresh
   ok "Database geïmporteerd — login: dev / dev  (of je eigen live-gebruiker met het live-wachtwoord)"
@@ -859,11 +989,11 @@ quiet_php() {
 }
 
 # ontbrekende uploads komen live vandaan; $1 = live hostnaam
-write_uploads_proxy() {
-  local host="$1" f="$PROJ/.ddev/nginx/uploads-proxy.conf" tmp
+write_uploads_proxy() {  # host [locatie]
+  local host="$1" location="${2:-/wp-content/uploads/}" f="$PROJ/.ddev/nginx/uploads-proxy.conf" tmp
   [ -n "$host" ] || return 0
   mkdir -p "$PROJ/.ddev/nginx"; tmp=$(mktemp)
-  printf '#ddev-silent-no-warn\nlocation ^~ /wp-content/uploads/ {\n    try_files $uri @live_uploads;\n}\nlocation @live_uploads {\n    proxy_pass https://%s;\n    proxy_ssl_server_name on;\n    proxy_set_header Host %s;\n}\n' "$host" "$host" > "$tmp"
+  printf '#ddev-silent-no-warn\nlocation ^~ %s {\n    try_files $uri @live_uploads;\n}\nlocation @live_uploads {\n    proxy_pass https://%s;\n    proxy_ssl_server_name on;\n    proxy_set_header Host %s;\n}\n' "$location" "$host" "$host" > "$tmp"
   if cmp -s "$tmp" "$f" 2>/dev/null; then rm -f "$tmp"; else mv "$tmp" "$f"; RESTART=1; fi
   echo "$host" > "$PROJ/.wpopen-livehost"
 }
@@ -881,13 +1011,24 @@ add_action( 'admin_init', static function (): void {
 	remove_action( 'admin_notices', 'update_nag', 3 );
 	remove_action( 'network_admin_notices', 'update_nag', 3 );
 } );
-// eenmalige inloglink van `wpopen login`: token staat 2 minuten als hash in een transient
+// eenmalige inloglink van `wpopen login`: hash + vervaltijd staan in een bestand (snel, zonder WP-CLI)
 add_action( 'init', static function (): void {
 	if ( empty( $_GET['wpopen-login'] ) ) {
 		return;
 	}
-	$hash = get_transient( 'wpopen_login' );
-	delete_transient( 'wpopen_login' );
+	$hash = '';
+	$file = WP_CONTENT_DIR . '/.wpopen-login';
+	if ( is_readable( $file ) ) {
+		$parts = explode( ' ', trim( (string) file_get_contents( $file ) ) );
+		@unlink( $file );
+		if ( isset( $parts[1] ) && time() <= (int) $parts[1] ) {
+			$hash = $parts[0];
+		}
+	}
+	if ( ! $hash ) {
+		$hash = get_transient( 'wpopen_login' );
+		delete_transient( 'wpopen_login' );
+	}
 	if ( ! $hash || ! hash_equals( (string) $hash, hash( 'sha256', (string) wp_unslash( $_GET['wpopen-login'] ) ) ) ) {
 		wp_die( 'Deze inloglink is verlopen. Vraag een nieuwe aan.' );
 	}
@@ -943,6 +1084,7 @@ deactivate_env_plugins() {
 # live-constanten (bv. API-keys) uit de live wp-config.php, zodat plugins lokaal niet klagen over een ontbrekende sleutel
 fetch_live_constants() {
   [ -z "${WPO_NO_CONSTANTS:-}" ] || return 0
+  is_local && return 0
   local cfg out="$PROJ/wp-config-live-constants.php" tmp py
   if [ "$MODE" = sftp ]; then cfg=$(lf "cat '$ROOT/wp-config.php'" 2>/dev/null || true); [ -n "$cfg" ] || cfg=$(lf "cat '$(dirname "$ROOT")/wp-config.php'" 2>/dev/null || true)
   else cfg=$(rssh "cat '$ROOT/wp-config.php' 2>/dev/null || cat '$(dirname "$ROOT")/wp-config.php'" 2>/dev/null || true); fi
@@ -998,6 +1140,7 @@ heal_fatals() {
 }
 
 fix_site() {   # $1=refresh: live-constanten opnieuw ophalen
+  if is_laravel; then laravel_fix; return 0; fi
   local W="--skip-plugins --skip-themes" best cur old host
   cd "$PROJ"; RESTART=0
   link_live_constants   # eerst: voorkomt de ddev-melding over wp-config.php bij de wp-aanroepen hieronder
@@ -1027,7 +1170,7 @@ fix_site() {   # $1=refresh: live-constanten opnieuw ophalen
   elif [ -f .wpopen-livehost ]; then write_uploads_proxy "$(cat .wpopen-livehost)"; fi
   # 4) plugins die niet starten
   heal_fatals
-  if [ $RESTART = 1 ]; then ddev restart >/dev/null 2>&1 || true; fi
+  if [ $RESTART = 1 ]; then ddev_restart >/dev/null 2>&1 || true; fi
   return 0
 }
 
@@ -1052,7 +1195,7 @@ bootstrap_sftp() {   # alleen SFTP: code ophalen, database via tijdelijk exportb
   prefix="${prefix:-wp_}"
   mkdir -p "$PROJ"; cd "$PROJ"
   ddev config --project-type=wordpress --project-name="$SLUG" --docroot=. >/dev/null
-  ddev start
+  ddev_up
   [ -f wp-load.php ] || ddev wp core download ${ver:+--version="$ver"} --skip-content
   [ -f wp-config.php ] || ddev wp config create --dbname=db --dbuser=db --dbpass=db --dbhost=db --dbprefix="$prefix" --skip-check
   step "Code ophalen via SFTP…"; pull_sftp; pull_avia
@@ -1080,8 +1223,11 @@ pull_code() {
   [ -z "$(git status --porcelain)" ] || die "Eerst committen: ophalen van live zou lokale wijzigingen overschrijven."
   git checkout -q main
   step "Code van live ophalen…"
-  if [ "$MODE" = sftp ]; then pull_sftp; else rsync -az -e "$SSHE" "${EXC[@]}" "$TARGET:$REMOTE/" "$LWPC/"; fi
-  pull_avia
+  if is_laravel; then laravel_pull_files
+  else
+    if [ "$MODE" = sftp ]; then pull_sftp; else rsync -az -e "$SSHE" "${EXC[@]}" "$TARGET:$REMOTE/" "$LWPC/"; fi
+    pull_avia
+  fi
   git add -A
   if git diff --cached --quiet; then note "Live was gelijk aan main"
   else gitc commit -qm "Live-staat $(date '+%Y-%m-%d %H:%M')"; ok "Live-wijzigingen vastgelegd op main"; fi
@@ -1093,6 +1239,7 @@ pull_code() {
 pull_db() {
   local f
   new_backup pull-db; backup_local
+  if is_laravel; then laravel_pull_db || die "Database ophalen mislukt."; return 0; fi
   if [ "$MODE" = sftp ]; then f=$(fetch_db_sftp) || die "Database ophalen mislukt."; else step "Database ophalen…"; f=$(fetch_db_ssh) || die "Database ophalen mislukt."; fi
   import_db "$f"; rm -rf "$(dirname "$f")"
 }
@@ -1104,39 +1251,46 @@ cmd_open() {
   local pull=0 live=0 dbpull=0 DBFILE=""
   while [ $# -gt 0 ]; do case "$1" in --pull) pull=1;; --live) live=1;; --dbpull) dbpull=1;; --db) shift; DBFILE="$(readlink -f "${1:-}")";; esac; shift; done
   if [ $live = 1 ]; then
+    need_live
     [ "$MODE" = sftp ] && die "--live kan niet: $NAME heeft alleen SFTP, geen SSH."
     code --remote "ssh-remote+$TARGET" "$REMOTE"; return
   fi
+  if is_local && { [ $pull = 1 ] || [ $dbpull = 1 ]; }; then need_live; fi
 
   local built=0
-  if [ ! -f "$PROJ/.wpopen-ready" ]; then built=1; if [ "$MODE" = sftp ]; then bootstrap_sftp; else bootstrap; fi; fi
+  if [ ! -f "$PROJ/.wpopen-ready" ]; then
+    built=1
+    if is_laravel; then bootstrap_laravel
+    else case "$MODE" in local) bootstrap_local;; sftp) bootstrap_sftp;; *) bootstrap;; esac; fi
+  fi
   [ $pull = 1 ] && pull_code
-  cd "$PROJ"; ddev start >/dev/null; fix_site
+  cd "$PROJ"; ddev_up >/dev/null; fix_site
   if [ -n "$DBFILE" ] && [ $built = 0 ]; then new_backup import-db; backup_local; import_db "$DBFILE"; fi
   [ $dbpull = 1 ] && [ $built = 0 ] && pull_db   # verse database van live (overschrijft de lokale, die eerst bewaard wordt)
   ensure_dev
-  ok "Branch: dev   |   login: dev / dev"
+  if is_laravel; then ok "Branch: dev   |   $LOCALURL"; else ok "Branch: dev   |   login: dev / dev"; fi
   if [ -z "${WPO_NO_LAUNCH:-}" ]; then
     code "$LWPC" || true
-    cd "$PROJ"; ddev launch /wp-admin
+    cd "$PROJ"; if is_laravel; then ddev launch; else ddev launch /wp-admin; fi
   fi
 }
 cmd_build() { [ $# -ge 1 ] || die "Gebruik: wpopen build <naam>"; WPO_NO_LAUNCH=1 cmd_open "$@"; }
 cmd_startstop() {
   [ $# -ge 2 ] || die "Gebruik: wpopen start|stop <naam>"
   need ddev; get "$2"; built; cd "$PROJ"
-  if [ "$1" = start ]; then ddev start >/dev/null && ok "$NAME draait op $LOCALURL"
+  if [ "$1" = start ]; then ddev_up >/dev/null && ok "$NAME draait op $LOCALURL"
   else ddev stop >/dev/null && ok "$NAME gestopt"; fi
 }
 cmd_pull() {
-  [ $# -ge 1 ] || die "Gebruik: wpopen pull <naam> [--code] [--db]"
-  need ddev git; get "$1"; shift; built
-  local code=0 db=0
+  [ $# -ge 1 ] || die "Gebruik: wpopen pull <naam> [--code] [--db] [--uploads]"
+  need ddev git; get "$1"; shift; need_live; built
+  local code=0 db=0 uploads=0
   [ $# -gt 0 ] || code=1
-  while [ $# -gt 0 ]; do case "$1" in --code) code=1;; --db) db=1;; *) die "Onbekende optie: $1";; esac; shift; done
-  cd "$PROJ"; ddev start >/dev/null
+  while [ $# -gt 0 ]; do case "$1" in --code) code=1;; --db) db=1;; --uploads) uploads=1;; *) die "Onbekende optie: $1";; esac; shift; done
+  cd "$PROJ"; ddev_up >/dev/null
   [ $code = 1 ] && pull_code
   [ $db = 1 ] && pull_db
+  [ $uploads = 1 ] && pull_uploads
   cd "$PROJ"; fix_site
   ok "$NAME is bijgewerkt vanaf live"
 }
@@ -1155,22 +1309,22 @@ cmd_reset() {   # "refreshen met main": dev gelijk aan de laatste live-staat, hu
   git checkout -q -B dev main
   git clean -fdq
   ok "dev staat weer gelijk aan main"
-  [ $pull = 1 ] && { cd "$PROJ"; ddev start >/dev/null; pull_code; }
+  [ $pull = 1 ] && { cd "$PROJ"; ddev_up >/dev/null; pull_code; }
   return 0
 }
 cmd_rebuild() {   # opnieuw migreren vanaf live, voor als er lokaal iets kapot is
   [ $# -ge 1 ] || die "Gebruik: wpopen rebuild <naam>"
-  need ddev git; get "$1"; shift
+  need ddev git; get "$1"; shift; need_live
   confirm "Lokale site $NAME volledig opnieuw opbouwen vanaf live? (eerst wordt een back-up gemaakt)" || die "Afgebroken."
   if [ -d "$PROJ" ]; then
     new_backup rebuild
-    if [ -f "$PROJ/.wpopen-ready" ]; then (cd "$PROJ" && ddev start >/dev/null 2>&1) || true; backup_local; fi
+    if [ -f "$PROJ/.wpopen-ready" ]; then (cd "$PROJ" && ddev_up >/dev/null 2>&1) || true; backup_local; fi
     step "Oude lokale omgeving opruimen…"
     (cd "$PROJ" && ddev delete --omit-snapshot --yes "$SLUG" >/dev/null 2>&1) || true
     rm -rf "$PROJ"
   fi
   local DBFILE=""
-  if [ "$MODE" = sftp ]; then bootstrap_sftp; else bootstrap; fi
+  if is_laravel; then bootstrap_laravel; elif [ "$MODE" = sftp ]; then bootstrap_sftp; else bootstrap; fi
   ensure_dev
   ok "$NAME opnieuw opgebouwd vanaf live — login: dev / dev"
 }
@@ -1178,10 +1332,487 @@ cmd_fix() {   # bestaande site repareren zonder opnieuw te bouwen: prefix, URL's
   [ $# -ge 1 ] || die "Gebruik: wpopen fix <naam> [--plugins]   (--plugins zet ook caches/beveiliging/SMTP weer uit)"
   need ddev; get "$1"; shift
   [ -d "$PROJ/.ddev" ] || die "$NAME is nog niet gebouwd. Draai eerst: wpopen $NAME"
-  cd "$PROJ"; ddev start >/dev/null 2>&1
-  [ "${1:-}" = "--plugins" ] && deactivate_env_plugins
+  cd "$PROJ"; ddev_up >/dev/null 2>&1
+  [ "${1:-}" = "--plugins" ] && ! is_laravel && deactivate_env_plugins
   fix_site refresh
   ok "$NAME gecontroleerd en hersteld waar nodig"
+}
+
+# ───────────── Laravel ─────────────
+# wat nooit tussen lokaal en live heen en weer gaat: afhankelijkheden, geheimen, caches, gebruikersbestanden
+LARAVEL_EXC=(--exclude=/vendor --exclude=/node_modules --exclude=/.env --exclude=/.git --exclude=/.ddev
+  --exclude='/.wpopen-*' --exclude=/storage/app --exclude=/storage/logs --exclude=/storage/framework
+  --exclude='/bootstrap/cache/*.php' --exclude=/public/storage --exclude=/public/hot --exclude='*.log')
+LARAVEL_LFTP_EXC="-x '^(vendor|node_modules|\\.git|\\.ddev|storage/(app|logs|framework))(/|\$)' -x '^\\.env\$' -x '^bootstrap/cache/.*\\.php\$' -x '^public/(storage|hot)(/|\$)' -x '\\.log\$'"
+# op de server: waarde uit .env lezen zonder dat wachtwoorden ooit als argument meegaan
+REMOTE_ENV_FN='envv() { grep -m1 "^$1=" .env 2>/dev/null | cut -d= -f2- | sed -e "s/\r\$//" -e "s/^\"\\(.*\\)\"\$/\\1/" -e "s/^'"'"'\\(.*\\)'"'"'\$/\\1/"; }'
+
+live_env_file() {  # inhoud van de live .env
+  if [ "$MODE" = sftp ]; then lf "cat '$ROOT/.env'" 2>/dev/null; else rssh "cat '$ROOT/.env'" 2>/dev/null; fi
+}
+laravel_db_dump() {  # live database → stdout (alleen SSH)
+  need_shell
+  rssh "cd '$ROOT' && $REMOTE_ENV_FN; c=\$(envv DB_CONNECTION); case \"\${c:-mysql}\" in
+    mysql|mariadb) d=\$(command -v mysqldump || command -v mariadb-dump) || { echo 'mysqldump ontbreekt op de server' >&2; exit 1; }
+      h=\$(envv DB_HOST); p=\$(envv DB_PORT)
+      MYSQL_PWD=\"\$(envv DB_PASSWORD)\" \"\$d\" --single-transaction --quick --no-tablespaces -h \"\${h:-127.0.0.1}\" -P \"\${p:-3306}\" -u \"\$(envv DB_USERNAME)\" \"\$(envv DB_DATABASE)\";;
+    pgsql) h=\$(envv DB_HOST); p=\$(envv DB_PORT)
+      PGPASSWORD=\"\$(envv DB_PASSWORD)\" pg_dump --no-owner --no-acl -h \"\${h:-127.0.0.1}\" -p \"\${p:-5432}\" -U \"\$(envv DB_USERNAME)\" \"\$(envv DB_DATABASE)\";;
+    sqlite) f=\$(envv DB_DATABASE); cat \"\${f:-database/database.sqlite}\";;
+    *) echo \"databasetype \$c wordt niet ondersteund\" >&2; exit 1;;
+  esac"
+}
+laravel_db_import() {  # stdin (sql) → live database (alleen SSH)
+  need_shell
+  rssh_in "cd '$ROOT' && $REMOTE_ENV_FN; c=\$(envv DB_CONNECTION); case \"\${c:-mysql}\" in
+    mysql|mariadb) m=\$(command -v mysql || command -v mariadb); h=\$(envv DB_HOST); p=\$(envv DB_PORT)
+      MYSQL_PWD=\"\$(envv DB_PASSWORD)\" \"\$m\" -h \"\${h:-127.0.0.1}\" -P \"\${p:-3306}\" -u \"\$(envv DB_USERNAME)\" \"\$(envv DB_DATABASE)\";;
+    pgsql) h=\$(envv DB_HOST); p=\$(envv DB_PORT)
+      PGPASSWORD=\"\$(envv DB_PASSWORD)\" psql -q -h \"\${h:-127.0.0.1}\" -p \"\${p:-5432}\" -U \"\$(envv DB_USERNAME)\" \"\$(envv DB_DATABASE)\";;
+    *) echo 'terugzetten kan alleen bij mysql/mariadb/pgsql' >&2; exit 1;;
+  esac"
+}
+# lokale .env: live als basis (APP_KEY moet gelijk blijven), database/URL/mail naar DDEV, betaal- en mailsleutels leeg
+laravel_env_local() {  # live .env op stdin
+  local tmp; tmp=$(mktemp)
+  LOCALURL="$LOCALURL" python3 -c '
+import os, re, sys
+src = sys.stdin.read().splitlines()
+keys = [l.split("=", 1)[0] for l in src if re.match(r"^[A-Z0-9_]+=", l)]
+get = lambda k: next((l.split("=", 1)[1].strip().strip("\"\x27") for l in src if l.startswith(k + "=")), "")
+conn = get("DB_CONNECTION") or "mysql"
+over = {"APP_ENV": "local", "APP_DEBUG": "true", "APP_URL": os.environ["LOCALURL"], "MAIL_MAILER": "log", "MAIL_DRIVER": "log"}
+if conn == "sqlite":
+    over["DB_DATABASE"] = "/var/www/html/database/database.sqlite"
+else:
+    over.update({"DB_HOST": "db", "DB_PORT": "5432" if conn == "pgsql" else "3306", "DB_DATABASE": "db", "DB_USERNAME": "db", "DB_PASSWORD": "db"})
+for k in ("CACHE_STORE", "CACHE_DRIVER", "SESSION_DRIVER"):
+    if get(k) in ("redis", "memcached", "dynamodb"): over[k] = "file"
+if get("QUEUE_CONNECTION") in ("redis", "sqs", "beanstalkd"): over["QUEUE_CONNECTION"] = "sync"
+secret = re.compile(r"(STRIPE|MOLLIE|PAYPAL|ADYEN|BUCKAROO|PAYMENT|SENDGRID|MAILGUN|POSTMARK|RESEND|SES_|MAIL_PASSWORD)", re.I)
+out = ["# BD Deck: lokale kopie van de live .env. Niet committen of uploaden."]
+for l in src:
+    m = re.match(r"^([A-Z0-9_]+)=", l)
+    if m and m.group(1) in over: l = m.group(1) + "=" + over[m.group(1)]
+    elif m and secret.search(m.group(1)): l = m.group(1) + "="
+    out.append(l)
+out += [k + "=" + v for k, v in over.items() if k not in keys]
+print("\n".join(out))' > "$tmp" || { rm -f "$tmp"; return 1; }
+  mv "$tmp" "$PROJ/.env"; chmod 600 "$PROJ/.env"
+}
+laravel_pull_files() {
+  if [ "$MODE" = sftp ]; then
+    need lftp; lf "set sftp:max-packets-in-flight 64
+mirror --parallel=6 $LARAVEL_LFTP_EXC '$REMOTE' '$PROJ'" || true
+  else
+    rsync -az -e "$SSHE" "${LARAVEL_EXC[@]}" "$TARGET:$REMOTE/" "$PROJ/"
+  fi
+}
+laravel_pull_db() {  # live → lokale DDEV-database
+  [ "$MODE" = ssh ] || { note "Database niet opgehaald: alleen SFTP. De lokale database blijft leeg; draai zelf migraties: wpopen artisan $NAME migrate"; return 0; }
+  local tmp conn; tmp=$(mktemp -d)
+  step "Database ophalen…"
+  laravel_db_dump > "$tmp/db.sql" || { rm -rf "$tmp"; warn "Database ophalen mislukt"; return 1; }
+  conn=$(grep -m1 '^DB_CONNECTION=' "$PROJ/.env" | cut -d= -f2-)
+  cd "$PROJ"
+  if [ "$conn" = sqlite ]; then mkdir -p database; cp "$tmp/db.sql" database/database.sqlite
+  else ddev import-db --file="$tmp/db.sql" >/dev/null; fi
+  rm -rf "$tmp"; ok "Database lokaal"
+}
+laravel_init_git() {
+  cd "$PROJ"
+  git init -q -b main 2>/dev/null || git init -q
+  # eigen uitsluitingen buiten .gitignore houden: die hoort bij het project en gaat mee naar live
+  mkdir -p .git/info
+  printf '%s\n' '/.ddev/' '/.wpopen-*' '/vendor/' '/node_modules/' '/.env' '/storage/app/' '/storage/logs/' \
+    '/storage/framework/' '/bootstrap/cache/*.php' '/public/storage' '/public/hot' >> .git/info/exclude
+  git add -A; gitc commit -qm "Start: live-staat" || true
+  git tag -f deployed >/dev/null 2>&1 || true
+  ok "Git bijgehouden: het hele project (zonder vendor, node_modules, .env en storage)"
+}
+laravel_fix() {  # idempotent: .env, mappen, afhankelijkheden, storage-link, caches, proxy voor /storage
+  cd "$PROJ"; RESTART=0
+  [ -f .env ] || { live_env_file | laravel_env_local || warn "Kon geen lokale .env maken"; }
+  mkdir -p storage/framework/cache/data storage/framework/sessions storage/framework/views storage/logs storage/app/public bootstrap/cache
+  [ -f vendor/autoload.php ] || { step "Composer-pakketten installeren…"; ddev composer install --no-interaction --no-progress >/dev/null 2>&1 || warn "composer install mislukt; draai het zelf: ddev composer install"; }
+  ddev artisan storage:link >/dev/null 2>&1 || true
+  ddev artisan optimize:clear >/dev/null 2>&1 || true
+  if [ -n "$LIVEHOST" ] && ! is_local; then write_uploads_proxy "$LIVEHOST" /storage/; fi
+  quiet_php
+  if [ $RESTART = 1 ]; then ddev_restart >/dev/null 2>&1 || true; fi
+  return 0
+}
+bootstrap_laravel() {
+  step "Eerste keer: Laravel-site lokaal bouwen (een paar minuten)…"
+  local php="" conn dbflag=""
+  if [ "$MODE" = ssh ]; then
+    php=$(rssh 'php -r "echo PHP_MAJOR_VERSION.\".\".PHP_MINOR_VERSION;"' 2>/dev/null || true)
+    [[ "$php" =~ ^[78]\.[0-9]$ ]] || php=""
+  fi
+  mkdir -p "$PROJ"; cd "$PROJ"
+  step "Code ophalen…"; laravel_pull_files
+  [ -f artisan ] || die "Geen artisan gevonden na het ophalen. Klopt het pad ($REMOTE)?"
+  live_env_file | laravel_env_local || die "Kon de live .env niet lezen."
+  conn=$(grep -m1 '^DB_CONNECTION=' .env | cut -d= -f2-)
+  [ "$conn" = pgsql ] && dbflag="--database=postgres:16"
+  # shellcheck disable=SC2086
+  ddev config --project-type=laravel --project-name="$SLUG" --docroot=public ${php:+--php-version="$php"} $dbflag >/dev/null
+  ddev_up
+  laravel_fix
+  laravel_pull_db || true
+  laravel_init_git
+  touch "$PROJ/.wpopen-ready"
+}
+# na het uploaden: wat een Laravel-deploy verder nodig heeft
+laravel_after_push() {  # lijstbestand met geüploade paden
+  local list="$1"
+  if [ "$MODE" != ssh ]; then
+    grep -qE '^composer\.(json|lock)$' "$list" && warn "composer.lock is veranderd: draai op de server composer install (alleen SFTP, BD Deck kan dat niet)."
+    grep -q '^database/migrations/' "$list" && warn "Er zijn nieuwe migraties: draai op de server php artisan migrate --force."
+    return 0
+  fi
+  if grep -qE '^composer\.(json|lock)$' "$list"; then
+    step "Composer-pakketten bijwerken op live…"
+    rssh "cd '$ROOT' && if command -v composer >/dev/null; then composer install --no-dev --optimize-autoloader --no-interaction --no-progress; else php composer.phar install --no-dev --optimize-autoloader --no-interaction --no-progress; fi" \
+      || warn "composer install op live mislukt; draai het zelf op de server."
+  fi
+  if grep -q '^database/migrations/' "$list"; then
+    step "Migraties draaien op live…"
+    rssh "cd '$ROOT' && php artisan migrate --force --no-interaction" || die "Migraties mislukt. Database terugzetten: wpopen restore $NAME $(basename "$BK") --live-db"
+  fi
+  rssh "cd '$ROOT' && php artisan queue:restart --no-interaction" >/dev/null 2>&1 || true
+}
+frontend_changed() { grep -qE '^(resources/(js|css|sass|scss|ts)/|vite\.config\.|tailwind\.config\.|postcss\.config\.|package(-lock)?\.json$)' <<<"$1"; }
+laravel_build_assets() {  # assets lokaal bouwen en public/build in z'n geheel naar live
+  [ -f "$PROJ/package.json" ] && grep -q '"build"' "$PROJ/package.json" || return 0
+  step "Assets bouwen (npm run build)…"
+  cd "$PROJ"
+  [ -d node_modules ] || ddev npm ci --no-audit --no-fund >/dev/null 2>&1 || ddev npm install --no-audit --no-fund >/dev/null 2>&1 || die "npm install mislukt."
+  ddev npm run build >/dev/null 2>&1 || die "npm run build mislukt; probeer het lokaal: ddev npm run build"
+  cd "$LWPC"
+  if [ -n "$(git ls-files public/build | head -1)" ] && [ -n "$(git status --porcelain public/build)" ]; then
+    git add public/build; gitc commit -qm "Assets gebouwd" >/dev/null
+  fi
+  ok "Assets gebouwd"
+}
+laravel_push_assets() {
+  [ -d "$PROJ/public/build" ] || return 0
+  step "Assets uploaden (public/build)…"
+  if [ "$MODE" = sftp ]; then lf "mirror -R --no-perms --delete '$PROJ/public/build' '$REMOTE/public/build'" >/dev/null
+  else rsync -az --delete -e "$SSHE" "$PROJ/public/build/" "$TARGET:$REMOTE/public/build/"; fi
+  ok "Assets staan live"
+}
+
+# ───────────── lokale sites zonder live-server ─────────────
+bootstrap_local() {  # verse WordPress in DDEV, dev/dev als beheerder
+  step "Nieuwe lokale WordPress-site maken…"
+  mkdir -p "$PROJ"; cd "$PROJ"
+  ddev config --project-type=wordpress --project-name="$SLUG" --docroot=. >/dev/null
+  ddev_up
+  [ -f wp-load.php ] || ddev wp core download --locale="${WPO_LOCALE:-nl_NL}" >/dev/null
+  [ -f wp-config.php ] || ddev wp config create --dbname=db --dbuser=db --dbpass=db --dbhost=db --dbprefix=wp_ --skip-check >/dev/null
+  link_live_constants
+  ddev wp core is-installed >/dev/null 2>&1 || ddev wp core install --url="$LOCALURL" --title="${TITLE:-$NAME}" \
+    --admin_user=dev --admin_password=dev --admin_email=dev@example.test --skip-email >/dev/null
+  ddev wp rewrite structure '/%postname%/' >/dev/null 2>&1 || true
+  RESTART=0; quiet_php; write_local_mu
+  [ $RESTART = 1 ] && ddev_restart >/dev/null
+  init_git
+  touch "$PROJ/.wpopen-ready"
+  ok "WordPress staat klaar op $LOCALURL"
+}
+cmd_new() {
+  local name="" TITLE=""
+  while [ $# -gt 0 ]; do case "$1" in --title) TITLE="${2:-}"; shift;; -*) die "Onbekende optie: $1";; *) name="$1";; esac; shift; done
+  [ -n "$name" ] || die "Gebruik: wpopen new <naam> [--title \"Titel\"]"
+  [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || die "Naam mag alleen letters, cijfers, punt, - en _ bevatten."
+  valid_field "$TITLE"
+  db_has "$name" && die "Er bestaat al een site '$name'."
+  [ ! -e "$BASE/$(slug "$name")" ] || die "De map $BASE/$(slug "$name") bestaat al. Kies een andere naam."
+  need ddev git
+  db_write "$name" "$name||||local|||wordpress"
+  get "$name"
+  bootstrap_local
+  ensure_dev
+  ok "Lokale site $NAME klaar — login: dev / dev. Live zetten: wpopen migrate $NAME user@host --url https://…"
+}
+
+pull_uploads() {  # alle media lokaal, nodig voor een verhuizing (normaal komen ze via de proxy van live)
+  step "Alle uploads van live ophalen…"
+  if is_laravel; then
+    mkdir -p "$PROJ/storage/app/public"
+    if [ "$MODE" = sftp ]; then lf "mirror --parallel=6 '$REMOTE/storage/app/public' '$PROJ/storage/app/public'" >/dev/null || warn "Niet alle uploads konden worden opgehaald"
+    else rsync -az -e "$SSHE" "$TARGET:$REMOTE/storage/app/public/" "$PROJ/storage/app/public/" || warn "Niet alle uploads konden worden opgehaald"; fi
+    ok "Uploads lokaal ($(du -sh "$PROJ/storage/app/public" 2>/dev/null | cut -f1))"; return 0
+  fi
+  mkdir -p "$LWPC/uploads"
+  if [ "$MODE" = sftp ]; then
+    need lftp
+    lf "mirror --parallel=6 -x '(^|/)(cache|backups?|ai1wm-backups|updraft)(/|\$)' '$REMOTE/uploads' '$LWPC/uploads'" >/dev/null || warn "Niet alle uploads konden worden opgehaald"
+  else
+    rsync -az -e "$SSHE" --exclude=cache "$TARGET:$REMOTE/uploads/" "$LWPC/uploads/" || warn "Niet alle uploads konden worden opgehaald"
+  fi
+  ok "Uploads lokaal ($(du -sh "$LWPC/uploads" 2>/dev/null | cut -f1))"
+}
+
+# ───────────── verhuizen: lokale site → nieuwe WordPress-installatie ─────────────
+# wat er nooit naar een nieuwe server gaat: lokale hulpbestanden, caches, back-ups en git
+MIGRATE_EXC=(--exclude=cache --exclude=upgrade --exclude='/*backup*' --exclude=updraft --exclude=ai1wm-backups
+  --exclude=wflogs --exclude=debug.log --exclude=object-cache.php --exclude=advanced-cache.php
+  --exclude=/mu-plugins/wpopen-local.php --exclude=.git --exclude=/.gitignore --exclude=node_modules)
+MIGRATE_LFTP_EXC="-x '^(cache|upgrade|updraft|ai1wm-backups|wflogs)(/|\$)' -x '^[^/]*backup[^/]*(/|\$)' -x '(^|/)(\\.git|node_modules)(/|\$)' -x '^\\.gitignore\$' -x '^mu-plugins/wpopen-local\\.php\$' -x '^(object|advanced)-cache\\.php\$' -x '(^|/)debug\\.log\$'"
+
+# na de import op de nieuwe server: lokale beheerder weg, permalinks en cache vernieuwen
+MIGRATE_FINISH_PHP=$(cat <<'PHP'
+require_once ABSPATH . 'wp-admin/includes/user.php';
+$dev = get_user_by('login', 'dev');
+$others = get_users(array('role' => 'administrator', 'exclude' => $dev ? array($dev->ID) : array(), 'number' => 1, 'orderby' => 'ID', 'order' => 'ASC'));
+if ($dev && $others) {
+  wp_delete_user($dev->ID, $others[0]->ID);
+  echo "✓ Lokale gebruiker 'dev' verwijderd (inhoud overgezet naar " . $others[0]->user_login . ")\n";
+} elseif ($dev) {
+  wp_set_password(wp_generate_password(40, true, true), $dev->ID);
+  echo "· 'dev' is de enige beheerder: het wachtwoord is vervangen door een willekeurig wachtwoord. Log in via BD Deck (WP-admin live) en maak je eigen account.\n";
+}
+flush_rewrite_rules();
+wp_cache_flush();
+echo "✓ Permalinks en cache vernieuwd\n";
+PHP
+)
+
+backup_live_full() {  # live wp-content zonder uploads, of bij Laravel de code zonder vendor en storage
+  step "Back-up van de live bestanden…"
+  mkdir -p "$BK/live-full"
+  if is_laravel; then
+    if [ "$MODE" = sftp ]; then lf "mirror --parallel=4 $LARAVEL_LFTP_EXC '$REMOTE' '$BK/live-full'" >/dev/null || true
+    else rsync -az -e "$SSHE" "${LARAVEL_EXC[@]}" "$TARGET:$REMOTE/" "$BK/live-full/" || true; fi
+    ok "Live code (zonder vendor en storage) bewaard"; return 0
+  fi
+  if [ "$MODE" = sftp ]; then lf "mirror --parallel=4 -x '^(uploads|cache|upgrade|backups?|ai1wm-backups|updraft|wflogs)(/|\$)' '$REMOTE' '$BK/live-full'" >/dev/null || true
+  else rsync -az -e "$SSHE" "${EXC[@]}" "$TARGET:$REMOTE/" "$BK/live-full/" || true; fi
+  ok "Live wp-content (zonder uploads) bewaard"
+}
+
+find_remote_wpcontent() {  # host-hint → het enige wp-content op de server (of die met het domein in het pad)
+  local hint="$1" found=() f
+  if [ "$MODE" = sftp ]; then
+    mapfile -t found < <(lf "find -d 6 ." 2>/dev/null | sed 's#^\./##; s#/$##' | awk '/(^|\/)wp-content$/ && !/wp-content\/./' | head -20)
+  else
+    # shellcheck disable=SC2086
+    mapfile -t found < <(ssh -n $OPTS "$TARGET" "for d in $SEARCH_ROOTS; do [ -d \"\$d\" ] && find \"\$d\" -maxdepth 7 -type d -name wp-content -not -path '*/wp-content/*' 2>/dev/null; done | awk '!s[\$0]++' | head -20")
+  fi
+  [ ${#found[@]} -gt 0 ] || { echo "✗ Geen WordPress gevonden op $TARGET. Installeer eerst WordPress bij de nieuwe host." >&2; return 1; }
+  if [ ${#found[@]} -gt 1 ]; then
+    for f in "${found[@]}"; do [[ "$f" == *"$hint"* ]] && { echo "$f"; return 0; }; done
+    { echo "✗ Meerdere WordPress-installaties gevonden; kies er één met --remote:"; printf '    %s\n' "${found[@]}"; } >&2
+    return 1
+  fi
+  echo "${found[0]}"
+}
+
+remote_prefix() {  # tabelprefix uit de wp-config.php op live
+  if [ "$MODE" = sftp ]; then
+    lf "cat '$ROOT/wp-config.php'" 2>/dev/null | sed -nE "s/^[[:space:]]*\\\$table_prefix[[:space:]]*=[[:space:]]*['\"]([^'\"]*)['\"].*/\1/p" | head -1
+  else
+    live_wp config get table_prefix 2>/dev/null | tr -d '\r'
+  fi
+}
+set_remote_prefix() {  # prefix → de lokale tabellen staan nu onder deze prefix op live
+  local prefix="$1" tmp
+  [[ "$prefix" =~ ^[A-Za-z0-9_]+$ ]] || die "Ongeldige tabelprefix: $prefix"
+  if [ "$MODE" = sftp ]; then
+    tmp=$(mktemp -d)
+    lf "get -O '$tmp' '$ROOT/wp-config.php'" >/dev/null 2>&1 || { rm -rf "$tmp"; die "Kon wp-config.php van de nieuwe server niet lezen."; }
+    cp "$tmp/wp-config.php" "$BK/wp-config.php.voor-verhuizing"
+    sed -i -E "s/^([[:space:]]*\\\$table_prefix[[:space:]]*=[[:space:]]*)['\"][^'\"]*['\"]/\1'$prefix'/" "$tmp/wp-config.php"
+    grep -qE "table_prefix[[:space:]]*=[[:space:]]*'$prefix'" "$tmp/wp-config.php" || { rm -rf "$tmp"; die "Kon de tabelprefix in wp-config.php niet aanpassen."; }
+    lf "put -O '$ROOT' '$tmp/wp-config.php'" >/dev/null || { rm -rf "$tmp"; die "Kon wp-config.php niet terugzetten."; }
+    rm -rf "$tmp"
+  else
+    rssh "cp '$ROOT/wp-config.php' '$ROOT/wp-config.php.wpopen-bak'" || true
+    live_wp config set table_prefix "$prefix" --type=variable >/dev/null
+  fi
+  ok "Tabelprefix op live ingesteld op '$prefix'"
+}
+
+sftp_import_db() {  # sql-bestand → live database via een tijdelijk PHP-bestand (geen WP-CLI beschikbaar)
+  local sql="$1" tmp name rel dir
+  tmp=$(mktemp -d); name="wpo-$(rand 10).sql.gz"
+  gzip -c "$sql" > "$tmp/$name"
+  # buiten de webroot als dat kan: een dump hoort nooit te downloaden te zijn
+  dir="$(dirname "$ROOT")"; rel="../$name"
+  if ! lf "put -O '$dir' '$tmp/$name'" >/dev/null 2>&1; then dir="$ROOT"; rel="$name"; lf "put -O '$dir' '$tmp/$name'" >/dev/null || { rm -rf "$tmp"; return 1; }; fi
+  rm -rf "$tmp"
+  local rc=0
+  live_php "$(sed "s#__REL__#$rel#" <<'PHP'
+$f = __DIR__ . '/__REL__';
+if (!is_file($f)) { http_response_code(500); exit; }
+global $wpdb;
+$db = $wpdb->dbh;
+mysqli_query($db, 'SET FOREIGN_KEY_CHECKS=0');
+$h = gzopen($f, 'rb'); $q = ''; $n = 0;
+while (($line = gzgets($h)) !== false) {
+  $t = rtrim($line);
+  if ($q === '' && ($t === '' || strpos($t, '--') === 0)) { continue; }
+  $q .= $line;
+  if (substr($t, -1) === ';') {
+    if (!mysqli_query($db, $q)) { gzclose($h); @unlink($f); echo '✗ ' . mysqli_error($db) . "\n"; http_response_code(500); exit; }
+    $q = ''; $n++;
+  }
+}
+gzclose($h); @unlink($f);
+echo "✓ $n SQL-opdrachten uitgevoerd\n";
+PHP
+)" "" 1 || rc=$?
+  lf "rm -f '$dir/$name'" >/dev/null 2>&1 || true
+  return $rc
+}
+
+cmd_migrate() {
+  [ $# -ge 2 ] || die "Gebruik: wpopen migrate <naam> [ssh-opties] user@host --url https://… [--remote pad] [--mode ssh|sftp] [--provider p] [--keep-old] [--no-uploads]"
+  need git rsync
+  get "$1"; need_wordpress; shift
+  local remote="" mode="" prov="" url="" keep=0 uploads=1 rest=() ntarget="" nopts="" nhost probe
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --remote) remote="${2:-}"; shift;; --mode) mode="${2:-}"; shift;;
+      --provider) prov="${2:-}"; shift;; --url) url="${2:-}"; shift;;
+      --keep-old) keep=1;; --no-uploads) uploads=0;;
+      *) rest+=("$1");;
+    esac; shift
+  done
+  set -- "${rest[@]+"${rest[@]}"}"
+  [ $# -ge 1 ] || die "Geef de nieuwe server op: user@host"
+  if [[ "$1" =~ ^s?ftp://([^@/]+)@([^:/]+)(:([0-9]+))?/?$ ]]; then
+    ntarget="${BASH_REMATCH[1]}@${BASH_REMATCH[2]}"; nopts="${BASH_REMATCH[4]:+-p ${BASH_REMATCH[4]}}"
+  else
+    [ "$1" = ssh ] && shift
+    ntarget="${!#}"; [ $# -gt 1 ] && nopts="${*:1:$#-1}"
+  fi
+  [[ "$ntarget" =~ ^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+$ ]] || die "Server moet de vorm gebruiker@host hebben."
+  [[ "$url" =~ ^https?://[A-Za-z0-9.-]+/?$ ]] || die "Geef het adres van de nieuwe site op met --url https://… (zonder pad)."
+  [ -z "$mode" ] || [[ "$mode" =~ ^(ssh|sftp)$ ]] || die "Modus moet ssh of sftp zijn."
+  [ -z "$prov" ] || [[ "$prov" =~ ^(wpmudev|hostinger|other)$ ]] || die "Provider moet wpmudev, hostinger of other zijn."
+  valid_field "$nopts"; valid_field "$remote"
+  nhost="${url#*//}"; nhost="${nhost%/}"
+  built
+  [ -d "$LWPC/.git" ] || die "$NAME heeft geen git-repo. Bouw de site eerst opnieuw."
+
+  # de oude live-server blijft bewaard als die er was
+  local was_local=0 otarget="$TARGET" oopts="$OPTS" oremote="$REMOTE" omode="$MODE" oprov="$PROVIDER" ourl="$LIVEURL"
+  is_local && was_local=1
+  cd "$PROJ"; ddev_up >/dev/null
+  [ $was_local = 0 ] && [ $uploads = 1 ] && pull_uploads
+
+  step "Nieuwe server controleren ($ntarget)…"
+  if [ -z "$mode" ]; then
+    # shellcheck disable=SC2086
+    probe=$(ssh -n $nopts -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "$ntarget" true 2>&1 || true)
+    if grep -qi "sftp connections only" <<<"$probe"; then mode=sftp; else mode=ssh; fi
+  fi
+  if [ "$mode" = ssh ]; then
+    ensure_key "$ntarget" "$nopts" || die "Inloggen op $ntarget mislukt. Zet je publieke sleutel bij de host, of geef het SSH-wachtwoord op."
+  else
+    need lftp curl
+  fi
+  TARGET="$ntarget"; OPTS="$nopts"; MODE="$mode"; SSHE="ssh $OPTS"; LIVEHOST="$nhost"
+  [ -n "$remote" ] || remote=$(find_remote_wpcontent "$nhost") || exit 1
+  REMOTE="$remote"; ROOT="$(dirname "$REMOTE")"
+  if [ "$MODE" = ssh ]; then
+    rssh "wp core is-installed --path='$ROOT'" >/dev/null 2>&1 || die "Geen werkende WordPress in $ROOT op $TARGET. Installeer eerst WordPress bij de nieuwe host."
+  else
+    lf "cls '$ROOT/wp-config.php'" >/dev/null 2>&1 || die "Geen wp-config.php in $ROOT op $TARGET. Installeer eerst WordPress bij de nieuwe host."
+  fi
+  ok "WordPress gevonden: $TARGET:$REMOTE ($([ "$MODE" = sftp ] && echo 'alleen SFTP' || echo SSH))"
+  confirm "Alles op $nhost wordt vervangen door $NAME (bestanden en database). Doorgaan?" || die "Afgebroken."
+
+  new_backup migrate; meta target "$TARGET"; meta url "$url"
+  step "Back-up van de nieuwe server…"
+  backup_live_db || warn "Database van de nieuwe server niet bewaard"
+  backup_live_full
+
+  step "Bestanden uploaden naar $nhost…"
+  if [ "$MODE" = sftp ]; then
+    lf "set sftp:max-packets-in-flight 64
+mirror -R --no-perms --parallel=4 $MIGRATE_LFTP_EXC '$LWPC' '$REMOTE'" >/dev/null || die "Uploaden mislukt. De nieuwe server staat in back-up $(basename "$BK")."
+  else
+    rsync -az -e "$SSHE" "${MIGRATE_EXC[@]}" "$LWPC/" "$TARGET:$REMOTE/" || die "Uploaden mislukt. De nieuwe server staat in back-up $(basename "$BK")."
+  fi
+  ok "wp-content staat op de nieuwe server"
+
+  step "Database klaarmaken voor $nhost…"
+  local lp dp tmp
+  lp=$(cd "$PROJ" && ddev wp db prefix --skip-plugins --skip-themes 2>/dev/null | tr -d '\r')
+  [[ "$lp" =~ ^[A-Za-z0-9_]+$ ]] || die "Kon de lokale tabelprefix niet bepalen."
+  tmp=$(mktemp -d)
+  # --export laat de lokale database ongemoeid; de regex vangt ook JSON-geëscapete adressen (\/\/host)
+  (cd "$PROJ" && ddev wp search-replace '(\\?/\\?/)'"${SLUG//./\\.}"'\.ddev\.site' '${1}'"$nhost" --regex --regex-delimiter='#' \
+    --all-tables --skip-columns=guid --skip-plugins --skip-themes --export=.wpopen-migrate.sql >/dev/null) \
+    || { rm -f "$PROJ/.wpopen-migrate.sql"; die "Lokale database exporteren mislukt."; }
+  # de export zet foreign-key-controles niet uit; tabellen met constraints (o.a. Defender) zouden dan falen
+  { echo 'SET NAMES utf8mb4;'; echo 'SET FOREIGN_KEY_CHECKS=0;'; cat "$PROJ/.wpopen-migrate.sql"; echo 'SET FOREIGN_KEY_CHECKS=1;'; } > "$tmp/db.sql"
+  rm -f "$PROJ/.wpopen-migrate.sql"
+  dp=$(remote_prefix || true)
+  step "Database importeren op de nieuwe server…"
+  if [ "$MODE" = sftp ]; then
+    sftp_import_db "$tmp/db.sql" || { rm -rf "$tmp"; die "Importeren mislukt. Herstel met: wpopen restore $NAME $(basename "$BK") --live-db"; }
+  else
+    rssh_in "wp db import - --path='$ROOT'" < "$tmp/db.sql" >/dev/null || { rm -rf "$tmp"; die "Importeren mislukt. Herstel met: wpopen restore $NAME $(basename "$BK") --live-db"; }
+  fi
+  rm -rf "$tmp"
+  ok "Database staat op de nieuwe server"
+  if [ -n "$dp" ] && [ "$dp" != "$lp" ]; then set_remote_prefix "$lp"; fi
+  live_eval "$MIGRATE_FINISH_PHP" || warn "Afronden op live mislukt: verwijder zelf de gebruiker 'dev' en sla de permalinks opnieuw op."
+
+  # git: wat nu live staat is de nieuwe main
+  cd "$LWPC"
+  ensure_dev
+  if [ -n "$(git status --porcelain)" ]; then git add -A; gitc commit -qm "Verhuisd naar $nhost" >/dev/null; fi
+  git checkout -q main
+  git merge -q --ff-only dev 2>/dev/null || gitc merge -q --no-edit dev >/dev/null || { git merge --abort 2>/dev/null || true; git checkout -q dev; warn "main en dev niet samengevoegd; doe dat zelf voor de volgende push."; }
+  git tag -f deployed main >/dev/null 2>&1 || true
+  git checkout -q dev
+
+  # sitelijst: deze site wijst nu naar de nieuwe server
+  if [ $was_local = 0 ] && [ $keep = 1 ]; then
+    local oldname="$NAME-oud"; db_has "$oldname" && oldname="$NAME-oud-$(date +%Y%m%d%H%M)"
+    db_write "$oldname" "$oldname|$otarget|$oopts|$oremote|$omode|$oprov|$ourl|$TYPE"
+    ok "Oude server bewaard als '$oldname'"
+  fi
+  db_write "$NAME" "$NAME|$TARGET|$OPTS|$REMOTE|$MODE|${prov:-$(provider_of "$TARGET" "$OPTS")}|$url|$TYPE"
+  echo "$nhost" > "$PROJ/.wpopen-livehost"
+  cd "$PROJ"; RESTART=0; write_uploads_proxy "$nhost"; [ $RESTART = 1 ] && { ddev_restart >/dev/null 2>&1 || true; }
+  flush_live || true
+  ok "Verhuisd! $NAME staat op $url  (back-up van de nieuwe server vooraf: $(basename "$BK"))"
+  note "Verandert het domein nog (DNS omzetten)? Daarna: wpopen domain $NAME https://jouwdomein.nl"
+}
+
+cmd_domain() {  # live omzetten naar het definitieve domein, bv. van een tijdelijk adres na het verhuizen
+  [ $# -ge 2 ] || die "Gebruik: wpopen domain <naam> https://klant.nl"
+  get "$1"; need_wordpress; need_live
+  local url="$2" nhost old scheme
+  [[ "$url" =~ ^(https?)://[A-Za-z0-9.-]+/?$ ]] || die "Geef een volledig adres zonder pad, bijvoorbeeld https://klant.nl"
+  scheme="${BASH_REMATCH[1]}"; nhost="${url#*//}"; nhost="${nhost%/}"
+  [ "$MODE" = ssh ] || die "Domein omzetten kan alleen bij SSH-sites. Bij alleen SFTP: verhuis opnieuw met --url $url"
+  old=$(live_wp option get home --skip-plugins --skip-themes 2>/dev/null | tr -d '\r' | tail -1)
+  old="${old#*//}"; old="${old%%/*}"
+  [ -n "$old" ] || die "Kon het huidige adres van live niet lezen."
+  confirm "Alle adressen op live omzetten van $old naar $nhost?" || die "Afgebroken."
+  new_backup domain; meta from "$old"; meta to "$nhost"
+  backup_live_db || die "Kon eerst geen back-up van de live database maken; niets veranderd."
+  if [ "$old" != "$nhost" ]; then
+    step "Adressen omzetten: $old → $nhost…"
+    live_wp search-replace "//$old" "//$nhost" --all-tables --skip-columns=guid >/dev/null
+    live_wp search-replace "\\/\\/$old" "\\/\\/$nhost" --all-tables --skip-columns=guid >/dev/null
+  fi
+  [ "$scheme" = https ] && live_wp search-replace "http://$nhost" "https://$nhost" --all-tables --skip-columns=guid >/dev/null
+  db_write "$NAME" "$NAME|$TARGET|$OPTS|$REMOTE|$MODE|$PROVIDER|$url|$TYPE"
+  if [ -d "$PROJ/.ddev" ]; then
+    cd "$PROJ"; RESTART=0; write_uploads_proxy "$nhost"
+    [ $RESTART = 1 ] && { ddev_restart >/dev/null 2>&1 || true; }
+  fi
+  flush_live || true
+  ok "Live gebruikt nu $url (back-up: $(basename "$BK"))"
 }
 
 # ───────────── live zetten ─────────────
@@ -1204,6 +1835,11 @@ drift_check() {  # base — zijn de live-versies nog gelijk aan wat we de vorige
 }
 flush_live() {
   step "Live cache legen…"
+  if is_laravel; then
+    [ "$MODE" = ssh ] || { note "Alleen SFTP: leeg de Laravel-cache zelf (php artisan optimize:clear)"; return 0; }
+    rssh "cd '$ROOT' && php artisan optimize:clear --no-interaction" >/dev/null && ok "Laravel-cache geleegd" || { warn "Live cache legen mislukt"; return 1; }
+    return 0
+  fi
   live_eval "$FLUSH_PHP" || { warn "Live cache legen mislukt"; return 1; }
 }
 push_db() {  # alleen SSH: lokale database naar live, met live-plugins en live-beheerders behouden
@@ -1233,6 +1869,12 @@ push_db() {  # alleen SSH: lokale database naar live, met live-plugins en live-b
 }
 push_uploads() {  # alleen nieuwe uploads, live-bestanden worden nooit overschreven
   step "Nieuwe uploads naar live…"
+  if is_laravel; then
+    [ -d "$PROJ/storage/app/public" ] || { note "Geen lokale uploads"; return 0; }
+    if [ "$MODE" = sftp ]; then lf "mirror -R --only-missing --no-perms '$PROJ/storage/app/public' '$REMOTE/storage/app/public'" >/dev/null
+    else rsync -az --ignore-existing -e "$SSHE" "$PROJ/storage/app/public/" "$TARGET:$REMOTE/storage/app/public/"; fi
+    ok "Uploads bijgewerkt"; return 0
+  fi
   [ -d "$LWPC/uploads" ] || { note "Geen lokale uploads"; return 0; }
   if [ "$MODE" = sftp ]; then lf "mirror -R --only-missing --no-perms -x '^dynamic_avia/' '$LWPC/uploads' '$REMOTE/uploads'" >/dev/null
   else rsync -az --ignore-existing --exclude=dynamic_avia -e "$SSHE" "$LWPC/uploads/" "$TARGET:$REMOTE/uploads/"; fi
@@ -1254,8 +1896,9 @@ cmd_live() {
     done < "$DB"
   fi
   [ -n "$site" ] || die "Geen site herkend. Gebruik: wplive <naam>"
-  get "$site"; [ -d "$LWPC/.git" ] || die "$NAME is nog niet lokaal gebouwd."
+  get "$site"; need_live; [ -d "$LWPC/.git" ] || die "$NAME is nog niet lokaal gebouwd."
   [ $db = 1 ] && [ "$MODE" = sftp ] && die "Database pushen kan alleen bij SSH-sites ($NAME heeft alleen SFTP)."
+  [ $db = 1 ] && is_laravel && die "Bij Laravel gaat de database niet naar live; wijzigingen in de structuur gaan via migraties."
   cd "$LWPC"
   [ "$(git branch --show-current)" = dev ] || die "Je zit niet op dev (maar op '$(git branch --show-current)')."
   local dirty=0; [ -n "$(git status --porcelain)" ] && dirty=1
@@ -1272,6 +1915,8 @@ cmd_live() {
     list=$(git diff --name-only --diff-filter=d "$base" dev | grep -vx '.gitignore' || true)
     deleted=$(git diff --name-only --diff-filter=D "$base" dev || true)
   fi
+  # bij Laravel gaat public/build in z'n geheel mee na een verse build, niet als losse bestanden
+  if is_laravel; then list=$(grep -v '^public/build/' <<<"$list" || true); fi
   if [ -z "$list" ] && [ $db = 0 ] && [ $uploads = 0 ]; then note "Niets nieuws om live te zetten."; return 0; fi
   if [ -n "$list" ]; then
     echo "Bestanden naar live ($(grep -c . <<<"$list")):"; sed 's/^/  ↑ /' <<<"$list"
@@ -1279,10 +1924,18 @@ cmd_live() {
   [ -n "$deleted" ] && { note "Lokaal verwijderd, blijft op live staan:"; sed 's/^/    /' <<<"$deleted"; }
   [ $db = 1 ] && note "De lokale database gaat ook naar live (live wordt eerst bewaard)."
   [ $uploads = 1 ] && note "Nieuwe uploads gaan ook naar live."
+  if is_laravel; then
+    grep -qE '^composer\.(json|lock)$' <<<"$list" && note "Composer-pakketten worden op live bijgewerkt (composer install --no-dev)."
+    frontend_changed "$list" && note "Assets worden lokaal gebouwd (npm run build) en public/build gaat mee."
+    grep -q '^database/migrations/' <<<"$list" && note "Nieuwe migraties draaien op live (php artisan migrate --force); de live database wordt eerst bewaard."
+  fi
   if [ $dry = 1 ]; then ok "Proefrun: er is niets veranderd."; return 0; fi
   confirm "Dit overschrijft live ($LIVEHOST). Doorgaan?" || die "Afgebroken."
+  local build_assets=0
+  if is_laravel && frontend_changed "$list"; then laravel_build_assets; build_assets=1; fi
 
   new_backup push; meta base "$(git rev-parse "$base")"; meta commit "$(git rev-parse dev)"
+  if is_laravel && grep -q '^database/migrations/' <<<"$list"; then backup_live_db || die "Kon de live database niet bewaren; er is niets veranderd."; fi
   if [ -n "$list" ]; then
     printf '%s\n' "$list" > "$BK/files"
     if [ $nobackup = 0 ]; then
@@ -1315,6 +1968,8 @@ cmd_live() {
     git tag -f deployed main >/dev/null
     git checkout -q dev
     ok "Bestanden staan live"
+    if [ $build_assets = 1 ]; then laravel_push_assets; fi
+    if is_laravel; then laravel_after_push "$BK/files"; fi
   fi
   [ $db = 1 ] && push_db
   [ $uploads = 1 ] && push_uploads
@@ -1329,25 +1984,35 @@ cmd_test() {
   get "$1"; local json=0 t out code; [ "${2:-}" = --json ] && json=1
   {
     t=$(date +%s%N)
-    if [ "$MODE" = sftp ]; then
-      if out=$(lf "cls -1 '$REMOTE/'" 2>&1) && grep -q 'themes' <<<"$out"; then echo "connection|ok|SFTP bereikbaar|$TARGET, $(ms_since "$t") ms"
+    if is_local; then
+      echo "connection|skip|Live-server|nog niet gekoppeld (lokale site)"
+    elif [ "$MODE" = sftp ]; then
+      if out=$(lf "cls -1 '$REMOTE/'" 2>&1) && grep -qE 'themes|artisan' <<<"$out"; then echo "connection|ok|SFTP bereikbaar|$TARGET, $(ms_since "$t") ms"
       else echo "connection|fail|SFTP bereikbaar|$(tail -1 <<<"$out" | cut -c1-160)"; fi
-      echo "wpcli|skip|WP-CLI op live|niet beschikbaar (alleen SFTP)"
+      echo "wpcli|skip|$(is_laravel && echo 'Laravel op live' || echo 'WP-CLI op live')|niet beschikbaar (alleen SFTP)"
     else
       # shellcheck disable=SC2086
       if out=$(ssh -n $OPTS -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "$TARGET" 'echo wpo-ok' 2>&1) && grep -q wpo-ok <<<"$out"; then
         echo "connection|ok|SSH bereikbaar|$TARGET, $(ms_since "$t") ms"
-        if out=$(rssh "wp core version --path='$ROOT'" 2>&1); then echo "wpcli|ok|WP-CLI op live|WordPress $(tail -1 <<<"$out" | tr -d '\r')"
-        else echo "wpcli|fail|WP-CLI op live|$(tail -1 <<<"$out" | cut -c1-160)"; fi
+        if is_laravel; then
+          if out=$(rssh "cd '$ROOT' && php artisan --version" 2>&1); then echo "wpcli|ok|Laravel op live|$(tail -1 <<<"$out" | tr -d '\r')"
+          else echo "wpcli|fail|Laravel op live|$(tail -1 <<<"$out" | tr '|' '/' | cut -c1-160)"; fi
+        elif out=$(rssh "wp core version --path='$ROOT'" 2>&1); then echo "wpcli|ok|WP-CLI op live|WordPress $(tail -1 <<<"$out" | tr -d '\r')"
+        else echo "wpcli|fail|WP-CLI op live|$(tail -1 <<<"$out" | tr '|' '/' | cut -c1-160)"; fi
       else
         echo "connection|fail|SSH bereikbaar|$(tail -1 <<<"$out" | cut -c1-160)"
         echo "wpcli|skip|WP-CLI op live|overgeslagen"
       fi
     fi
-    out=$(curl -sS -o /dev/null -L --max-time 20 -w '%{http_code} %{time_total}' "https://$LIVEHOST/" 2>&1 || true)
-    code="${out%% *}"
-    if [[ "$code" =~ ^[23][0-9][0-9]$ ]]; then echo "http|ok|Live website|HTTP $code in $(awk -v t="${out##* }" 'BEGIN{printf "%d", t*1000}') ms"
-    else echo "http|fail|Live website|${out:0:160}"; fi
+    if is_local; then echo "http|skip|Live website|nog niet live"
+    elif [[ "$LIVEHOST" =~ ^[0-9.]+$ ]]; then echo "http|skip|Live website|geen domein bekend: vul het live-adres in bij de gegevens van de site"
+    else
+      out=$(curl -sS -o /dev/null -L --max-time 20 -w '%{http_code} %{time_total}' "https://$LIVEHOST/" 2>&1 || true)
+      code="${out%% *}"
+      # curl-fouten beslaan meerdere regels; één regel per controle
+      if [[ "$code" =~ ^[23][0-9][0-9]$ ]]; then echo "http|ok|Live website|HTTP $code in $(awk -v t="${out##* }" 'BEGIN{printf "%d", t*1000}') ms"
+      else echo "http|fail|Live website|$(head -1 <<<"$out" | tr '|' '/' | cut -c1-160)"; fi
+    fi
     if [ -f "$PROJ/.wpopen-ready" ]; then
       out=$(curl -sk -o /dev/null --max-time 15 -w '%{http_code}' "$LOCALURL/" 2>/dev/null || true)
       if [[ "$out" =~ ^[23][0-9][0-9]$ ]]; then echo "local|ok|Lokale site|HTTP $out op $LOCALURL"
@@ -1357,11 +2022,12 @@ cmd_test() {
 }
 cmd_updates() {
   [ $# -ge 1 ] || die "Gebruik: wpopen updates <naam> [--local] [--json]"
-  get "$1"; shift
+  get "$1"; need_wordpress; shift
   local where=live json=0 out
+  is_local && where=local
   while [ $# -gt 0 ]; do case "$1" in --local) where=local;; --live) where=live;; --json) json=1;; esac; shift; done
   if [ $where = local ]; then built; out=$(local_eval "$UPDATES_PHP" | tail -1)
-  else out=$(live_eval "$UPDATES_PHP" | grep '^{' | tail -1); fi
+  else need_live; out=$(live_eval "$UPDATES_PHP" | grep '^{' | tail -1); fi
   [ -n "$out" ] || die "Kon de updates niet ophalen."
   if [ $json = 1 ]; then echo "$out"; return; fi
   OUT="$out" python3 -c '
@@ -1375,21 +2041,26 @@ if not any(d.values()): print("✓ Alles is up-to-date")'
 cmd_cache() {
   [ $# -ge 1 ] || die "Gebruik: wpopen cache <naam> [--live]"
   get "$1"
-  if [ "${2:-}" = --live ]; then flush_live
+  if is_laravel && [ "${2:-}" != --live ]; then built; step "Lokale cache legen…"; (cd "$PROJ" && ddev artisan optimize:clear); return; fi
+  if [ "${2:-}" = --live ]; then need_live; flush_live
   else built; step "Lokale cache legen…"; local_eval "$FLUSH_PHP"; fi
 }
 cmd_login() {   # eenmalige inloglink (2 minuten geldig) voor wp-admin
   [ $# -ge 1 ] || die "Gebruik: wpopen login <naam> [--live] [--user gebruiker]"
-  get "$1"; shift
+  get "$1"; need_wordpress; shift
   local live=0 user="" tok
   while [ $# -gt 0 ]; do case "$1" in --live) live=1;; --user) user="${2:-}"; shift;; esac; shift; done
   [[ -z "$user" || "$user" =~ ^[A-Za-z0-9._@-]+$ ]] || die "Ongeldige gebruikersnaam."
   tok=$(rand 24)
   if [ $live = 0 ]; then
-    built; cd "$PROJ"; ddev start >/dev/null 2>&1; write_local_mu
-    ddev wp eval "set_transient('wpopen_login', hash('sha256', '$tok'), 120);" --skip-themes >/dev/null
+    built
+    # alleen starten als de webcontainer niet al draait: ddev start kost ook dan seconden
+    docker inspect -f '{{.State.Running}}' "ddev-$SLUG-web" 2>/dev/null | grep -q true || { cd "$PROJ"; ddev_up >/dev/null 2>&1; }
+    write_local_mu
+    ( umask 077; printf '%s %s\n' "$(printf %s "$tok" | sha256sum | cut -d' ' -f1)" "$(( $(date +%s) + 120 ))" > "$LWPC/.wpopen-login" )
     echo "$LOCALURL/?wpopen-login=$tok"; return
   fi
+  need_live
   local name tmp; name="wpo-$(rand 6).php"; tmp=$(mktemp -d)
   sed -e "s/__TOKEN__/$tok/" -e "s/__EXPIRES__/$(( $(date +%s) + 120 ))/" -e "s/__USER__/$user/" > "$tmp/$name" <<'PHP'
 <?php
@@ -1424,16 +2095,29 @@ PHP
 }
 cmd_wp() {
   [ $# -ge 2 ] || die "Gebruik: wpopen wp <naam> [--live] <wp-cli argumenten>"
-  get "$1"; shift
+  get "$1"; need_wordpress; shift
   local live=0; [ "${1:-}" = --live ] && { live=1; shift; }
   [ "${1:-}" = -- ] && shift
   [ $# -gt 0 ] || die "Geen WP-CLI-commando opgegeven."
-  if [ $live = 1 ]; then live_wp "$@"
+  if [ $live = 1 ]; then need_live; live_wp "$@"
   else built; cd "$PROJ"; ddev wp "$@"; fi
+}
+need_shell() { [ "$MODE" = ssh ] || die "$NAME heeft alleen SFTP: commando's op de server kunnen niet."; }
+cmd_artisan() {
+  [ $# -ge 2 ] || die "Gebruik: wpopen artisan <naam> [--live] <artisan argumenten>"
+  get "$1"; shift
+  is_laravel || die "$NAME is geen Laravel-site. Gebruik: wpopen wp $NAME …"
+  local live=0; [ "${1:-}" = --live ] && { live=1; shift; }
+  [ "${1:-}" = -- ] && shift
+  [ $# -gt 0 ] || die "Geen artisan-commando opgegeven."
+  if [ $live = 0 ]; then built; cd "$PROJ"; ddev artisan "$@"; return; fi
+  need_live; need_shell
+  # --no-interaction: een vraag (bv. migrate in productie) wordt veilig met 'nee' beantwoord; geef zelf --force mee
+  rssh "cd '$ROOT' && php artisan $(printf '%q ' "$@") --no-interaction"
 }
 cmd_ssh() {
   [ $# -ge 1 ] || die "Gebruik: wpopen ssh <naam>"
-  get "$1"
+  get "$1"; need_live
   if [ "$MODE" = sftp ]; then
     local port=""; [[ "$OPTS" =~ -p\ ([0-9]+) ]] && port="-P ${BASH_REMATCH[1]}"
     note "$NAME heeft alleen SFTP: je krijgt een SFTP-sessie. Bestanden staan in $REMOTE"
@@ -1446,7 +2130,7 @@ cmd_ssh() {
 
 # ───────────── start ─────────────
 # algemene vlaggen weghalen; niet bij `wp`, daar horen ze bij WP-CLI zelf
-if [ "${1:-}" != wp ]; then
+if [ "${1:-}" != wp ] && [ "${1:-}" != artisan ]; then
   args=()
   for a in "$@"; do case "$a" in --yes|-y) export WPO_YES=1;; --no-launch) export WPO_NO_LAUNCH=1;; *) args+=("$a");; esac; done
   set -- "${args[@]+"${args[@]}"}"
@@ -1462,6 +2146,9 @@ case "${1:-}" in
   add)      shift; cmd_add "$@";;
   update)   shift; cmd_update "$@";;
   remove)   shift; cmd_remove "$@";;
+  new)      shift; cmd_new "$@";;
+  migrate)  shift; cmd_migrate "$@";;
+  domain)   shift; cmd_domain "$@";;
   list)     shift; cmd_list "$@";;
   "")       cmd_list;;
   info)     shift; cmd_info "$@";;
@@ -1481,6 +2168,7 @@ case "${1:-}" in
   cache)    shift; cmd_cache "$@";;
   login)    shift; cmd_login "$@";;
   wp)       shift; cmd_wp "$@";;
+  artisan)  shift; cmd_artisan "$@";;
   ssh)      shift; cmd_ssh "$@";;
   *)        cmd_open "$@";;
 esac

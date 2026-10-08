@@ -3,6 +3,7 @@
 namespace App\Providers;
 
 use App\Services\AppSettings;
+use App\Support\InstallationKey;
 use App\View\Composers\LayoutComposer;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Database\Eloquent\Model;
@@ -21,6 +22,11 @@ class AppServiceProvider extends ServiceProvider
     {
         // scoped: een queue-worker leeft lang en moet gewijzigde instellingen per job zien
         $this->app->scoped(AppSettings::class);
+
+        // in register(): NativePHP heeft de opslagmap dan al omgezet en de encrypter is nog niet gemaakt
+        if (config('nativephp-internal.running')) {
+            config(['app.key' => InstallationKey::in($this->app->storagePath())->get(), 'app.previous_keys' => []]);
+        }
     }
 
     /**

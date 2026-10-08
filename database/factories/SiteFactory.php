@@ -4,6 +4,7 @@ namespace Database\Factories;
 
 use App\Enums\SiteMode;
 use App\Enums\SiteProvider;
+use App\Enums\SiteType;
 use App\Models\Site;
 use Illuminate\Database\Eloquent\Factories\Factory;
 use Illuminate\Support\Str;
@@ -38,9 +39,11 @@ class SiteFactory extends Factory
                 return;
             }
 
-            $derived = array_intersect_key($this->snapshot($site->name), array_flip([
-                'name', 'slug', 'target', 'host', 'live_host', 'live_site_url', 'local_url', 'project_dir', 'wp_content_dir',
-            ]));
+            // een lokale site heeft geen server: alleen de lokale velden afleiden van de naam
+            $keys = ($site->snapshot['local_only'] ?? false)
+                ? ['name', 'slug', 'local_url', 'project_dir', 'wp_content_dir']
+                : ['name', 'slug', 'target', 'host', 'live_host', 'live_site_url', 'local_url', 'project_dir', 'wp_content_dir'];
+            $derived = array_intersect_key($this->snapshot($site->name), array_flip($keys));
 
             $site->snapshot = array_replace($site->snapshot ?? [], $derived);
         });
@@ -59,6 +62,23 @@ class SiteFactory extends Factory
     public function hostinger(): static
     {
         return $this->snapshotState(['provider' => SiteProvider::Hostinger->value, 'port' => 65002, 'opts' => '-p 65002']);
+    }
+
+    /**
+     * Gemaakt met "Nieuwe lokale site": gebouwd, maar zonder live-server.
+     */
+    public function localOnly(): static
+    {
+        return $this->built()->snapshotState([
+            'local_only' => true, 'mode' => SiteMode::Local->value, 'target' => '', 'user' => '', 'host' => '',
+            'remote' => '', 'root' => '.', 'provider' => SiteProvider::Other->value,
+            'live_host' => null, 'live_site_url' => null,
+        ]);
+    }
+
+    public function laravel(): static
+    {
+        return $this->snapshotState(['type' => SiteType::Laravel->value, 'remote' => '/home/u1/shop', 'root' => '/home/u1/shop']);
     }
 
     public function built(): static
@@ -102,6 +122,7 @@ class SiteFactory extends Factory
             'remote' => '/home/wesley/'.$name.'/public_html/wp-content',
             'root' => '/home/wesley/'.$name.'/public_html',
             'mode' => SiteMode::Ssh->value,
+            'type' => SiteType::WordPress->value,
             'provider' => SiteProvider::Wpmudev->value,
             'live_url' => null,
             'live_host' => $name.'.nl',

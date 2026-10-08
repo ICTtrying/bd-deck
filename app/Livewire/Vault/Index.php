@@ -73,7 +73,7 @@ class Index extends Component
     public function create(): void
     {
         $this->resetForm();
-        $this->dispatch('open-modal', 'credential');
+        $this->dispatch('open-modal', name: 'credential');
     }
 
     public function edit(int $id): void
@@ -89,7 +89,7 @@ class Index extends Component
             'url' => (string) $credential->url,
             'notes' => (string) $credential->notes,
         ]);
-        $this->dispatch('open-modal', 'credential');
+        $this->dispatch('open-modal', name: 'credential');
     }
 
     public function save(): void
@@ -128,7 +128,7 @@ class Index extends Component
 
         $this->resetForm();
         unset($this->credentials);
-        $this->dispatch('close-modal', 'credential');
+        $this->dispatch('close-modal', name: 'credential');
         $this->dispatch('toast', title: __('Opgeslagen in de kluis'), tone: 'success');
     }
 

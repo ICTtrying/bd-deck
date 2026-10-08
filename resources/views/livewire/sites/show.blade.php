@@ -2,8 +2,7 @@
     /** @var \App\Models\Site $site */
     $active = $this->activeRun;
     $git = $site->data('git');
-    $tabs = ['overzicht' => __('Overzicht'), 'back-ups' => __('Back-ups'), 'wp-cli' => __('WP-CLI'), 'logboek' => __('Logboek')];
-    $chip = 'inline-flex h-7 items-center gap-1.5 rounded-md bg-surface/70 px-2 text-[0.8125rem] font-medium transition-colors hover:bg-surface';
+    $tabs = ['overzicht' => __('Overzicht'), 'back-ups' => __('Back-ups'), 'wp-cli' => $site->isLaravel() ? 'Artisan' : __('WP-CLI'), 'logboek' => __('Logboek')];
 @endphp
 
 <div class="grid gap-6" @if ($active) wire:poll.1500ms="poll" @endif>
@@ -19,16 +18,30 @@
                 </button>
             </div>
             <div class="flex flex-wrap items-center gap-1.5 text-[0.8125rem] text-muted">
-                <x-provider-badge :provider="$site->providerType" />
-                <x-badge>{{ $site->mode->label() }}</x-badge>
-                <span class="font-mono text-xs">{{ $site->data('target') }}</span>
+                @if ($site->isLocalOnly())
+                    <x-badge tone="local">{{ __('Alleen lokaal') }}</x-badge>
+                    <span class="font-mono text-xs">{{ $site->localUrl() }}</span>
+                @else
+                    <x-badge :tone="$site->isLaravel() ? 'info' : 'neutral'">{{ $site->type->label() }}</x-badge>
+                    <x-provider-badge :provider="$site->providerType" />
+                    <x-badge>{{ $site->mode->label() }}</x-badge>
+                    <span class="font-mono text-xs">{{ $site->data('target') }}</span>
+                @endif
             </div>
         </div>
         <div class="flex flex-wrap items-center gap-2">
-            @if ($site->providerType->dashboardUrl())
-                <x-button icon="external" wire:click="launch({{ $site->id }}, 'hosting')">{{ $site->providerType->label() }}</x-button>
+            @if ($site->isLocalOnly())
+                <x-button variant="live" icon="rocket" :href="route('sites.migrate', $site)" wire:navigate>{{ __('Live zetten') }}</x-button>
+            @else
+                @if ($site->providerType->dashboardUrl())
+                    <x-button icon="external" wire:click="launch({{ $site->id }}, 'hosting')">{{ $site->providerType->label() }}</x-button>
+                @endif
+                @unless ($site->isLaravel())
+                    <x-button icon="rocket" :href="route('sites.migrate', $site)" wire:navigate>{{ __('Verhuizen') }}</x-button>
+                @endunless
+                <x-button icon="pencil" :href="route('sites.edit', $site)" wire:navigate>{{ __('Gegevens') }}</x-button>
             @endif
-            <x-button icon="pencil" :href="route('sites.edit', $site)" wire:navigate>{{ __('Gegevens') }}</x-button>
+            <x-button size="icon" variant="danger-ghost" icon="trash" x-on:click="$dispatch('confirm-delete-site', { siteId: {{ $site->id }} })" :title="__('Verwijderen')" />
         </div>
     </header>
 
@@ -36,28 +49,36 @@
     <x-site-bridge :site="$site" size="lg" :flow="$this->flow()">
         <x-slot:local>
             @if ($site->isBuilt())
-                <button type="button" class="{{ $chip }}" wire:click="launch({{ $site->id }}, 'local-admin')"><x-icon name="wordpress" :size="14" />{{ __('WP-admin') }}</button>
-                <button type="button" class="{{ $chip }}" wire:click="launch({{ $site->id }}, 'local-site')"><x-icon name="globe" :size="14" />{{ __('Website') }}</button>
-                <button type="button" class="{{ $chip }}" wire:click="launch({{ $site->id }}, 'editor')"><x-icon name="code" :size="14" />{{ __('Editor') }}</button>
-                <button type="button" class="{{ $chip }}" wire:click="launch({{ $site->id }}, 'terminal')"><x-icon name="terminal" :size="14" />{{ __('Terminal') }}</button>
-                <button type="button" class="{{ $chip }}" wire:click="launch({{ $site->id }}, 'folder')"><x-icon name="folder" :size="14" />{{ __('Map') }}</button>
+                @unless ($site->isLaravel())
+                    <x-quick-action chip :site="$site" target="local-admin" icon="wordpress" :label="__('WP-admin')" />
+                @endunless
+                <x-quick-action chip :site="$site" target="local-site" icon="globe" :label="__('Website')" />
+                <x-quick-action chip :site="$site" target="editor" icon="code" :label="__('Editor')" />
+                <x-quick-action chip :site="$site" target="terminal" icon="terminal" :label="__('Terminal')" />
+                <x-quick-action chip :site="$site" target="folder" icon="folder" :label="__('Map')" />
             @else
                 <x-button size="sm" variant="primary" icon="hammer" wire:click="run('build')" :disabled="(bool) $active">{{ __('Lokaal bouwen') }}</x-button>
             @endif
         </x-slot:local>
 
         <x-slot:actions>
-            @if ($site->isBuilt())
+            @if ($site->isLocalOnly())
+                <x-button size="sm" variant="live" icon="rocket" :href="route('sites.migrate', $site)" wire:navigate :disabled="(bool) $active">{{ __('Live zetten') }}</x-button>
+            @elseif ($site->isBuilt())
                 <div x-data="{ open: false }" class="relative">
                     <x-button size="sm" icon="arrow-left" x-on:click="open = ! open" :disabled="(bool) $active">{{ __('Ophalen') }}</x-button>
                     <div x-show="open" x-cloak x-on:click.outside="open = false" x-transition.opacity.duration.100ms class="absolute left-1/2 top-full z-20 mt-1.5 w-60 -translate-x-1/2 rounded-xl border border-line bg-surface p-1 shadow-[0_16px_40px_-16px_rgb(7_19_31/0.4)]">
                         <button type="button" class="flex w-full items-start gap-2.5 rounded-lg px-2.5 py-2 text-left hover:bg-raised" wire:click="run('pull-code')" x-on:click="open = false">
                             <x-icon name="code" class="mt-0.5 text-local-ink" />
-                            <span><span class="block text-sm font-medium">{{ __('Code') }}</span><span class="block text-[0.8125rem] text-muted">{{ __('Thema en plugins van live naar main en dev.') }}</span></span>
+                            <span><span class="block text-sm font-medium">{{ __('Code') }}</span><span class="block text-[0.8125rem] text-muted">{{ $site->isLaravel() ? __('Projectcode van live naar main en dev.') : __('Thema en plugins van live naar main en dev.') }}</span></span>
                         </button>
                         <button type="button" class="flex w-full items-start gap-2.5 rounded-lg px-2.5 py-2 text-left hover:bg-raised" wire:click="confirm('pull-database')" x-on:click="open = false">
                             <x-icon name="database" class="mt-0.5 text-local-ink" />
                             <span><span class="block text-sm font-medium">{{ __('Database') }}</span><span class="block text-[0.8125rem] text-muted">{{ __('Verse kopie van live, lokale db wordt eerst bewaard.') }}</span></span>
+                        </button>
+                        <button type="button" class="flex w-full items-start gap-2.5 rounded-lg px-2.5 py-2 text-left hover:bg-raised" wire:click="confirm('pull-uploads')" x-on:click="open = false">
+                            <x-icon name="download" class="mt-0.5 text-local-ink" />
+                            <span><span class="block text-sm font-medium">{{ __('Uploads') }}</span><span class="block text-[0.8125rem] text-muted">{{ __('Alle afbeeldingen en bestanden echt lokaal, bv. voor een verhuizing.') }}</span></span>
                         </button>
                     </div>
                 </div>
@@ -66,9 +87,15 @@
         </x-slot:actions>
 
         <x-slot:live>
-            <button type="button" class="{{ $chip }}" wire:click="launch({{ $site->id }}, 'live-admin')"><x-icon name="wordpress" :size="14" />{{ __('WP-admin') }}</button>
-            <button type="button" class="{{ $chip }}" wire:click="launch({{ $site->id }}, 'live-site')"><x-icon name="globe" :size="14" />{{ __('Website') }}</button>
-            <button type="button" class="{{ $chip }}" wire:click="launch({{ $site->id }}, 'ssh')"><x-icon name="server" :size="14" />{{ $site->mode->hasShell() ? 'SSH' : 'SFTP' }}</button>
+            @if ($site->isLocalOnly())
+                <span class="text-[0.8125rem] text-ink/70">{{ __('Nog geen server gekoppeld.') }}</span>
+            @else
+                @unless ($site->isLaravel())
+                    <x-quick-action chip :site="$site" target="live-admin" icon="wordpress" :label="__('WP-admin')" />
+                @endunless
+                <x-quick-action chip :site="$site" target="live-site" icon="globe" :label="__('Website')" />
+                <x-quick-action chip :site="$site" target="ssh" icon="server" :label="$site->mode->hasShell() ? 'SSH' : 'SFTP'" />
+            @endif
         </x-slot:live>
     </x-site-bridge>
 
@@ -95,7 +122,7 @@
     @if ($tab === 'overzicht')
         <div class="grid gap-5 lg:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)]">
             <div class="grid content-start gap-5">
-                <x-panel :title="__('Versiebeheer')" :description="__('main is de laatst bekende live-staat, dev is jouw werk.')">
+                <x-panel :title="__('Versiebeheer')" :description="$site->isLaravel() ? __('main is de laatst bekende live-staat, dev is jouw werk. Het hele project wordt bijgehouden, zonder vendor, node_modules, .env en storage.') : __('main is de laatst bekende live-staat, dev is jouw werk.')">
                     @if ($git)
                         <dl class="grid grid-cols-[auto_1fr] gap-x-6 gap-y-2.5 text-sm">
                             <dt class="text-muted">{{ __('Branch') }}</dt>
@@ -121,19 +148,19 @@
                             <dd class="truncate font-mono text-[0.8125rem]">{{ $git['remote'] ?? __('Geen remote') }}</dd>
                         </dl>
                     @else
-                        <p class="text-muted">{{ __('Bouw de site lokaal om versiebeheer te starten. BD Deck houdt dan je eigen thema en plugins bij in git.') }}</p>
+                        <p class="text-muted">{{ $site->isLaravel() ? __('Bouw de site lokaal om versiebeheer te starten. BD Deck houdt dan het project bij in git.') : __('Bouw de site lokaal om versiebeheer te starten. BD Deck houdt dan je eigen thema en plugins bij in git.') }}</p>
                     @endif
                 </x-panel>
 
                 <x-panel :title="__('Herstellen')" :description="__('Als er lokaal iets mis is gegaan. Deze acties raken live niet.')" :padding="false">
                     <ul class="divide-y divide-line">
                         @php
-                            $repairs = [
-                                ['action' => 'fix-plugins', 'icon' => 'wrench', 'label' => __('Site repareren'), 'text' => __('Prefix, URL\'s, uploads en kapotte plugins rechtzetten.')],
-                                ['action' => 'pull-database', 'icon' => 'database', 'label' => __('Database opnieuw ophalen'), 'text' => __('Verse database van live, lokaal eerst bewaard.')],
-                                ['action' => 'reset', 'icon' => 'rotate-ccw', 'label' => __('Terugzetten naar main'), 'text' => __('Weg met lokale experimenten; werk blijft in een backup-branch.')],
-                                ['action' => 'rebuild', 'icon' => 'hammer', 'label' => __('Opnieuw migreren'), 'text' => __('Alles lokaal opnieuw opbouwen vanaf live.')],
-                            ];
+                            $repairs = collect([
+                                ['action' => 'fix-plugins', 'icon' => 'wrench', 'label' => __('Site repareren'), 'text' => $site->isLaravel() ? __('.env, mappen, Composer-pakketten, storage-link en caches rechtzetten.') : __('Prefix, URL\'s, uploads en kapotte plugins rechtzetten.'), 'live' => false],
+                                ['action' => 'pull-database', 'icon' => 'database', 'label' => __('Database opnieuw ophalen'), 'text' => __('Verse database van live, lokaal eerst bewaard.'), 'live' => true],
+                                ['action' => 'reset', 'icon' => 'rotate-ccw', 'label' => __('Terugzetten naar main'), 'text' => __('Weg met lokale experimenten; werk blijft in een backup-branch.'), 'live' => false],
+                                ['action' => 'rebuild', 'icon' => 'hammer', 'label' => __('Opnieuw migreren'), 'text' => __('Alles lokaal opnieuw opbouwen vanaf live.'), 'live' => true],
+                            ])->reject(fn (array $repair): bool => $repair['live'] && $site->isLocalOnly());
                         @endphp
                         @foreach ($repairs as $repair)
                             <li class="flex items-center gap-3 px-5 py-3">
@@ -184,11 +211,12 @@
                             @endforeach
                         </ul>
                     @else
-                        <p class="text-muted">{{ __('Controleert of SSH/SFTP werkt, WP-CLI op de server draait en de site online is.') }}</p>
+                        <p class="text-muted">{{ $site->isLaravel() ? __('Controleert of SSH/SFTP werkt, Laravel op de server draait en de site online is.') : __('Controleert of SSH/SFTP werkt, WP-CLI op de server draait en de site online is.') }}</p>
                     @endif
                 </x-panel>
 
-                <x-panel :title="__('Updates op live')" :description="$site->updates_checked_at ? __('Gecontroleerd :time', ['time' => $site->updates_checked_at->diffForHumans()]) : __('Nog niet gecontroleerd')">
+                @unless ($site->isLaravel())
+                <x-panel :title="$site->isLocalOnly() ? __('Updates') : __('Updates op live')" :description="$site->updates_checked_at ? __('Gecontroleerd :time', ['time' => $site->updates_checked_at->diffForHumans()]) : __('Nog niet gecontroleerd')">
                     <x-slot:actions>
                         <x-button size="sm" icon="refresh" wire:click="run('updates')">{{ __('Controleren') }}</x-button>
                     </x-slot:actions>
@@ -213,10 +241,14 @@
                     @endif
                 </x-panel>
 
+                @endunless
+
                 <x-panel :title="__('Cache')">
                     <div class="flex flex-wrap gap-2">
                         <x-button size="sm" icon="zap" wire:click="run('cache-local')" :disabled="! $site->isBuilt()">{{ __('Lokaal legen') }}</x-button>
-                        <x-button size="sm" icon="zap" wire:click="confirm('cache-live')">{{ __('Live legen') }}</x-button>
+                        @unless ($site->isLocalOnly())
+                            <x-button size="sm" icon="zap" wire:click="confirm('cache-live')">{{ __('Live legen') }}</x-button>
+                        @endunless
                     </div>
                 </x-panel>
 
@@ -245,6 +277,7 @@
     @endif
 
     <livewire:sites.push-panel :site="$site" :key="'push-'.$site->id" />
+    <livewire:sites.delete-dialog />
 
     @php $confirmation = $confirming ? $this->confirmations()[$confirming] : null; @endphp
     <x-modal name="confirm-action" :title="$confirmation['title'] ?? ''" :tone="($confirmation['danger'] ?? false) ? 'danger' : null">

@@ -53,7 +53,7 @@ class PushPanel extends Component
         $this->flushCache = true;
         $this->loaded = false;
         $this->hasUncommittedChanges = (int) $this->site->data('git.dirty', 0) > 0;
-        $this->dispatch('open-modal', 'push');
+        $this->dispatch('open-modal', name: 'push');
 
         $this->attempt(function () use ($wpopen): void {
             $this->parsePreview($wpopen->runOrFail(['push', $this->site->name, '-n'], 60));
@@ -88,7 +88,7 @@ class PushPanel extends Component
                 flushCache: $this->flushCache,
             ));
 
-            $this->dispatch('close-modal', 'push');
+            $this->dispatch('close-modal', name: 'push');
         });
     }
 

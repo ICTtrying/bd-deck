@@ -2,8 +2,10 @@
 
 namespace App\Livewire\Forms;
 
+use App\Enums\CredentialKind;
 use App\Enums\SiteMode;
 use App\Enums\SiteProvider;
+use App\Models\Credential;
 use App\Models\Site;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
@@ -71,7 +73,7 @@ class SiteForm extends Form
             'extraOptions' => ['nullable', 'string', 'max:200'],
             'discover' => ['boolean'],
             'remotePath' => [Rule::requiredIf(! $this->discover), 'nullable', 'string', 'max:500', 'not_regex:/[|\n\r]/'],
-            'mode' => ['required', Rule::enum(SiteMode::class)],
+            'mode' => ['required', Rule::enum(SiteMode::class)->only(SiteMode::remote())],
             'provider' => ['required', Rule::enum(SiteProvider::class)],
             'liveUrl' => ['nullable', 'url:https', 'max:255'],
             'liveLoginUser' => ['nullable', 'string', 'max:60', 'regex:/^[A-Za-z0-9._@-]+$/'],
@@ -108,6 +110,24 @@ class SiteForm extends Form
         ];
     }
 
+    /**
+     * Het SSH-wachtwoord versleuteld in de kluis, als de gebruiker dat wil.
+     */
+    public function rememberPassword(string $label): void
+    {
+        if ($this->password === '' || ! $this->savePassword) {
+            return;
+        }
+
+        Credential::query()->create([
+            'label' => $label,
+            'kind' => CredentialKind::SshPassword,
+            'site_id' => $this->site?->id,
+            'username' => $this->target(),
+            'secret' => $this->password,
+        ]);
+    }
+
     public function target(): string
     {
         return $this->user.'@'.$this->host;
@@ -119,23 +139,29 @@ class SiteForm extends Form
     }
 
     /**
-     * Plakt iemand "sftp://user@host:65002" of "ssh -p 65002 user@host" in het serverveld, dan vullen we alles in.
+     * Plakt iemand "sftp://user@host:65002", "ssh -p 65002 user@host" of "ssh user@host -p 65002" in een
+     * van de verbindingsvelden, dan vullen we alles in. Geeft terug of er iets herkend is.
      */
-    public function fillFromConnectionString(string $value): void
+    public function fillFromConnectionString(string $value): bool
     {
         $value = trim($value);
 
-        if (preg_match('#^(?:s?ftp://)?([^@\s/]+)@([^:/\s]+)(?::(\d+))?/?$#', $value, $m)) {
-            [$this->user, $this->host] = [$m[1], $m[2]];
-            $this->port = isset($m[3]) ? (int) $m[3] : $this->port;
-        } elseif (preg_match('/^ssh\s+(?:-p\s+(\d+)\s+)?([^@\s]+)@(\S+)$/', $value, $m)) {
-            [$this->user, $this->host] = [$m[2], $m[3]];
-            $this->port = $m[1] !== '' ? (int) $m[1] : 22;
-        } else {
-            return;
+        if (! preg_match('#(?:^|\s)(?:s?ftp://|ssh://)?([A-Za-z0-9._-]+)@([A-Za-z0-9.-]+)(?::(\d+))?/?(?:\s|$)#', $value, $m)) {
+            return false;
         }
 
-        if ($this->name === '') {
+        [$this->user, $this->host] = [$m[1], $m[2]];
+
+        if (isset($m[3]) && $m[3] !== '') {
+            $this->port = (int) $m[3];
+        } elseif (preg_match('/(?:^|\s)-[pP]\s*(\d+)(?:\s|$)|-oPort=(\d+)/', $value, $port)) {
+            $this->port = (int) (($port[1] ?? '') !== '' ? $port[1] : $port[2]);
+        } elseif (preg_match('/^\s*(?:ssh|sftp)\s/', $value)) {
+            $this->port = 22;
+        }
+
+        // een IP-adres is geen bruikbare sitenaam
+        if ($this->name === '' && ! filter_var($this->host, FILTER_VALIDATE_IP)) {
             $this->name = Str::of($this->host)->before('.')->replaceEnd('-serverwpmu', '')->toString();
         }
 
@@ -144,5 +170,7 @@ class SiteForm extends Form
             str_contains($this->host, 'hostinger') || str_contains($this->host, 'hstgr') || $this->port === 65002 => SiteProvider::Hostinger->value,
             default => $this->provider,
         };
+
+        return true;
     }
 }

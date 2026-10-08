@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Exceptions\DesktopLaunchException;
+use App\Support\HostEnvironment;
 use Illuminate\Support\Facades\Process;
 use Native\Desktop\Facades\Shell;
 use Symfony\Component\Process\ExecutableFinder;
@@ -24,7 +25,8 @@ final class DesktopLauncher
             throw new DesktopLaunchException(__('Alleen http(s)-adressen kunnen geopend worden.'));
         }
 
-        if ($this->isNative()) {
+        // op Linux zelf xdg-open starten: Electron geeft de AppImage-omgeving door en dan opent de browser soms niet
+        if ($this->isNative() && PHP_OS_FAMILY !== 'Linux') {
             Shell::openExternal($url);
 
             return;
@@ -37,7 +39,7 @@ final class DesktopLauncher
     {
         $this->assertDirectory($path);
 
-        if ($this->isNative()) {
+        if ($this->isNative() && PHP_OS_FAMILY !== 'Linux') {
             Shell::openFile($path);
 
             return;
@@ -81,7 +83,7 @@ final class DesktopLauncher
         }
 
         // setsid -f: het programma hoort niet bij dit PHP-proces en blijft open als het verzoek klaar is
-        $result = Process::timeout(10)->run(['setsid', '-f', ...$command]);
+        $result = Process::env(HostEnvironment::overrides())->timeout(10)->run(['setsid', '-f', ...$command]);
 
         if (! $result->successful()) {
             throw new DesktopLaunchException(trim($result->errorOutput()) ?: __(':program kon niet gestart worden.', ['program' => $binary]));
