@@ -24,7 +24,13 @@ git push -q origin HEAD
 
 step "Bouwen en publiceren als v$version…"
 # het token alleen als omgevingsvariabele: het komt nooit in .env of in de app
-GITHUB_TOKEN="$(gh auth token)" php artisan native:publish linux x64 --no-interaction
+log=$(mktemp)
+NATIVEPHP_UPDATER_ENABLED=true GITHUB_TOKEN="$(gh auth token)" php artisan native:publish linux x64 --no-interaction 2>&1 | tee "$log"
+# native:publish eindigt ook na een mislukte upload met code 0: controleer op GitHub zelf
+if grep -q '⨯' "$log" || ! gh release view "v$version" --json assets -q '.assets[].name' 2>/dev/null | grep -q '\.AppImage$'; then
+  rm -f "$log"; die "Publiceren mislukt; zie de uitvoer hierboven. Er staat geen AppImage in release v$version."
+fi
+rm -f "$log"
 
 git fetch -q --tags origin
 bin/install-desktop
