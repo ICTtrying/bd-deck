@@ -75,6 +75,9 @@ return [
         'NATIVEPHP_AZURE_ENDPOINT',
         'NATIVEPHP_AZURE_CERTIFICATE_PROFILE_NAME',
         'NATIVEPHP_AZURE_CODE_SIGNING_ACCOUNT_NAME',
+        // zonder deze twee draait de gebouwde app in productiemodus (database en logs in je gebruikersmap)
+        'APP_ENV',
+        'APP_DEBUG',
     ],
 
     /**
@@ -88,6 +91,12 @@ return [
         'content',
         'node_modules',
         '*/tests',
+        // ontwikkeldatabases en logs horen nooit in de app
+        'database/*.sqlite*',
+        'storage/logs/*',
+        'tests',
+        '.claude',
+        '.agents',
     ],
 
     /**
@@ -99,7 +108,7 @@ return [
          * updater will only work when your application is bundled
          * for production.
          */
-        'enabled' => env('NATIVEPHP_UPDATER_ENABLED', true),
+        'enabled' => env('NATIVEPHP_UPDATER_ENABLED', false),
 
         /**
          * The updater provider to use.

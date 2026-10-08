@@ -6,6 +6,7 @@ use App\Services\AppSettings;
 use App\View\Composers\LayoutComposer;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Foundation\DevCommands;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Facades\View;
@@ -28,6 +29,9 @@ class AppServiceProvider extends ServiceProvider
     public function boot(): void
     {
         Model::preventLazyLoading(! $this->app->isProduction());
+
+        // korte acties staan op een eigen wachtrij; zonder 'quick' zouden test en updates blijven hangen
+        DevCommands::artisan('queue:listen --queue=default,quick --tries=1 --timeout=0', 'queue');
 
         View::composer(['layouts::app', 'layouts::guest', 'layouts.app', 'layouts.guest'], LayoutComposer::class);
 
