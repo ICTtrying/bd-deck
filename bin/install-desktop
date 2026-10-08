@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Zet de gebouwde BD Deck-AppImage in ~/Applications en voegt hem toe aan het app-menu (geen sudo nodig).
+# Draai opnieuw na elke `php artisan native:build linux`.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+SRC=$(ls -t "$ROOT"/nativephp/electron/dist/*.AppImage 2>/dev/null | head -1 || true)
+[ -n "$SRC" ] || { echo "✗ Geen AppImage gevonden. Bouw eerst: php artisan native:build linux x64" >&2; exit 1; }
+
+APPS="$HOME/Applications"
+TARGET="$APPS/BD-Deck.AppImage"
+ICON_DIR="$HOME/.local/share/icons/hicolor/512x512/apps"
+DESKTOP="$HOME/.local/share/applications/bd-deck.desktop"
+
+mkdir -p "$APPS" "$ICON_DIR" "$(dirname "$DESKTOP")"
+# eerst naast het doel kopiëren: een draaiende app houdt het oude bestand open
+cp "$SRC" "$TARGET.new" && chmod +x "$TARGET.new" && mv -f "$TARGET.new" "$TARGET"
+cp "$ROOT/public/icon.png" "$ICON_DIR/bd-deck.png"
+
+cat > "$DESKTOP" <<EOF
+[Desktop Entry]
+Type=Application
+Name=BD Deck
+GenericName=WordPress-sites beheren
+Comment=Lokale en live WordPress-sites van Borgman Digital
+Exec="$TARGET" %U
+Icon=bd-deck
+Terminal=false
+Categories=Development;
+Keywords=wordpress;wpopen;ddev;borgman;
+StartupWMClass=bd-deck
+EOF
+chmod +x "$DESKTOP"
+
+command -v update-desktop-database >/dev/null && update-desktop-database "$(dirname "$DESKTOP")" >/dev/null 2>&1 || true
+command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q -t "$HOME/.local/share/icons/hicolor" >/dev/null 2>&1 || true
+
+# ook op het bureaublad, als die map bestaat
+DESK_DIR=$(xdg-user-dir DESKTOP 2>/dev/null || echo "$HOME/Desktop")
+if [ -d "$DESK_DIR" ] && [ "${1:-}" != "--no-desktop" ]; then
+  cp "$DESKTOP" "$DESK_DIR/bd-deck.desktop"
+  chmod +x "$DESK_DIR/bd-deck.desktop"
+  gio set "$DESK_DIR/bd-deck.desktop" metadata::trusted true 2>/dev/null || true
+fi
+
+echo "✓ BD Deck staat in je app-menu ($(basename "$SRC") → $TARGET)"

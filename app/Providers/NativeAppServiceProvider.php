@@ -3,6 +3,7 @@
 namespace App\Providers;
 
 use App\Models\Site;
+use App\Services\StaleQueueWorkers;
 use App\Services\WpOpen\ScriptInstaller;
 use App\Services\WpOpen\SiteRegistry;
 use App\Support\MainWindow;
@@ -15,6 +16,7 @@ class NativeAppServiceProvider implements ProvidesPhpIni
     public function __construct(
         private readonly ScriptInstaller $installer,
         private readonly SiteRegistry $registry,
+        private readonly StaleQueueWorkers $staleWorkers,
     ) {}
 
     /**
@@ -23,6 +25,8 @@ class NativeAppServiceProvider implements ProvidesPhpIni
      */
     public function boot(): void
     {
+        rescue(fn (): array => $this->staleWorkers->reap(), report: false);
+
         // terminal en app moeten hetzelfde script draaien; een nieuwere app levert een nieuwere wpopen
         rescue(fn (): bool => $this->installer->installIfOutdated(), report: false);
         rescue(fn (): int => $this->registry->sync(), report: false);
