@@ -5,6 +5,7 @@ use App\Models\User;
 use App\Services\AppSettings;
 use App\Services\Vault;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Process;
 use Livewire\Livewire;
 
 beforeEach(function (): void {
@@ -47,4 +48,11 @@ it('wijzigt het hoofdwachtwoord alleen met het juiste huidige wachtwoord', funct
         ->assertHasNoErrors();
 
     expect(Hash::check('nieuw-wachtwoord-456', $this->user->fresh()->password))->toBeTrue();
+});
+
+it('toont de app in het Engels als die taal gekozen is', function (): void {
+    Process::fake(['*' => Process::result('[]')]);
+    app(AppSettings::class)->update(['locale' => 'en']);
+
+    $this->get(route('dashboard'))->assertSee('Connect your first site')->assertDontSee('Koppel je eerste site');
 });

@@ -1,0 +1,55 @@
+<?php
+
+return [
+    'between' => [
+        'numeric' => ':Attribute moet tussen :min en :max liggen.',
+        'string' => ':Attribute moet tussen :min en :max tekens zijn.',
+    ],
+    'boolean' => ':Attribute moet aan of uit zijn.',
+    'confirmed' => 'De herhaling van :attribute komt niet overeen.',
+    'different' => ':Attribute en :other moeten verschillen.',
+    'enum' => 'De gekozen :attribute is ongeldig.',
+    'exists' => 'De gekozen :attribute bestaat niet.',
+    'in' => 'De gekozen :attribute is ongeldig.',
+    'integer' => ':Attribute moet een geheel getal zijn.',
+    'max' => [
+        'numeric' => ':Attribute mag niet groter zijn dan :max.',
+        'string' => ':Attribute mag niet meer dan :max tekens zijn.',
+    ],
+    'min' => [
+        'numeric' => ':Attribute moet minstens :min zijn.',
+        'string' => ':Attribute moet minstens :min tekens zijn.',
+    ],
+    'not_regex' => ':Attribute bevat ongeldige tekens.',
+    'regex' => ':Attribute heeft een ongeldig formaat.',
+    'required' => ':Attribute is verplicht.',
+    'starts_with' => ':Attribute moet beginnen met een van: :values.',
+    'string' => ':Attribute moet tekst zijn.',
+    'unique' => 'Er bestaat al een site met deze :attribute.',
+    'url' => ':Attribute moet een geldig adres zijn.',
+    'password' => [
+        'letters' => ':Attribute moet minstens één letter bevatten.',
+        'mixed' => ':Attribute moet hoofd- en kleine letters bevatten.',
+        'numbers' => ':Attribute moet minstens één cijfer bevatten.',
+        'symbols' => ':Attribute moet minstens één symbool bevatten.',
+        'uncompromised' => 'Dit :attribute komt voor in een datalek. Kies een ander.',
+    ],
+
+    'attributes' => [
+        'password' => 'wachtwoord',
+        'password_confirmation' => 'herhaling',
+        'message' => 'bericht',
+        'confirmText' => 'bevestiging',
+        'command' => 'commando',
+        'label' => 'naam',
+        'secret' => 'geheim',
+        'name' => 'naam',
+        'comment' => 'opmerking',
+        'passphrase' => 'wachtwoordzin',
+        'editor' => 'editor',
+        'sitesDirectory' => 'sites-map',
+        'scriptPath' => 'scriptpad',
+        'sshKeyPath' => 'sleutelpad',
+        'autoLockMinutes' => 'vergrendeltijd',
+    ],
+];
