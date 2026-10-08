@@ -2,8 +2,199 @@
 
 @source '../../vendor/laravel/framework/src/Illuminate/Pagination/resources/views/*.blade.php';
 @source '../../storage/framework/views/*.php';
+@source '../views';
+@source '../../app';
 
-@theme {
-    --font-sans: 'Instrument Sans', ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji',
-        'Segoe UI Symbol', 'Noto Color Emoji';
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
+ * Kleuren uit het Borgman Digital-logo: de B (inkt) staat voor lokaal, de D (lagune) voor live.
+ * Het donkere thema blijft marineblauw in plaats van neutraal zwart, zodat het merk herkenbaar blijft.
+ */
+:root {
+    --bg: #f3f6f9;
+    --surface: #ffffff;
+    --raised: #f8fafc;
+    --line: #dce3eb;
+    --line-strong: #c3cfdc;
+    --ink: #142235;
+    --muted: #5a6a7d;
+    --faint: #8696a8;
+    --local: #0b3d6e;
+    --local-soft: #e7eef7;
+    --local-ink: #0b3d6e;
+    --live: #1bb5d8;
+    --live-soft: #e2f6fb;
+    --live-ink: #0a7894;
+    --success: #1c9466;
+    --success-soft: #e3f5ed;
+    --warning: #b7790c;
+    --warning-soft: #fbf1dc;
+    --danger: #cf3f3f;
+    --danger-soft: #fbe7e7;
+    --focus: #1bb5d8;
+    --console: #07131f;
+    --console-ink: #cfdbe7;
+}
+
+.dark {
+    --bg: #07131f;
+    --surface: #0c1a29;
+    --raised: #112337;
+    --line: #1c3046;
+    --line-strong: #2a4462;
+    --ink: #e3ebf3;
+    --muted: #8ea2b8;
+    --faint: #5f758d;
+    --local: #4f8fd6;
+    --local-soft: #0f2741;
+    --local-ink: #8dbcf0;
+    --live: #1bb5d8;
+    --live-soft: #0a2a37;
+    --live-ink: #63d4ee;
+    --success: #36c08a;
+    --success-soft: #0d2a22;
+    --warning: #e0a63a;
+    --warning-soft: #2c2210;
+    --danger: #f06a6a;
+    --danger-soft: #2e1519;
+    --console: #040c15;
+    --console-ink: #cfdbe7;
+}
+
+@theme inline {
+    --color-bg: var(--bg);
+    --color-surface: var(--surface);
+    --color-raised: var(--raised);
+    --color-line: var(--line);
+    --color-line-strong: var(--line-strong);
+    --color-ink: var(--ink);
+    --color-muted: var(--muted);
+    --color-faint: var(--faint);
+    --color-local: var(--local);
+    --color-local-soft: var(--local-soft);
+    --color-local-ink: var(--local-ink);
+    --color-live: var(--live);
+    --color-live-soft: var(--live-soft);
+    --color-live-ink: var(--live-ink);
+    --color-success: var(--success);
+    --color-success-soft: var(--success-soft);
+    --color-warning: var(--warning);
+    --color-warning-soft: var(--warning-soft);
+    --color-danger: var(--danger);
+    --color-danger-soft: var(--danger-soft);
+    --color-console: var(--console);
+    --color-console-ink: var(--console-ink);
+
+    --font-sans: 'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif;
+    --font-mono: 'IBM Plex Mono', ui-monospace, 'DejaVu Sans Mono', monospace;
+
+    --text-2xs: 0.6875rem;
+    --text-2xs--line-height: 1rem;
+}
+
+@layer base {
+    html {
+        @apply bg-bg text-ink antialiased;
+        font-feature-settings: 'ss02';
+        color-scheme: light;
+    }
+
+    html.dark {
+        color-scheme: dark;
+    }
+
+    body {
+        @apply min-h-screen text-[0.875rem] leading-6;
+    }
+
+    :focus-visible {
+        outline: 2px solid var(--focus);
+        outline-offset: 2px;
+        border-radius: 6px;
+    }
+
+    [x-cloak] {
+        display: none !important;
+    }
+
+    ::selection {
+        background: color-mix(in srgb, var(--live) 30%, transparent);
+    }
+
+    * {
+        scrollbar-width: thin;
+        scrollbar-color: var(--line-strong) transparent;
+    }
+}
+
+/* De brug tussen lokaal en live: stroomt alleen terwijl er echt iets gesynchroniseerd wordt. */
+@keyframes bridge-flow {
+    from {
+        background-position: 0 0;
+    }
+
+    to {
+        background-position: 28px 0;
+    }
+}
+
+@keyframes bridge-flow-back {
+    from {
+        background-position: 28px 0;
+    }
+
+    to {
+        background-position: 0 0;
+    }
+}
+
+.bridge-track {
+    background-image: radial-gradient(circle, var(--line-strong) 1.5px, transparent 1.6px);
+    background-size: 14px 6px;
+    background-repeat: repeat-x;
+    background-position: 0 center;
+}
+
+.bridge-track[data-flow='push'] {
+    background-image: radial-gradient(circle, var(--live) 1.8px, transparent 1.9px);
+    animation: bridge-flow 0.9s linear infinite;
+}
+
+.bridge-track[data-flow='pull'] {
+    background-image: radial-gradient(circle, var(--local) 1.8px, transparent 1.9px);
+    animation: bridge-flow-back 0.9s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .bridge-track[data-flow] {
+        animation: none;
+    }
+
+    *,
+    *::before,
+    *::after {
+        transition-duration: 0.01ms !important;
+    }
+}
+
+/* Logregels krijgen hun kleur van het teken waarmee wpopen ze begint. */
+.log-line[data-kind='step'] {
+    color: #7fd8ee;
+}
+
+.log-line[data-kind='ok'] {
+    color: #6fdcaa;
+}
+
+.log-line[data-kind='error'] {
+    color: #ff8b8b;
+}
+
+.log-line[data-kind='warn'] {
+    color: #f2c46b;
+}
+
+.log-line[data-kind='note'] {
+    color: #8fa3b8;
 }
