@@ -114,6 +114,17 @@ describe('naar live zetten', function (): void {
             ->not->toBe(trim($this->server->git($this->wpContent, ['rev-parse', 'dev'])));
     });
 
+    it('meldt live-wijzigingen al in de proefrun, zonder iets te veranderen', function (): void {
+        $this->server->writeFile('themes/demo/functions.php', "<?php // hotfix van een collega\n");
+
+        $preview = $this->server->run(['push', 'demo', '-n']);
+
+        expect($preview->successful())->toBeTrue($preview->errorOutput())
+            ->and($preview->output())->toContain("Op live aangepast sinds de laatste sync:\n    themes/demo/functions.php")
+            ->and($this->server->readFile('themes/demo/functions.php'))->toContain('hotfix')
+            ->and($this->server->backups())->toBe([]);
+    });
+
     it('overschrijft live-wijzigingen alleen met --force', function (): void {
         $this->server->writeFile('themes/demo/functions.php', "<?php // hotfix van een collega\n");
 
@@ -315,6 +326,22 @@ describe('sites zoeken op een server', function (): void {
             ->toContain("tweede.test|u123@1.2.3.4||{$this->account}/tweede.test/public_html/wp-content|ssh|other|https://tweede.test|wordpress\n")
             ->not->toContain('rijschool-');
     });
+
+    it('vindt WordPress en Laravel op hetzelfde account, met de losse webmap van Hostinger', function (): void {
+        $web = $this->account.'/shop.test/public_html';
+        File::ensureDirectoryExists($web.'/App');
+        file_put_contents($web.'/App/artisan', "<?php\n");
+        file_put_contents($web.'/App/composer.json', '{"require": {"laravel/framework": "^12.0"}}');
+        file_put_contents($web.'/App/.env', "APP_URL=https://shop.test\n");
+        file_put_contents($web.'/index.php', "<?php require __DIR__.'/App/vendor/autoload.php';\n");
+
+        $result = $this->server->run(['add', 'rijschool', '-p', '65002', 'u123@1.2.3.4']);
+
+        expect($result->successful())->toBeTrue($result->output().$result->errorOutput())
+            ->and($this->server->sitesFile())
+            ->toContain("klant.nl|u123@1.2.3.4|-p 65002|{$this->account}/klant.nl/public_html/wp-content|ssh|hostinger|https://tijdelijk.example.test|wordpress\n")
+            ->toContain("shop.test|u123@1.2.3.4|-p 65002|{$web}/App|ssh|hostinger|https://shop.test|laravel|{$web}\n");
+    });
 });
 
 describe('Laravel', function (): void {
@@ -362,6 +389,217 @@ describe('Laravel', function (): void {
             ->and($site['remote'].'/database/migrations/2026_10_08_000000_create_orders.php')->toBeFile()
             ->and($this->server->calls())->toContain('mysqldump', 'composer install --no-dev', 'artisan migrate --force --no-interaction', 'artisan optimize:clear')
             ->and(collect($this->server->backups('shop'))->last())->toEndWith('-push');
+    });
+
+    it('zet public/ live in de losse webmap en laat de index.php van live met rust', function (): void {
+        $site = $this->server->laravelSite();
+        $web = dirname($site['remote']).'/public_html';
+        File::ensureDirectoryExists($web);
+        file_put_contents($web.'/index.php', "<?php // live, wijst naar ../laravel\n");
+        file_put_contents($this->server->home.'/.config/wpsites/sites', str_replace("|laravel\n", "|laravel|{$web}\n", $this->server->sitesFile()));
+
+        File::ensureDirectoryExists($site['local'].'/public/images');
+        file_put_contents($site['local'].'/public/index.php', "<?php // standaard\n");
+        file_put_contents($site['local'].'/public/images/logo.jpg', 'logo');
+        file_put_contents($site['local'].'/routes/web.php', "<?php // nieuw\n");
+        $this->server->git($site['local'], ['add', '-A']);
+        $this->server->git($site['local'], ['commit', '-qm', 'Logo']);
+
+        $result = $this->server->run(['push', 'shop', '--yes']);
+
+        expect($result->successful())->toBeTrue($result->output().$result->errorOutput())
+            ->and(file_get_contents($web.'/images/logo.jpg'))->toBe('logo')
+            ->and(file_get_contents($web.'/index.php'))->toBe("<?php // live, wijst naar ../laravel\n")
+            ->and(file_get_contents($site['remote'].'/routes/web.php'))->toBe("<?php // nieuw\n")
+            ->and($site['remote'].'/public')->not->toBeDirectory();
+
+        $backup = collect($this->server->backups('shop'))->last();
+        $restore = $this->server->run(['restore', 'shop', $backup, '--live-files', '--yes']);
+
+        expect($restore->successful())->toBeTrue($restore->output().$restore->errorOutput())
+            ->and($web.'/images/logo.jpg')->not->toBeFile()
+            ->and(file_get_contents($site['remote'].'/routes/web.php'))->toBe("<?php // routes\n");
+    });
+
+    it('haalt public/ uit de webmap op live, zonder de map van het project zelf', function (): void {
+        $site = $this->server->laravelSite();
+        $web = dirname($site['remote']);
+        rename($site['remote'], $web.'/tmp-laravel');
+        File::ensureDirectoryExists($web.'/public_html/images');
+        rename($web.'/tmp-laravel', $web.'/public_html/Shop');
+        $project = $web.'/public_html/Shop';
+        File::ensureDirectoryExists($project.'/public/oud');
+        file_put_contents($project.'/public/index.php', "<?php // standaard\n");
+        file_put_contents($project.'/public/oud/verouderd.css', 'oud');
+        file_put_contents($web.'/public_html/index.php', "<?php require __DIR__.'/Shop/vendor/autoload.php';\n");
+        file_put_contents($web.'/public_html/images/logo.jpg', 'logo');
+        file_put_contents($this->server->home.'/.config/wpsites/sites', str_replace("|{$site['remote']}|ssh|other|https://shop.test|laravel\n", "|{$project}|ssh|other|https://shop.test|laravel|{$web}/public_html\n", $this->server->sitesFile()));
+
+        $this->server->run(['backup', 'shop', '--live-files'])->throw();
+        $full = $this->server->sites.'/.wpopen-backups/shop/'.collect($this->server->backups('shop'))->last().'/live-full';
+
+        expect(file_get_contents($full.'/public/images/logo.jpg'))->toBe('logo')
+            ->and(file_get_contents($full.'/public/index.php'))->toBe("<?php // standaard\n")
+            ->and($full.'/public/Shop')->not->toBeDirectory()
+            ->and($full.'/public/oud')->not->toBeDirectory()
+            ->and($full.'/routes/web.php')->toBeFile();
+    });
+
+    it('toont beschikbare Composer- en npm-updates', function (): void {
+        $site = $this->server->laravelSite();
+        file_put_contents($site['local'].'/package.json', '{"scripts": {"build": "vite build"}}');
+
+        $result = $this->server->run(['updates', 'shop', '--json'], [
+            'FAKE_COMPOSER_OUTDATED' => '{"installed": [{"name": "laravel/framework", "version": "v12.1.0", "latest": "v12.4.0", "latest-status": "semver-safe-update"}, {"name": "pestphp/pest", "version": "v3.0.0", "latest": "v4.0.0", "latest-status": "update-possible"}]}',
+            'FAKE_NPM_OUTDATED' => '{"vite": {"current": "6.0.0", "wanted": "6.2.0", "latest": "7.0.0"}}',
+        ]);
+
+        expect(json_decode($result->output(), true))->toBe([
+            'composer' => [
+                ['name' => 'laravel/framework', 'version' => '12.1.0', 'update_version' => '12.4.0', 'major' => false],
+                ['name' => 'pestphp/pest', 'version' => '3.0.0', 'update_version' => '4.0.0', 'major' => true],
+            ],
+            'npm' => [
+                ['name' => 'vite', 'version' => '6.0.0', 'update_version' => '6.2.0', 'major' => false],
+            ],
+        ]);
+    });
+
+    it('werkt pakketten bij na een back-up en commit ze los op dev', function (): void {
+        $site = $this->server->laravelSite();
+        file_put_contents($site['local'].'/composer.json', '{"require": {"laravel/framework": "^12.0"}}');
+        file_put_contents($site['local'].'/composer.lock', '{"packages": [{"name": "laravel/framework", "version": "v12.1.0"}, {"name": "symfony/console", "version": "v7.0.0"}]}');
+        $this->server->git($site['local'], ['commit', '-qam', 'Lock']);
+
+        $result = $this->server->run(['upgrade', 'shop'], [
+            'FAKE_COMPOSER_LOCK' => '{"packages": [{"name": "laravel/framework", "version": "v12.4.0"}, {"name": "symfony/console", "version": "v7.1.0"}]}',
+            'FAKE_LOCAL_HTTP' => '200',
+        ]);
+
+        expect($result->successful())->toBeTrue($result->output().$result->errorOutput())
+            ->and($result->output())->toContain('composer laravel/framework 12.1.0 → 12.4.0', 'composer: en 1 onderliggende pakket(ten)', 'Lokale site werkt (HTTP 200)')
+            ->and($this->server->calls())->toContain('ddev export-db', 'ddev composer update --with-all-dependencies')
+            ->and($this->server->git($site['local'], ['log', '-1', '--format=%s%n%b']))->toContain('Pakketten bijgewerkt', 'laravel/framework 12.1.0 → 12.4.0')
+            ->and(collect($this->server->backups('shop'))->last())->toEndWith('-upgrade');
+    });
+
+    it('tilt met --major ook de versie-eisen naar nieuwe hoofdversies', function (): void {
+        $site = $this->server->laravelSite();
+        file_put_contents($site['local'].'/composer.json', '{"require": {"laravel/framework": "^12.0"}, "require-dev": {"phpunit/phpunit": "^11.0"}}');
+        file_put_contents($site['local'].'/composer.lock', '{"packages": [{"name": "laravel/framework", "version": "v12.1.0"}]}');
+        $this->server->git($site['local'], ['commit', '-qam', 'Lock']);
+
+        $result = $this->server->run(['upgrade', 'shop', '--major'], [
+            'FAKE_COMPOSER_OUTDATED' => '{"installed": [{"name": "laravel/framework", "version": "v12.1.0", "latest": "v13.0.0", "latest-status": "update-possible"}, {"name": "phpunit/phpunit", "version": "11.5.0", "latest": "12.0.0", "latest-status": "update-possible"}]}',
+            'FAKE_COMPOSER_LOCK' => '{"packages": [{"name": "laravel/framework", "version": "v13.0.0"}]}',
+            'FAKE_LOCAL_HTTP' => '200',
+        ]);
+
+        $composer = json_decode((string) file_get_contents($site['local'].'/composer.json'), true);
+
+        expect($result->successful())->toBeTrue($result->output().$result->errorOutput())
+            ->and($composer['require']['laravel/framework'])->toBe('^13.0.0')
+            ->and($composer['require-dev']['phpunit/phpunit'])->toBe('^12.0.0')
+            ->and($this->server->git($site['local'], ['log', '-1', '--format=%b']))->toContain('laravel/framework 12.1.0 → 13.0.0');
+    });
+
+    it('slaat bij --major een pakket over dat niet past bij de andere pakketten', function (): void {
+        $site = $this->server->laravelSite();
+        file_put_contents($site['local'].'/composer.json', '{"require": {"laravel/framework": "^12.0", "guzzlehttp/guzzle": "^7.0"}}');
+        $this->server->git($site['local'], ['commit', '-qam', 'Eisen']);
+
+        $result = $this->server->run(['upgrade', 'shop', '--major'], [
+            'FAKE_COMPOSER_OUTDATED' => '{"installed": [{"name": "guzzlehttp/guzzle", "version": "7.1.0", "latest": "8.0.0", "latest-status": "update-possible"}, {"name": "laravel/framework", "version": "v12.1.0", "latest": "v13.0.0", "latest-status": "update-possible"}]}',
+            'FAKE_COMPOSER_CONFLICT' => 'guzzle": "^8',
+            'FAKE_COMPOSER_LOCK' => '{"packages": [{"name": "laravel/framework", "version": "v13.0.0"}]}',
+            'FAKE_LOCAL_HTTP' => '200',
+        ]);
+
+        $composer = json_decode((string) file_get_contents($site['local'].'/composer.json'), true);
+
+        expect($result->successful())->toBeTrue($result->output().$result->errorOutput())
+            ->and($result->output())->toContain('guzzlehttp/guzzle blijft op ^7.0')
+            ->and($composer['require']['laravel/framework'])->toBe('^13.0.0')
+            ->and($composer['require']['guzzlehttp/guzzle'])->toBe('^7.0');
+    });
+
+    it('werkt met --package alleen dat ene pakket bij, ook als het een hoofdversie is', function (): void {
+        $site = $this->server->laravelSite();
+        file_put_contents($site['local'].'/composer.json', '{"require": {"laravel/framework": "^12.0", "guzzlehttp/guzzle": "^7.0"}}');
+        $this->server->git($site['local'], ['commit', '-qam', 'Eisen']);
+
+        $result = $this->server->run(['upgrade', 'shop', '--package', 'composer:laravel/framework'], [
+            'FAKE_COMPOSER_OUTDATED' => '{"installed": [{"name": "laravel/framework", "version": "v12.1.0", "latest": "v13.0.0", "latest-status": "update-possible"}, {"name": "guzzlehttp/guzzle", "version": "7.1.0", "latest": "8.0.0", "latest-status": "update-possible"}]}',
+            'FAKE_COMPOSER_LOCK' => '{"packages": [{"name": "laravel/framework", "version": "v13.0.0"}]}',
+            'FAKE_LOCAL_HTTP' => '200',
+        ]);
+
+        $composer = json_decode((string) file_get_contents($site['local'].'/composer.json'), true);
+
+        expect($result->successful())->toBeTrue($result->output().$result->errorOutput())
+            ->and($this->server->calls())->toContain('ddev composer update laravel/framework --with-all-dependencies')
+            ->and($composer['require']['laravel/framework'])->toBe('^13.0.0')
+            ->and($composer['require']['guzzlehttp/guzzle'])->toBe('^7.0')
+            ->and($this->server->git($site['local'], ['log', '-1', '--format=%s']))->toContain('Pakket bijgewerkt: laravel/framework');
+    });
+
+    it('werkt met meerdere --package-opties pakketten die elkaar nodig hebben in één npm-run bij', function (): void {
+        $site = $this->server->laravelSite();
+        file_put_contents($site['local'].'/package.json', '{"devDependencies": {"vite": "^7.0.0", "laravel-vite-plugin": "^2.0.0"}}');
+        $this->server->git($site['local'], ['add', '-A']);
+        $this->server->git($site['local'], ['commit', '-qm', 'npm']);
+
+        $result = $this->server->run(['upgrade', 'shop', '--package', 'npm:vite', '--package', 'npm:laravel-vite-plugin'], [
+            'FAKE_NPM_OUTDATED' => '{"vite": {"current": "7.0.0", "wanted": "7.0.0", "latest": "8.0.0"}, "laravel-vite-plugin": {"current": "2.0.0", "wanted": "2.0.0", "latest": "3.0.0"}}',
+            'FAKE_LOCAL_HTTP' => '200',
+        ]);
+
+        expect($result->successful())->toBeTrue($result->output().$result->errorOutput())
+            ->and($this->server->calls())->toContain('ddev npm install vite@^8.0.0 laravel-vite-plugin@^3.0.0');
+    });
+
+    it('weigert een ongeldige pakketnaam bij --package', function (): void {
+        $this->server->laravelSite();
+
+        $result = $this->server->run(['upgrade', 'shop', '--package', 'composer:x;rm']);
+
+        expect($result->failed())->toBeTrue()->and($result->errorOutput())->toContain('Ongeldig pakket');
+    });
+
+    it('laat de versie-eisen met rust zonder --major', function (): void {
+        $site = $this->server->laravelSite();
+        $this->server->run(['upgrade', 'shop'], [
+            'FAKE_COMPOSER_OUTDATED' => '{"installed": [{"name": "laravel/framework", "version": "v12.1.0", "latest": "v13.0.0", "latest-status": "update-possible"}]}',
+            'FAKE_LOCAL_HTTP' => '200',
+        ]);
+
+        expect(file_get_contents($site['local'].'/composer.json'))->toContain('"^12.0"');
+    });
+
+    it('zet alles terug als de lokale site na de update een serverfout geeft', function (): void {
+        $site = $this->server->laravelSite();
+
+        $result = $this->server->run(['upgrade', 'shop'], [
+            'FAKE_COMPOSER_LOCK' => '{"packages": [{"name": "laravel/framework", "version": "v13.0.0"}]}',
+            'FAKE_LOCAL_HTTP' => '500',
+        ]);
+
+        expect($result->failed())->toBeTrue()
+            ->and($result->errorOutput())->toContain('serverfout (HTTP 500)', 'Er is niets veranderd')
+            ->and(file_get_contents($site['local'].'/composer.lock'))->toBe('{"v": 1}')
+            ->and($this->server->git($site['local'], ['log', '-1', '--format=%s']))->toBe("Start: live-staat\n")
+            ->and($this->server->calls())->toContain('ddev composer install');
+    });
+
+    it('werkt niet bij als er nog eigen wijzigingen open staan', function (): void {
+        $site = $this->server->laravelSite();
+        file_put_contents($site['local'].'/routes/web.php', "<?php // half af\n");
+
+        $result = $this->server->run(['upgrade', 'shop']);
+
+        expect($result->failed())->toBeTrue()
+            ->and($result->errorOutput())->toContain('niet-gecommitte wijzigingen')
+            ->and($this->server->calls())->not->toContain('composer update');
     });
 
     it('maakt een lokale .env met DDEV-database en zonder betaalsleutels van live', function (): void {

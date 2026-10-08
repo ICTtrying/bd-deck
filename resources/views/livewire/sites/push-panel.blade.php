@@ -34,30 +34,61 @@
                 @endif
             </div>
 
+            @if ($changedOnLive !== [])
+                <div class="grid gap-3 rounded-lg border border-warning/40 bg-warning-soft p-3">
+                    <div class="flex items-start gap-2 text-sm">
+                        <x-icon name="alert" class="mt-0.5 text-warning" />
+                        <div class="grid gap-1">
+                            <p class="font-medium">{{ trans_choice('Dit bestand is op live aangepast sinds je laatste sync|Deze bestanden zijn op live aangepast sinds je laatste sync', count($changedOnLive)) }}</p>
+                            <p class="text-[0.8125rem] text-muted">{{ __('Iemand heeft buiten BD Deck om iets op live veranderd. Live zetten overschrijft dat.') }}</p>
+                        </div>
+                    </div>
+                    <ul class="grid gap-0.5 pl-6 font-mono text-xs">
+                        @foreach ($changedOnLive as $file)
+                            <li wire:key="drift-{{ md5($file) }}">{{ $file }}</li>
+                        @endforeach
+                    </ul>
+                    <div class="grid gap-2 pl-6">
+                        @if ($hasUncommittedChanges)
+                            <p class="text-[0.8125rem] text-muted">{{ __('Wil je de live-versie behouden? Commit eerst je eigen werk; dan kun je live hier eerst ophalen.') }}</p>
+                        @else
+                            <div><x-button size="sm" icon="arrow-left" wire:click="pullFirst">{{ __('Eerst live ophalen en samenvoegen') }}</x-button></div>
+                        @endif
+                        <x-toggle wire:model.live="force" :label="__('Toch overschrijven')" :description="__('De huidige live-versies worden eerst in de back-up bewaard.')" />
+                    </div>
+                    @error('force')<p class="pl-6 text-[0.8125rem] text-danger">{{ $message }}</p>@enderror
+                </div>
+            @endif
+
             @if ($hasUncommittedChanges)
-                <x-field :label="__('Wat heb je aangepast?')" for="push-message" error="message" :hint="__('Er zijn wijzigingen die nog niet gecommit zijn. Dit bericht wordt de commit op dev.')">
-                    <x-input id="push-message" wire:model="message" :placeholder="__('Bijvoorbeeld: telefoonnummer aangepast')" />
+                <x-field :label="__('Wat heb je aangepast?')" for="push-message" error="message" :hint="__('Voorstel op basis van de bestanden; pas het gerust aan. Dit wordt de commit op dev.')">
+                    <x-input id="push-message" wire:model="message" wire:keydown.enter="push" :placeholder="__('Bijvoorbeeld: telefoonnummer aangepast')" />
                 </x-field>
             @else
                 @error('message')<p class="text-[0.8125rem] text-danger">{{ $message }}</p>@enderror
+            @endif
+
+            @if ($steps !== [])
+                <div class="grid gap-1.5">
+                    <h3 class="text-sm font-semibold">{{ __('Wat er daarna gebeurt') }}</h3>
+                    <ul class="grid gap-1 text-[0.8125rem] text-muted">
+                        @foreach ($steps as $step)
+                            <li class="flex items-start gap-2" wire:key="step-{{ md5($step) }}"><x-icon name="check" :size="13" class="mt-0.5 text-live-ink" />{{ $step }}</li>
+                        @endforeach
+                    </ul>
+                </div>
             @endif
 
             <div class="grid gap-2 rounded-lg border border-line p-3">
                 <x-toggle wire:model="flushCache" :label="__('Cache legen na de push')" :description="__('Nodig om de wijziging meteen te zien; zonder dit kan de servercache de oude pagina blijven tonen.')" />
                 <x-toggle wire:model="uploads" :label="__('Nieuwe uploads meesturen')" :description="__('Alleen bestanden die op live nog niet bestaan. Live-uploads worden nooit overschreven.')" />
                 @if ($site->isLaravel())
-                    <p class="py-1 text-[0.8125rem] text-faint">{{ __('Laravel: de database blijft op live staan. Nieuwe migraties draaien automatisch na het uploaden (live wordt eerst bewaard), en bij een gewijzigde composer.lock volgt composer install.') }}</p>
+                    <p class="py-1 text-[0.8125rem] text-faint">{{ __('Laravel: de database blijft op live staan; structuurwijzigingen gaan via migraties.') }}</p>
                 @elseif ($site->mode->hasShell())
                     <x-toggle wire:model.live="database" :label="__('Ook de database')" :description="__('Overschrijft de live database met je lokale. Live wordt eerst bewaard, live-plugins blijven aan en de lokale dev-gebruiker komt nooit op live.')" />
                 @else
                     <p class="py-1 text-[0.8125rem] text-faint">{{ __('Database pushen kan alleen bij SSH-sites; deze site heeft alleen SFTP.') }}</p>
                 @endif
-                <details class="pt-1">
-                    <summary class="cursor-pointer text-[0.8125rem] text-muted hover:text-ink">{{ __('Geavanceerd') }}</summary>
-                    <div class="pt-2">
-                        <x-toggle wire:model="force" :label="__('Ook als live intussen is aangepast')" :description="__('Normaal stopt de push als iemand buiten BD Deck om bestanden op live heeft gewijzigd. Die versies staan dan in de back-up.')" />
-                    </div>
-                </details>
             </div>
 
             @if ($database)
@@ -74,7 +105,9 @@
 
         <x-slot:footer>
             <x-button x-on:click="open = false">{{ __('Annuleren') }}</x-button>
-            <x-button variant="live" icon="upload" wire:click="push" :disabled="! $loaded">{{ __('Zet live') }}</x-button>
+            <x-button variant="live" icon="upload" wire:click="push" :disabled="! $loaded || ($files === [] && ! $uploads && ! $database) || ($changedOnLive !== [] && ! $force)">
+                {{ $loaded && $files !== [] ? trans_choice('Zet :count bestand live|Zet :count bestanden live', count($files)) : __('Zet live') }}
+            </x-button>
         </x-slot:footer>
     </x-modal>
 </div>

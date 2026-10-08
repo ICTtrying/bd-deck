@@ -52,17 +52,25 @@ final class SiteRegistry
     }
 
     /**
-     * @param  array{core?: list<array<string, mixed>>, plugins?: list<array<string, mixed>>, themes?: list<array<string, mixed>>}  $updates
+     * WordPress meldt core, plugins en thema's; Laravel meldt Composer- en npm-pakketten.
+     *
+     * @param  array<string, list<array<string, mixed>>>  $updates
      */
     public function recordUpdates(Site $site, array $updates): void
     {
+        $groups = $site->isLaravel() ? ['composer', 'npm'] : ['core', 'plugins', 'themes'];
+
         $site->update([
-            'updates' => [
-                'core' => $updates['core'] ?? [],
-                'plugins' => $updates['plugins'] ?? [],
-                'themes' => $updates['themes'] ?? [],
-            ],
+            'updates' => collect($groups)->mapWithKeys(fn (string $group): array => [$group => $updates[$group] ?? []])->all(),
             'updates_checked_at' => now(),
         ]);
+    }
+
+    /**
+     * Na het bijwerken klopt de vorige controle niet meer.
+     */
+    public function forgetUpdates(Site $site): void
+    {
+        $site->update(['updates' => null, 'updates_checked_at' => null]);
     }
 }

@@ -117,6 +117,16 @@ class CommandRun extends Model
             ->values();
     }
 
+    /**
+     * Back-up die het script bij live zetten maakte; daarmee is de push terug te draaien.
+     */
+    public function backupId(): ?string
+    {
+        $id = Str::of($this->output ?? '')->match('/Back-up: ([A-Za-z0-9._-]+)/')->toString();
+
+        return $id !== '' ? $id : null;
+    }
+
     public function lastMessage(): ?string
     {
         $line = Str::of($this->output ?? '')->trim()->explode("\n")->filter(fn (string $line): bool => trim($line) !== '')->last();

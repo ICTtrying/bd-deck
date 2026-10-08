@@ -1,0 +1,69 @@
+# Elke wijziging op main wordt automatisch een nieuwe release van BD Deck.
+# De app zelf (NativePHP-updater) controleert GitHub op nieuwe releases en werkt zichzelf bij.
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+  workflow_dispatch:
+
+# één release tegelijk; een nieuwere push wacht, zodat versies in volgorde verschijnen
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # oplopend per run, dus altijd hoger dan de vorige release (de updater vergelijkt versienummers)
+      APP_VERSION: 1.3.${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, intl, sqlite3, pdo_sqlite, zip
+          tools: composer:v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # de tests starten bin/wpopen met nagebootste servers; die hebben deze hulpprogramma's nodig
+      - name: Systeempakketten
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends lftp rsync fakeroot
+
+      - run: composer install --no-interaction --no-progress --prefer-dist
+      - run: npm ci
+
+      - name: Omgeving
+        run: |
+          cp .env.example .env
+          php artisan key:generate --no-interaction
+          sed -i "s/^NATIVEPHP_APP_VERSION=.*/NATIVEPHP_APP_VERSION=$APP_VERSION/" .env
+
+      - name: Tests
+        run: php artisan test --compact
+
+      - name: Bouwen en publiceren als v${{ env.APP_VERSION }}
+        env:
+          NATIVEPHP_UPDATER_ENABLED: 'true'
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_OWNER: ${{ github.repository_owner }}
+          GITHUB_REPO: ${{ github.event.repository.name }}
+        run: |
+          php artisan native:publish linux x64 --no-interaction 2>&1 | tee publish.log
+          # native:publish eindigt ook na een mislukte upload met code 0: controleer op GitHub zelf
+          if grep -q '⨯' publish.log || ! gh release view "v$APP_VERSION" --json assets -q '.assets[].name' | grep -q '\.AppImage$'; then
+            echo "::error::Publiceren mislukt: er staat geen AppImage in release v$APP_VERSION"
+            exit 1
+          fi

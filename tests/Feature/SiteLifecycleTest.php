@@ -8,8 +8,11 @@ use App\Livewire\Sites\Console;
 use App\Livewire\Sites\Create;
 use App\Livewire\Sites\DeleteDialog;
 use App\Livewire\Sites\Migrate;
+use App\Livewire\Sites\Show;
+use App\Models\CommandRun;
 use App\Models\Site;
 use App\Models\User;
+use App\Services\WpOpen\SiteRegistry;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Facades\Queue;
@@ -211,10 +214,117 @@ describe('Laravel', function (): void {
             && $job->run->arguments === ['artisan', 'shop', '--live', '--', 'migrate:status']);
     });
 
+    it('toont welke pakketten een nieuwere versie hebben', function (): void {
+        $site = Site::factory()->laravel()->built()->create(['name' => 'shop']);
+        app(SiteRegistry::class)->recordUpdates($site, [
+            'composer' => [['name' => 'laravel/framework', 'version' => '12.1.0', 'update_version' => '12.4.0', 'major' => false]],
+            'npm' => [['name' => 'vite', 'version' => '6.0.0', 'update_version' => '7.0.0', 'major' => true]],
+            'plugins' => [['name' => 'hoort-hier-niet']],
+        ]);
+
+        expect($site->fresh()->updates)->toHaveKeys(['composer', 'npm'])->not->toHaveKey('plugins')
+            ->and($site->fresh()->updatesCount())->toBe(2);
+
+        Livewire::test(Show::class, ['site' => $site->fresh()])
+            ->assertSee('laravel/framework')
+            ->assertSee('12.1.0 → 12.4.0')
+            ->assertSee('nieuwe hoofdversie');
+    });
+
+    it('werkt pakketten bij na bevestiging, desgewenst meteen live', function (): void {
+        $site = Site::factory()->laravel()->built()->create(['name' => 'shop']);
+
+        Livewire::test(Show::class, ['site' => $site])
+            ->call('confirm', 'upgrade')
+            ->assertSee('Daarna meteen live zetten')
+            ->set('upgradeLive', true)
+            ->call('proceed');
+
+        Queue::assertPushed(RunWpOpenCommand::class, fn (RunWpOpenCommand $job): bool => $job->run->action === WpOpenAction::Upgrade
+            && $job->run->arguments === ['upgrade', 'shop', '--live', '--yes']);
+    });
+
+    it('werkt met de schakelaar ook nieuwe hoofdversies bij', function (): void {
+        $site = Site::factory()->laravel()->built()->create(['name' => 'shop']);
+
+        Livewire::test(Show::class, ['site' => $site])
+            ->call('confirm', 'upgrade')
+            ->assertSee('Ook nieuwe hoofdversies')
+            ->set('upgradeMajor', true)
+            ->call('proceed');
+
+        Queue::assertPushed(RunWpOpenCommand::class, fn (RunWpOpenCommand $job): bool => $job->run->arguments === ['upgrade', 'shop', '--major']);
+    });
+
+    it('werkt één pakket bij vanuit de lijst, en alleen een pakket dat daar echt in staat', function (): void {
+        $site = Site::factory()->laravel()->built()->create(['name' => 'shop']);
+        app(SiteRegistry::class)->recordUpdates($site, [
+            'composer' => [['name' => 'laravel/framework', 'version' => '12.1.0', 'update_version' => '13.0.0', 'major' => true]],
+            'npm' => [],
+        ]);
+
+        Livewire::test(Show::class, ['site' => $site->fresh()])
+            ->call('confirmPackage', 'composer', 'onbekend/pakket')
+            ->assertSet('confirming', null)
+            ->call('confirmPackage', 'composer', 'laravel/framework')
+            ->assertSet('confirming', 'upgrade-package')
+            ->assertSee('Nieuwe hoofdversie')
+            ->call('proceed');
+
+        Queue::assertPushed(RunWpOpenCommand::class, fn (RunWpOpenCommand $job): bool => $job->run->arguments === ['upgrade', 'shop', '--package', 'composer:laravel/framework']);
+    });
+
+    it('werkt aangevinkte pakketten samen bij, bijvoorbeeld vite en de bijbehorende plugin', function (): void {
+        $site = Site::factory()->laravel()->built()->create(['name' => 'shop']);
+        app(SiteRegistry::class)->recordUpdates($site, [
+            'composer' => [],
+            'npm' => [
+                ['name' => 'vite', 'version' => '7.0.0', 'update_version' => '8.0.0', 'major' => true],
+                ['name' => 'laravel-vite-plugin', 'version' => '2.0.0', 'update_version' => '3.0.0', 'major' => true],
+            ],
+        ]);
+
+        Livewire::test(Show::class, ['site' => $site->fresh()])
+            ->set('selectedPackages', ['npm:vite', 'npm:laravel-vite-plugin'])
+            ->assertSee('2 geselecteerden bijwerken')
+            ->call('confirmSelectedPackages')
+            ->assertSet('confirming', 'upgrade-package')
+            ->call('proceed')
+            ->assertSet('selectedPackages', []);
+
+        Queue::assertPushed(RunWpOpenCommand::class, fn (RunWpOpenCommand $job): bool => $job->run->arguments === ['upgrade', 'shop', '--package', 'npm:vite', '--package', 'npm:laravel-vite-plugin']);
+    });
+
     it('stuurt verhuizen terug naar de sitepagina', function (): void {
         $site = Site::factory()->laravel()->built()->create(['name' => 'shop']);
 
         Livewire::test(Migrate::class, ['site' => $site])->assertRedirect(route('sites.show', 'shop'));
+    });
+});
+
+describe('na live zetten', function (): void {
+    it('biedt bekijken en terugdraaien aan', function (): void {
+        $site = Site::factory()->built()->create(['name' => 'klant']);
+        CommandRun::factory()->for($site)->succeeded("✓ Bestanden staan live\n✓ Live! Back-up: 20261008-120000-push  (terugdraaien: wpopen restore klant 20261008-120000-push --live-files)\n")
+            ->create(['action' => WpOpenAction::Push, 'label' => WpOpenAction::Push->label(), 'arguments' => ['push', 'klant', '--yes']]);
+
+        Livewire::test(Show::class, ['site' => $site])
+            ->assertSee('Staat live op')
+            ->assertSee('Website bekijken')
+            ->call('confirm', 'rollback-push')
+            ->assertSee('20261008-120000-push')
+            ->call('proceed');
+
+        Queue::assertPushed(RunWpOpenCommand::class, fn (RunWpOpenCommand $job): bool => $job->run->arguments === ['restore', 'klant', '20261008-120000-push', '--yes', '--live-files']);
+    });
+
+    it('biedt geen terugdraaien aan als er niets net live is gezet', function (): void {
+        $site = Site::factory()->built()->create(['name' => 'klant']);
+
+        Livewire::test(Show::class, ['site' => $site])
+            ->assertDontSee('Staat live op')
+            ->call('confirm', 'rollback-push')
+            ->assertSet('confirming', null);
     });
 });
 

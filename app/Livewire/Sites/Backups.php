@@ -65,6 +65,7 @@ class Backups extends Component
             'import-db' => __('Voor database-import'),
             'pre-restore' => __('Voor terugzetten'),
             'remove' => __('Voor verwijderen'),
+            'upgrade' => __('Voor pakketten bijwerken'),
         ];
     }
 

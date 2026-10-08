@@ -19,6 +19,7 @@ enum WpOpenAction: string
     case Restore = 'restore';
     case Test = 'test';
     case Updates = 'updates';
+    case Upgrade = 'upgrade';
     case CacheLocal = 'cache-local';
     case CacheLive = 'cache-live';
     case WpCli = 'wp-cli';
@@ -50,6 +51,7 @@ enum WpOpenAction: string
             self::Restore => __('Back-up terugzetten'),
             self::Test => __('Verbindingstest'),
             self::Updates => __('Updates controleren'),
+            self::Upgrade => __('Pakketten bijwerken'),
             self::CacheLocal => __('Lokale cache legen'),
             self::CacheLive => __('Live cache legen'),
             self::WpCli => __('WP-CLI-commando'),
@@ -79,7 +81,7 @@ enum WpOpenAction: string
             self::Stop => 'square',
             self::Backup => 'archive',
             self::Test => 'activity',
-            self::Updates => 'refresh',
+            self::Updates, self::Upgrade => 'refresh',
             self::CacheLocal, self::CacheLive => 'zap',
             self::WpCli, self::Artisan => 'terminal',
             self::AddSite, self::Import, self::NewSite => 'plus',

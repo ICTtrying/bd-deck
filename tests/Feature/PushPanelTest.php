@@ -24,15 +24,57 @@ it('toont uit de proefrun welke bestanden live gaan', function (): void {
         ->assertSee('themes/demo/style.css');
 });
 
-it('vraagt een commitbericht als er niet-gecommitte wijzigingen zijn', function (): void {
-    $site = Site::factory()->built()->snapshotState(['git' => ['dirty' => 2]])->create();
+it('stelt een commitbericht voor, zodat live zetten één klik is', function (): void {
+    $site = Site::factory()->built()->snapshotState(['git' => ['dirty' => 2]])->create(['name' => 'klant']);
 
     Livewire::test(PushPanel::class, ['site' => $site])
         ->call('open')
+        ->assertSet('message', 'Aangepast: functions.php, style.css')
+        ->set('message', '')
         ->call('push')
-        ->assertHasErrors('message');
+        ->assertHasNoErrors();
+
+    Queue::assertPushed(RunWpOpenCommand::class, fn (RunWpOpenCommand $job): bool => $job->run->arguments === ['push', 'klant', '--yes', '-m', 'Aangepast: functions.php, style.css']);
+});
+
+it('laat live-wijzigingen vooraf zien en zet pas live na een keuze', function (): void {
+    Process::fake(['*' => Process::result("Bestanden naar live (1):\n  ↑ themes/demo/functions.php\nOp live aangepast sinds de laatste sync:\n    themes/demo/functions.php\n✓ Proefrun: er is niets veranderd.\n")]);
+    $site = Site::factory()->built()->create(['name' => 'klant']);
+
+    $component = Livewire::test(PushPanel::class, ['site' => $site])
+        ->call('open')
+        ->assertSet('changedOnLive', ['themes/demo/functions.php'])
+        ->assertSee('Eerst live ophalen')
+        ->call('push')
+        ->assertHasErrors('force');
 
     Queue::assertNothingPushed();
+
+    $component->set('force', true)->call('push')->assertHasNoErrors();
+
+    Queue::assertPushed(RunWpOpenCommand::class, fn (RunWpOpenCommand $job): bool => in_array('--force', $job->run->arguments, true));
+});
+
+it('haalt live eerst op in plaats van te overschrijven', function (): void {
+    Process::fake(['*' => Process::result("Bestanden naar live (1):\n  ↑ themes/demo/functions.php\nOp live aangepast sinds de laatste sync:\n    themes/demo/functions.php\n")]);
+    $site = Site::factory()->built()->create(['name' => 'klant']);
+
+    Livewire::test(PushPanel::class, ['site' => $site])
+        ->call('open')
+        ->call('pullFirst')
+        ->assertDispatched('close-modal', name: 'push');
+
+    Queue::assertPushed(RunWpOpenCommand::class, fn (RunWpOpenCommand $job): bool => $job->run->arguments === ['pull', 'klant', '--code']);
+});
+
+it('toont wat er bij Laravel na het uploaden gebeurt', function (): void {
+    Process::fake(['*' => Process::result("Bestanden naar live (1):\n  ↑ composer.lock\n· Composer-pakketten worden op live bijgewerkt (composer install --no-dev).\n✓ Proefrun: er is niets veranderd.\n")]);
+    $site = Site::factory()->built()->create();
+
+    Livewire::test(PushPanel::class, ['site' => $site])
+        ->call('open')
+        ->assertSet('steps', ['Composer-pakketten worden op live bijgewerkt (composer install --no-dev).'])
+        ->assertSee('Wat er daarna gebeurt');
 });
 
 it('zet live met bericht en opties', function (): void {

@@ -68,10 +68,7 @@
             </div>
         @endif
 
-        <div class="flex items-center justify-between gap-2 px-1">
-            <a href="{{ route('settings.index') }}#script" wire:navigate class="text-2xs text-faint hover:text-muted">
-                wpopen {{ $this->scriptVersion ?? '–' }}
-            </a>
+        <div class="flex items-center justify-end gap-2 px-1">
             <button type="button" onclick="document.getElementById('lock-form').submit()" class="inline-flex h-7 items-center gap-1.5 rounded-lg px-2 text-[0.8125rem] text-muted transition-colors hover:bg-raised hover:text-ink">
                 <x-icon name="lock" :size="14" />
                 {{ __('Vergrendelen') }}

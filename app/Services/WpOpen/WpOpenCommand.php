@@ -146,6 +146,28 @@ final readonly class WpOpenCommand
         return new self(WpOpenAction::Updates, ['updates', $site->name, '--json'], $site);
     }
 
+    /**
+     * Laravel: back-up, Composer- en npm-pakketten bijwerken en committen op dev; met $live ook meteen live zetten.
+     * Met $major gaan ook nieuwe hoofdversies mee (bv. Laravel 12 naar 13), anders blijft alles binnen composer.json en package.json.
+     * Met $packages ('composer:naam' of 'npm:naam') worden alleen die pakketten bijgewerkt, ook bij een hoofdversie.
+     *
+     * @param  list<string>  $packages
+     */
+    public static function upgrade(Site $site, bool $live = false, bool $major = false, array $packages = []): self
+    {
+        if (! $site->isLaravel()) {
+            throw new InvalidArgumentException(__('Pakketten bijwerken kan alleen bij Laravel-sites.'));
+        }
+
+        foreach ($packages as $package) {
+            if (! preg_match('#^(composer|npm):[A-Za-z0-9@/._-]+$#', $package)) {
+                throw new InvalidArgumentException(__('Ongeldig pakket.'));
+            }
+        }
+
+        return new self(WpOpenAction::Upgrade, array_values(array_filter(['upgrade', $site->name, $major ? '--major' : null, ...collect($packages)->flatMap(fn (string $package): array => ['--package', $package])->all(), $live ? '--live' : null, $live ? '--yes' : null])), $site);
+    }
+
     public static function cache(Site $site, bool $live): self
     {
         return $live

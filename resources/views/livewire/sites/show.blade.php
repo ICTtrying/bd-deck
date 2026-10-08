@@ -107,6 +107,13 @@
             <p class="min-w-0 flex-1 text-sm"><span class="font-medium">{{ __(':action is mislukt.', ['action' => $this->lastRun->label]) }}</span> <span class="text-muted">{{ $this->lastRun->lastMessage() }}</span></p>
             <x-button size="sm" :href="route('activity.show', $this->lastRun)" wire:navigate>{{ __('Log bekijken') }}</x-button>
         </div>
+    @elseif ($this->recentDeploy)
+        <div class="flex flex-wrap items-center gap-3 rounded-xl border border-success/30 bg-success-soft px-4 py-3">
+            <x-icon name="check" class="text-success" />
+            <p class="min-w-0 flex-1 text-sm"><span class="font-medium">{{ __('Staat live op :host.', ['host' => $site->data('live_host')]) }}</span> <span class="text-muted">{{ $this->recentDeploy->finished_at->diffForHumans() }}</span></p>
+            <x-button size="sm" icon="globe" wire:click="launch({{ $site->id }}, 'live-site')">{{ __('Website bekijken') }}</x-button>
+            <x-button size="sm" variant="danger-ghost" icon="rotate-ccw" wire:click="confirm('rollback-push')">{{ __('Terugdraaien') }}</x-button>
+        </div>
     @endif
 
     <nav class="flex gap-1 border-b border-line" aria-label="{{ __('Onderdelen') }}">
@@ -215,7 +222,47 @@
                     @endif
                 </x-panel>
 
-                @unless ($site->isLaravel())
+                @if ($site->isLaravel())
+                <x-panel :title="__('Pakketten')" :description="$site->updates_checked_at ? __('Gecontroleerd :time', ['time' => $site->updates_checked_at->diffForHumans()]) : __('Composer en npm, lokaal gecontroleerd')">
+                    <x-slot:actions>
+                        <x-button size="sm" icon="refresh" wire:click="run('updates')" :disabled="! $site->isBuilt() || (bool) $active">{{ __('Controleren') }}</x-button>
+                        <x-button size="sm" variant="primary" icon="download" wire:click="confirm('upgrade')" :disabled="! $site->isBuilt() || (bool) $active">{{ __('Alles bijwerken') }}</x-button>
+                    </x-slot:actions>
+                    @if (! $site->isBuilt())
+                        <p class="text-muted">{{ __('Bouw de site eerst lokaal; pakketten worden lokaal gecontroleerd en bijgewerkt.') }}</p>
+                    @elseif ($site->updates === null)
+                        <p class="text-muted">{{ __('Bekijk welke Composer- en npm-pakketten een nieuwere versie hebben. Bijwerken maakt eerst een back-up en test daarna of de site nog werkt.') }}</p>
+                    @elseif ($site->updatesCount() === 0)
+                        <p class="flex items-center gap-2 text-success"><x-icon name="check" />{{ __('Alles is up-to-date') }}</p>
+                    @else
+                        <ul class="grid gap-2 text-sm">
+                            @foreach (['composer' => 'Composer', 'npm' => 'npm'] as $type => $typeLabel)
+                                @foreach ($site->updates[$type] ?? [] as $item)
+                                    <li class="flex items-center justify-between gap-3" wire:key="pkg-{{ $type }}-{{ $item['name'] }}">
+                                        <label class="flex min-w-0 items-center gap-2.5">
+                                            <input type="checkbox" value="{{ $type }}:{{ $item['name'] }}" wire:model.live="selectedPackages" class="size-4 shrink-0 rounded border-line-strong accent-[var(--local)]" @disabled((bool) $active)>
+                                            <span class="min-w-0 truncate">{{ $item['name'] }} <span class="text-faint">{{ $typeLabel }}</span></span>
+                                        </label>
+                                        <span class="flex shrink-0 items-center gap-2">
+                                            <span @class(['font-mono text-[0.8125rem]', 'text-muted' => ! ($item['major'] ?? false), 'text-warning' => ($item['major'] ?? false)]) @if (($item['major'] ?? false)) title="{{ __('Nieuwe hoofdversie: gaat alleen mee als je dat bij Bijwerken kiest, want hij kan je code breken.') }}" @endif>{{ $item['version'] }} → {{ $item['update_version'] }}</span>
+                                            <x-button size="sm" wire:click="confirmPackage('{{ $type }}', '{{ $item['name'] }}')" :disabled="(bool) $active">{{ __('Bijwerken') }}</x-button>
+                                        </span>
+                                    </li>
+                                @endforeach
+                            @endforeach
+                        </ul>
+                        @if ($selectedPackages !== [])
+                            <div class="mt-3 flex items-center justify-between gap-3 border-t border-line pt-3">
+                                <p class="text-[0.8125rem] text-muted">{{ __('Pakketten die elkaar nodig hebben, zoals vite en laravel-vite-plugin, werk je samen bij.') }}</p>
+                                <x-button size="sm" variant="primary" icon="download" wire:click="confirmSelectedPackages" :disabled="(bool) $active">{{ trans_choice(':count geselecteerde bijwerken|:count geselecteerden bijwerken', count($selectedPackages)) }}</x-button>
+                            </div>
+                        @endif
+                        @if (collect($site->updates)->flatten(1)->contains('major', true))
+                            <p class="mt-3 text-[0.8125rem] text-muted">{{ __('Oranje: nieuwe hoofdversie. Die gaat alleen mee als je bij Bijwerken \'Ook nieuwe hoofdversies\' aanzet, omdat hij je code kan breken.') }}</p>
+                        @endif
+                    @endif
+                </x-panel>
+                @else
                 <x-panel :title="$site->isLocalOnly() ? __('Updates') : __('Updates op live')" :description="$site->updates_checked_at ? __('Gecontroleerd :time', ['time' => $site->updates_checked_at->diffForHumans()]) : __('Nog niet gecontroleerd')">
                     <x-slot:actions>
                         <x-button size="sm" icon="refresh" wire:click="run('updates')">{{ __('Controleren') }}</x-button>
@@ -240,8 +287,7 @@
                         </ul>
                     @endif
                 </x-panel>
-
-                @endunless
+                @endif
 
                 <x-panel :title="__('Cache')">
                     <div class="flex flex-wrap gap-2">
@@ -284,6 +330,13 @@
         @if ($confirmation)
             <div class="grid gap-4">
                 <p class="text-muted">{{ $confirmation['body'] }}</p>
+                @if ($confirming === 'upgrade-package')
+                    <x-toggle wire:model="upgradeLive" :label="__('Daarna meteen live zetten')" :description="__('Na een geslaagde update gaat hij direct naar live. Laat uit als je eerst lokaal wilt kijken.')" />
+                @endif
+                @if ($confirming === 'upgrade')
+                    <x-toggle wire:model="upgradeMajor" :label="__('Ook nieuwe hoofdversies')" :description="__('Bijvoorbeeld Laravel 12 naar 13. Dat kan je code breken en moet je daarna zelf nalopen; ziet de site er na afloop niet meer uit, dan wordt alles teruggezet. Uit: alleen veilige updates binnen de huidige versies.')" />
+                    <x-toggle wire:model="upgradeLive" :label="__('Daarna meteen live zetten')" :description="__('Na een geslaagde update gaat hij direct naar live: back-up van live, composer install en de nieuwe assets. Laat uit als je eerst lokaal wilt kijken.')" />
+                @endif
                 @if ($confirming === 'reset')
                     <x-toggle wire:model="pullBeforeReset" :label="__('Daarna live ophalen')" :description="__('Haalt eerst de nieuwste code van live op, zodat main echt actueel is.')" />
                 @endif

@@ -81,3 +81,17 @@ it('plant lange en korte acties op aparte wachtrijen', function (): void {
         ->and(WpOpenAction::Test->queue())->toBe('quick')
         ->and(WpOpenAction::Updates->queue())->toBe('quick');
 });
+
+it('werkt alleen Laravel-pakketten bij en zet pas live als dat gevraagd is', function (): void {
+    $site = Site::factory()->laravel()->make(['name' => 'shop']);
+
+    expect(WpOpenCommand::upgrade($site)->arguments)->toBe(['upgrade', 'shop'])
+        ->and(WpOpenCommand::upgrade($site, live: true)->arguments)->toBe(['upgrade', 'shop', '--live', '--yes'])
+        ->and(WpOpenCommand::upgrade($site, major: true)->arguments)->toBe(['upgrade', 'shop', '--major'])
+        ->and(WpOpenCommand::upgrade($site, packages: ['npm:vite'])->arguments)->toBe(['upgrade', 'shop', '--package', 'npm:vite'])
+        ->and(WpOpenAction::Upgrade->locksSite())->toBeTrue();
+
+    expect(fn () => WpOpenCommand::upgrade($site, packages: ['composer:x; rm -rf /']))->toThrow(InvalidArgumentException::class);
+
+    WpOpenCommand::upgrade(Site::factory()->make());
+})->throws(InvalidArgumentException::class, 'alleen bij Laravel-sites');

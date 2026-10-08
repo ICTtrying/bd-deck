@@ -9,7 +9,7 @@
 #   wpopen add <naam> ssh -p 65002 u@host     1 site toevoegen (zoekt zelf WordPress of Laravel)
 #   wpopen add sftp://u@host[:poort]          idem, naam uit de host
 #     [--remote pad] [--mode ssh|sftp] [--provider wpmudev|hostinger|other] [--url https://…]
-#   wpopen update <naam> [--name|--target|--opts|--remote|--mode|--provider|--url waarde]
+#   wpopen update <naam> [--name|--target|--opts|--remote|--mode|--provider|--url|--public waarde]
 #   wpopen remove <naam> [--purge]            uit de lijst halen (--purge: ook lokale site weggooien)
 #   wpopen list [--json] | info <naam> [--json]
 #   wpopen new <naam> [--title "Titel"]        nieuwe lokale WordPress-site, nog zonder live-server
@@ -36,7 +36,12 @@
 #   wpopen domain <naam> https://klant.nl      live omzetten naar het definitieve domein (na DNS, alleen SSH)
 #
 #   wpopen test <naam> [--json]               verbinding, WP-CLI en HTTP controleren
-#   wpopen updates <naam> [--local] [--json]  beschikbare updates (standaard live)
+#   wpopen updates <naam> [--local] [--json]  beschikbare updates (standaard live; Laravel: Composer en npm)
+#   wpopen upgrade <naam> [--major] [--package composer:naam|npm:naam]… [--live]
+#                                             Laravel: back-up, Composer- en npm-pakketten bijwerken, bouwen en
+#                                             committen op dev (--major: ook nieuwe hoofdversies, zoals Laravel 12 → 13;
+#                                             --package: alleen dat pakket (herhaalbaar), ook bij een nieuwe hoofdversie;
+#                                             --live: daarna meteen live zetten)
 #   wpopen cache <naam> [--live]              cache legen (lokaal of live)
 #   wpopen login <naam> [--live] [--user u]   eenmalige inloglink voor wp-admin
 #   wpopen wp <naam> [--live] <args…>         WP-CLI lokaal of op live
@@ -45,7 +50,7 @@
 #
 #   Algemeen: --yes slaat bevestigingsvragen over (de app vraagt zelf om bevestiging).
 set -euo pipefail
-WPO_VERSION="2.2.0"
+WPO_VERSION="2.7.0"
 DB="${WPO_DB:-$HOME/.config/wpsites/sites}"; mkdir -p "$(dirname "$DB")"; touch "$DB"
 BASE="${WP_SITES_DIR:-$HOME/wp-sites}"
 BACKUPS="${WPO_BACKUP_DIR:-$BASE/.wpopen-backups}"
@@ -109,8 +114,9 @@ provider_of() {  # target opts
   esac
 }
 
-# ───────────── sitelijst: naam|target|opts|remote|modus|provider|live-url|type ─────────────
+# ───────────── sitelijst: naam|target|opts|remote|modus|provider|live-url|type|public ─────────────
 # remote is bij WordPress de map wp-content, bij Laravel de projectmap (met artisan)
+# public: alleen bij Laravel met een losse webmap op live (Hostinger: public_html/index.php met usePublicPath)
 migrate_db() {  # oude regels (4-5 velden) aanvullen met modus en provider
   awk -F'|' 'NF && NF<7{x=1} END{exit !x}' "$DB" || return 0
   local tmp n t o r m p u; tmp=$(mktemp "$DB.XXXX")
@@ -134,7 +140,7 @@ valid_field() { [[ "$1" != *"|"* && "$1" != *$'\n'* ]] || die "'|' en enters zij
 get() {
   local l; l=$(awk -F'|' -v n="$1" '$1==n{print; exit}' "$DB")
   [ -n "$l" ] || die "Site '$1' onbekend. Zie: wpopen list  (of: wpopen import)"
-  IFS='|' read -r NAME TARGET OPTS REMOTE MODE PROVIDER LIVEURL TYPE <<<"$l"
+  IFS='|' read -r NAME TARGET OPTS REMOTE MODE PROVIDER LIVEURL TYPE PUBDIR <<<"$l"
   TYPE="${TYPE:-wordpress}"
   if [ -z "$TARGET" ]; then MODE=local; fi
   MODE="${MODE:-ssh}"; PROVIDER="${PROVIDER:-$(provider_of "$TARGET" "$OPTS")}"
@@ -288,6 +294,7 @@ cmd_info() {
   echo "$NAME  ($PROVIDER, $MODE)"
   echo "  server:  $TARGET ${OPTS:+($OPTS)}"
   echo "  remote:  $REMOTE"
+  [ -z "$PUBDIR" ] || echo "  public:  $PUBDIR"
   echo "  live:    https://$LIVEHOST"
   echo "  lokaal:  $LOCALURL  →  $PROJ $([ -f "$PROJ/.wpopen-ready" ] && echo '(gebouwd)' || echo '(nog niet gebouwd)')"
 }
@@ -327,8 +334,8 @@ for line in open(dbf, errors="ignore"):
     f = line.rstrip("\n").split("|")
     if not f or not f[0]:
         continue
-    f += [""] * (8 - len(f))
-    name, target, opts, remote, mode, provider, liveurl, kind = f[:8]
+    f += [""] * (9 - len(f))
+    name, target, opts, remote, mode, provider, liveurl, kind, pubdir = f[:9]
     kind = kind or "wordpress"
     if only and name != only:
         continue
@@ -343,7 +350,7 @@ for line in open(dbf, errors="ignore"):
     d = ddev.get(s, {})
     site = {
         "name": name, "slug": s, "target": target, "user": user, "host": host,
-        "port": int(port.group(1)) if port else 22, "opts": opts, "remote": remote,
+        "port": int(port.group(1)) if port else 22, "opts": opts, "remote": remote, "public_dir": pubdir or None,
         "root": remote if kind == "laravel" else os.path.dirname(remote), "mode": "local" if local_only else (mode or "ssh"), "provider": provider or "other",
         "type": kind,
         "local_only": local_only,
@@ -417,6 +424,8 @@ suffix() {  # pad naar wp-content of Laravel-projectmap → korte naam (domein o
   local p b; p="$1"; [ "$(basename "$p")" = wp-content ] && p="$(dirname "$p")"
   b="$(basename "$p")"
   case "$b" in public_html|www|htdocs|html|httpdocs|current) b="$(basename "$(dirname "$p")")";; esac
+  # Hostinger/DirectAdmin: een Laravel-project in public_html/<map> hoort bij het domein, niet bij die map
+  [[ "$p" =~ /domains/([^/]+)/ ]] && b="${BASH_REMATCH[1]}"
   b=$(printf '%s' "$b" | tr -cs 'A-Za-z0-9._-' '-' | sed 's/^-*//; s/-*$//')
   case "$b" in .|/|"") b="site";; esac
   echo "$b"
@@ -433,13 +442,30 @@ remote_home() {  # target opts remote type → live-adres uit WordPress of APP_U
   [[ "$url" =~ ^https?://[A-Za-z0-9.-]+(/[^|[:space:]]*)?$ ]] && echo "${url%/}"
   return 0
 }
+# webmap op live buiten het project: een index.php die naar <project>/vendor/autoload.php verwijst
+# (project in public_html/<map>, of naast public_html); leeg = gewoon <project>/public
+detect_pubdir() {  # target opts projectmap modus
+  local t="$1" o="$2" r="$3" m="$4" b d c
+  b=$(basename "$r"); d=$(dirname "$r")
+  if [ "$m" = sftp ]; then
+    local TARGET="$t" OPTS="$o"
+    for c in "$d" "$d/public_html"; do
+      lf "cat '$c/index.php'" 2>/dev/null | grep -qF "$b/vendor/autoload.php" && { echo "$c"; return 0; }
+    done
+    return 0
+  fi
+  # shellcheck disable=SC2086
+  ssh -n $o -o BatchMode=yes -o ConnectTimeout=10 "$t" "for c in $(printf %q "$d") $(printf %q "$d/public_html") $(printf %q "$(dirname "$d")"); do grep -qsF $(printf %q "$b/vendor/autoload.php") \"\$c/index.php\" && { echo \"\$c\"; break; }; done" 2>/dev/null || true
+}
 add_line() {  # naam target opts remote modus [live-url] [type]
-  local n="$1" url="${6:-}" kind="${7:-wordpress}"
+  local n="$1" url="${6:-}" kind="${7:-wordpress}" pub=""
   if db_has "$n"; then echo "  = $n staat er al in"; return 0; fi
   if [ "$5" = ssh ] && [ -z "$url" ]; then url=$(remote_home "$2" "$3" "$4" "$kind"); fi
-  db_write "$n" "$n|$2|$3|$4|$5|$(provider_of "$2" "$3")|$url|$kind"
+  [ "$kind" = laravel ] && pub=$(detect_pubdir "$2" "$3" "$4" "$5")
+  db_write "$n" "$n|$2|$3|$4|$5|$(provider_of "$2" "$3")|$url|$kind${pub:+|$pub}"
   REGISTERED+=("$n")
   echo "  ✓ $n$([ "$kind" = laravel ] && echo ' (Laravel)')$([ "$5" = sftp ] && echo ' (SFTP-modus)')${url:+ — $url}"
+  [ -z "$pub" ] || echo "    public-map op live: $pub"
 }
 # naam voor één van meerdere installaties op hetzelfde account: het domein of de map, anders naam-map
 site_name_for() {  # gegeven-naam pad aantal
@@ -458,14 +484,13 @@ register_sftp() {  # naam target opts  (server staat alleen SFTP toe)
   need lftp
   echo "  · $name: alleen SFTP (geen SSH) — zoeken naar WordPress of Laravel…"
   local listing; listing=$(lf "find -d 5 ." 2>/dev/null | sed 's#^\./##; s#/$##' || true)
+  local lfound=() total
   mapfile -t found < <(awk '/(^|\/)wp-content$/ && !/wp-content\/./' <<<"$listing" | head -20 | drop_nested)
-  if [ ${#found[@]} -gt 0 ]; then
-    for f in "${found[@]}"; do add_line "$(site_name_for "$name" "$f" ${#found[@]})" "$TARGET" "$OPTS" "$f" sftp "" wordpress; done
-    return 0
-  fi
-  mapfile -t found < <(awk '/(^|\/)artisan$/ && !/(^|\/)(vendor|node_modules)\//' <<<"$listing" | sed -E 's#/?artisan$##; s#^$#.#' | head -20 | drop_nested)
-  [ ${#found[@]} -gt 0 ] || { echo "  ✗ $name: geen WordPress of Laravel gevonden via SFTP"; return 0; }
-  for f in "${found[@]}"; do add_line "$(site_name_for "$name" "$f" ${#found[@]})" "$TARGET" "$OPTS" "$f" sftp "" laravel; done
+  mapfile -t lfound < <(awk '/(^|\/)artisan$/ && !/(^|\/)(vendor|node_modules)\//' <<<"$listing" | sed -E 's#/?artisan$##; s#^$#.#' | head -20 | drop_nested)
+  total=$(( ${#found[@]} + ${#lfound[@]} ))
+  [ "$total" -gt 0 ] || { echo "  ✗ $name: geen WordPress of Laravel gevonden via SFTP"; return 0; }
+  for f in "${found[@]}"; do add_line "$(site_name_for "$name" "$f" "$total")" "$TARGET" "$OPTS" "$f" sftp "" wordpress; done
+  for f in "${lfound[@]}"; do add_line "$(site_name_for "$name" "$f" "$total")" "$TARGET" "$OPTS" "$f" sftp "" laravel; done
 }
 register() {  # naam target opts [pw] [hint]
   local name="$1" target="$2" opts="$3" pw="${4:-}" hint="${5:-}" found=() f n probe roots
@@ -484,10 +509,12 @@ register() {  # naam target opts [pw] [hint]
     mapfile -t found < <(ssh -n $opts "$target" "for d in $roots; do [ -d \"\$d\" ] && find \"\$d\" -maxdepth 7 -type d -name wp-content -not -path '*/wp-content/*' 2>/dev/null; done | awk '!s[\$0]++' | head -20")
     [ ${#found[@]} -gt 0 ] && break
   done
-  if [ ${#found[@]} -eq 0 ]; then register_laravel "$name" "$target" "$opts" "$hint"; return 0; fi
+  # één account kan WordPress- én Laravel-sites hebben (Hostinger: meerdere domeinen), dus altijd allebei zoeken
+  local lfound=() total
+  mapfile -t lfound < <(find_laravel "$target" "$opts" "$hint")
   # een kopie (bv. public_html/old files) wijst naar hetzelfde adres als de echte site: kortste pad wint
   local kept=() urls=() seen=" " home
-  while IFS= read -r f; do
+  [ ${#found[@]} -gt 0 ] && while IFS= read -r f; do
     # shellcheck disable=SC2086
     home=$(ssh -n $opts -o BatchMode=yes -o ConnectTimeout=10 "$target" "wp option get home --path=$(printf %q "$(dirname "$f")") --skip-plugins --skip-themes" 2>/dev/null | tr -d '\r' | tail -1 || true)
     [[ "$home" =~ ^https?://[A-Za-z0-9.-]+(/[^|[:space:]]*)?$ ]] || home=""
@@ -495,24 +522,26 @@ register() {  # naam target opts [pw] [hint]
     [ -n "$home" ] && seen+="$home "
     kept+=("$f"); urls+=("$home")
   done < <(printf '%s\n' "${found[@]}" | awk '{ print length($0) "\t" $0 }' | sort -n | cut -f2-)
+  total=$(( ${#kept[@]} + ${#lfound[@]} ))
+  [ "$total" -gt 0 ] || { echo "  · $name: geen WordPress of Laravel gevonden"; return 0; }
   local i
   for i in "${!kept[@]}"; do
-    add_line "$(site_name_for "$name" "${kept[$i]}" ${#kept[@]})" "$target" "$opts" "${kept[$i]}" ssh "${urls[$i]}" wordpress
+    add_line "$(site_name_for "$name" "${kept[$i]}" "$total")" "$target" "$opts" "${kept[$i]}" ssh "${urls[$i]}" wordpress
+  done
+  for f in "${lfound[@]}"; do
+    add_line "$(site_name_for "$name" "$f" "$total")" "$target" "$opts" "$f" ssh "" laravel
   done
 }
 # Laravel herkennen aan artisan + laravel/framework in composer.json; releases/<x> van Deployer/Envoyer → current
-register_laravel() {  # naam target opts [hint]
-  local name="$1" target="$2" opts="$3" hint="${4:-}" found=() roots f
+find_laravel() {  # target opts [hint] → projectmappen
+  local target="$1" opts="$2" hint="${3:-}" found=() roots
   for roots in "${hint:+$(printf %q "$(dirname "$hint")") $(printf %q "$hint")}" "$SEARCH_ROOTS"; do
     [ -n "$roots" ] || continue
     # shellcheck disable=SC2086
     mapfile -t found < <(ssh -n $opts "$target" "for d in $roots; do [ -d \"\$d\" ] && find \"\$d\" -maxdepth 6 -type f -name artisan -not -path '*/vendor/*' -not -path '*/node_modules/*' 2>/dev/null; done | while IFS= read -r a; do r=\$(dirname \"\$a\"); grep -qs 'laravel/framework' \"\$r/composer.json\" && echo \"\$r\"; done | sed -E 's#/releases/[^/]+\$#/current#' | awk '!s[\$0]++' | head -20" | drop_nested)
     [ ${#found[@]} -gt 0 ] && break
   done
-  [ ${#found[@]} -gt 0 ] || { echo "  · $name: geen WordPress of Laravel gevonden"; return 0; }
-  for f in "${found[@]}"; do
-    add_line "$(site_name_for "$name" "$f" ${#found[@]})" "$target" "$opts" "$f" ssh "" laravel
-  done
+  [ ${#found[@]} -eq 0 ] || printf '%s\n' "${found[@]}"
 }
 detect_type_at() {  # target opts pad modus → "wordpress <wp-content>" of "laravel <projectmap>"
   local t="$1" o="$2" r="$3" m="$4" out
@@ -573,14 +602,14 @@ cmd_add() {
   [ ${#REGISTERED[@]} -gt 0 ] || die "Geen nieuwe site toegevoegd."
 }
 cmd_update() {
-  [ $# -ge 1 ] || die "Gebruik: wpopen update <naam> [--name|--target|--opts|--remote|--mode|--provider|--url waarde]"
+  [ $# -ge 1 ] || die "Gebruik: wpopen update <naam> [--name|--target|--opts|--remote|--mode|--provider|--url|--public waarde]"
   get "$1"; shift
-  local n="$NAME" t="$TARGET" o="$OPTS" r="$REMOTE" m="$MODE" p="$PROVIDER" u="$LIVEURL"
+  local n="$NAME" t="$TARGET" o="$OPTS" r="$REMOTE" m="$MODE" p="$PROVIDER" u="$LIVEURL" pub="$PUBDIR"
   while [ $# -gt 0 ]; do
     [ $# -ge 2 ] || die "Waarde ontbreekt voor $1"
     case "$1" in
       --name) n="$2";; --target) t="$2";; --opts) o="$2";; --remote) r="$2";;
-      --mode) m="$2";; --provider) p="$2";; --url) u="$2";;
+      --mode) m="$2";; --provider) p="$2";; --url) u="$2";; --public) pub="$2";;
       *) die "Onbekende optie: $1";;
     esac; shift 2
   done
@@ -593,13 +622,14 @@ cmd_update() {
     [ -n "$r" ] || die "Remote pad mag niet leeg zijn."
   fi
   [[ "$p" =~ ^(wpmudev|hostinger|other|)$ ]] || die "Provider moet wpmudev, hostinger of other zijn."
-  local f; for f in "$t" "$o" "$r" "$u"; do valid_field "$f"; done
+  [ -z "$pub" ] || [ "$TYPE" = laravel ] || die "Een losse public-map kan alleen bij Laravel-sites."
+  local f; for f in "$t" "$o" "$r" "$u" "$pub"; do valid_field "$f"; done
   if [ "$n" != "$NAME" ]; then
     db_has "$n" && die "Er bestaat al een site '$n'."
     # de map en het DDEV-project heten naar de naam: hernoemen zou een gebouwde site loskoppelen
     [ "$(slug "$n")" = "$SLUG" ] || [ ! -d "$PROJ" ] || die "Hernoemen kan alleen zolang de site nog niet lokaal gebouwd is."
   fi
-  db_write "$NAME" "$n|$t|$o|$r|$m|$p|$u|$TYPE"
+  db_write "$NAME" "$n|$t|$o|$r|$m|$p|$u|$TYPE${pub:+|$pub}"
   ok "$n bijgewerkt"
 }
 cmd_remove() {
@@ -715,20 +745,63 @@ backup_live_db() {
   fi
   ok "Live database bewaard ($(du -h "$BK/live-db.sql.gz" | cut -f1))"
 }
-backup_live_files() {  # lijstbestand met paden t.o.v. wp-content
-  local list="$1" f
-  mkdir -p "$BK/live-files"
+# ── losse bestanden tussen een lokale map en live; paden in de lijst zijn relatief ──
+put_files() {  # lokale-map live-map lijstbestand
+  local lb="$1" rb="$2" list="$3" rc=0
+  if [ "$MODE" = sftp ]; then
+    need lftp
+    local cmds="" d f
+    while IFS= read -r d; do cmds+="mkdir -p -f '$rb/$d'"$'\n'; done < <(xargs -d '\n' -n1 dirname < "$list" | sort -u)
+    while IFS= read -r f; do [ -n "$f" ] && cmds+="put -O '$rb/$(dirname "$f")' '$f'"$'\n'; done < "$list"
+    lf "lcd '$lb'"$'\n'"$cmds" >/dev/null || rc=$?
+  else
+    need rsync
+    local rlog; rlog=$(mktemp)
+    (cd "$lb" && rsync -az -e "$SSHE" --files-from="$list" ./ "$TARGET:$rb/") > "$rlog" 2>&1 || rc=$?
+    cat "$rlog" >&2; rm -f "$rlog"
+  fi
+  return $rc
+}
+get_files() {  # lokale-map live-map lijstbestand (ontbrekende bestanden op live zijn geen fout)
+  local lb="$1" rb="$2" list="$3" f
+  mkdir -p "$lb"
   if [ "$MODE" = sftp ]; then
     local cmds="set cmd:fail-exit no"$'\n'
     while IFS= read -r f; do
       [ -n "$f" ] || continue
-      mkdir -p "$BK/live-files/$(dirname "$f")"
-      cmds+="get -O '$BK/live-files/$(dirname "$f")' '$REMOTE/$f'"$'\n'
+      mkdir -p "$lb/$(dirname "$f")"
+      cmds+="get -O '$lb/$(dirname "$f")' '$rb/$f'"$'\n'
     done < "$list"
     lf "$cmds" >/dev/null 2>&1 || true
   else
-    rsync -az -e "$SSHE" --files-from="$list" --ignore-missing-args "$TARGET:$REMOTE/" "$BK/live-files/" 2>/dev/null || true
+    rsync -az -e "$SSHE" --files-from="$list" --ignore-missing-args "$TARGET:$rb/" "$lb/" 2>/dev/null || true
   fi
+}
+rm_files() {  # lokale-map live-map lijstbestand (de lokale map telt hier niet mee)
+  local rb="$2" list="$3" f
+  if [ "$MODE" = sftp ]; then
+    local cmds="set cmd:fail-exit no"$'\n'
+    while IFS= read -r f; do [ -n "$f" ] && cmds+="rm -f '$rb/$f'"$'\n'; done < "$list"
+    lf "$cmds" >/dev/null 2>&1 || true
+  else
+    rssh_in "cd '$rb' && xargs -d '\\n' rm -f --" < "$list" 2>/dev/null || true
+  fi
+}
+# Laravel met een losse webmap op live: public/<pad> staat daar, de rest in de projectmap.
+# public/index.php blijft altijd buiten schot: live heeft een eigen versie die naar het project wijst.
+by_root() {  # functie lokale-map lijstbestand — roept functie aan per live-map met het juiste deel van de lijst
+  local fn="$1" lb="$2" list="$3" t rc=0
+  if [ -z "$PUBDIR" ]; then "$fn" "$lb" "$REMOTE" "$list"; return; fi
+  t=$(mktemp -d)
+  grep -v '^public/' "$list" > "$t/project" || true
+  grep '^public/' "$list" | sed 's#^public/##' | grep -vx 'index.php' > "$t/public" || true
+  [ -s "$t/project" ] && { "$fn" "$lb" "$REMOTE" "$t/project" || rc=$?; }
+  [ -s "$t/public" ] && { "$fn" "$lb/public" "$PUBDIR" "$t/public" || rc=$?; }
+  rm -rf "$t"; return $rc
+}
+backup_live_files() {  # lijstbestand met paden t.o.v. wp-content (of de Laravel-projectmap)
+  local list="$1" f
+  by_root get_files "$BK/live-files" "$list"
   # bestanden die live nog niet bestonden: die haalt een rollback weer weg
   while IFS= read -r f; do [ -n "$f" ] && [ ! -e "$BK/live-files/$f" ] && echo "$f"; done < "$list" > "$BK/new-files"
   ok "Live-versies van $(($(grep -c . "$list") - $(grep -c . "$BK/new-files" || true))) bestand(en) bewaard"
@@ -806,17 +879,11 @@ cmd_restore() {
     [ -d "$src/live-files" ] || die "Deze back-up bevat geen live-bestanden."
     confirm "Bestanden op $LIVEHOST terugzetten naar de staat van vóór $id?" || die "Afgebroken."
     step "Live-bestanden terugzetten…"
-    if [ "$MODE" = sftp ]; then
-      lf "mirror -R --no-perms '$src/live-files' '$REMOTE'" >/dev/null
-      if [ -s "$src/new-files" ]; then
-        local cmds="set cmd:fail-exit no"$'\n' f
-        while IFS= read -r f; do [ -n "$f" ] && cmds+="rm -f '$REMOTE/$f'"$'\n'; done < "$src/new-files"
-        lf "$cmds" >/dev/null 2>&1 || true
-      fi
-    else
-      rsync -az -e "$SSHE" "$src/live-files/" "$TARGET:$REMOTE/"
-      [ -s "$src/new-files" ] && rssh_in "cd '$REMOTE' && xargs -d '\\n' rm -f --" < "$src/new-files" 2>/dev/null || true
-    fi
+    local saved; saved=$(mktemp)
+    (cd "$src/live-files" && find . -type f -printf '%P\n') > "$saved"
+    [ -s "$saved" ] && { by_root put_files "$src/live-files" "$saved" || { rm -f "$saved"; die "Terugzetten mislukt."; }; }
+    rm -f "$saved"
+    [ -s "$src/new-files" ] && by_root rm_files "$src/live-files" "$src/new-files"
     base=$(sed -n 's/^base=//p' "$src/meta" | head -1)
     [ -n "$base" ] && [ -d "$LWPC/.git" ] && git -C "$LWPC" tag -f deployed "$base" >/dev/null 2>&1 || true
     ok "Live-bestanden teruggezet ($(find "$src/live-files" -type f | wc -l) bestand(en))"
@@ -1400,12 +1467,29 @@ out += [k + "=" + v for k, v in over.items() if k not in keys]
 print("\n".join(out))' > "$tmp" || { rm -f "$tmp"; return 1; }
   mv "$tmp" "$PROJ/.env"; chmod 600 "$PROJ/.env"
 }
-laravel_pull_files() {
+laravel_pull_files() {  # lokale-map (standaard het project)
+  local dest="${1:-$PROJ}"
+  if [ -z "$PUBDIR" ]; then
+    if [ "$MODE" = sftp ]; then
+      need lftp; lf "set sftp:max-packets-in-flight 64
+mirror --parallel=6 $LARAVEL_LFTP_EXC '$REMOTE' '$dest'" || true
+    else
+      rsync -az -e "$SSHE" "${LARAVEL_EXC[@]}" "$TARGET:$REMOTE/" "$dest/"
+    fi
+    return 0
+  fi
+  # losse webmap: public/ van het project op live is niet wat bezoekers zien, dus public/ komt uit de webmap.
+  # Alleen public/index.php van het project gaat mee: die van de webmap wijst naar de map op de server.
+  local inproj; [[ "$REMOTE/" == "$PUBDIR/"* ]] && inproj="${REMOTE#"$PUBDIR"/}"
   if [ "$MODE" = sftp ]; then
     need lftp; lf "set sftp:max-packets-in-flight 64
-mirror --parallel=6 $LARAVEL_LFTP_EXC '$REMOTE' '$PROJ'" || true
+mirror --parallel=6 $LARAVEL_LFTP_EXC -x '^public/' '$REMOTE' '$dest'
+mkdir -p -f '$dest/public'
+get -O '$dest/public' '$REMOTE/public/index.php'
+mirror --parallel=6 -x '^index\.php\$' -x '^(storage|hot)(/|\$)' ${inproj:+-x '^$inproj(/|\$)'} '$PUBDIR' '$dest/public'" || true
   else
-    rsync -az -e "$SSHE" "${LARAVEL_EXC[@]}" "$TARGET:$REMOTE/" "$PROJ/"
+    rsync -az -e "$SSHE" --include=/public/ --include=/public/index.php --exclude='/public/*' "${LARAVEL_EXC[@]}" "$TARGET:$REMOTE/" "$dest/"
+    rsync -az -e "$SSHE" --exclude=/index.php --exclude=/storage --exclude=/hot ${inproj:+--exclude="/$inproj"} "$TARGET:$PUBDIR/" "$dest/public/"
   fi
 }
 laravel_pull_db() {  # live → lokale DDEV-database
@@ -1497,9 +1581,10 @@ laravel_build_assets() {  # assets lokaal bouwen en public/build in z'n geheel n
 }
 laravel_push_assets() {
   [ -d "$PROJ/public/build" ] || return 0
+  local web="${PUBDIR:-$REMOTE/public}"
   step "Assets uploaden (public/build)…"
-  if [ "$MODE" = sftp ]; then lf "mirror -R --no-perms --delete '$PROJ/public/build' '$REMOTE/public/build'" >/dev/null
-  else rsync -az --delete -e "$SSHE" "$PROJ/public/build/" "$TARGET:$REMOTE/public/build/"; fi
+  if [ "$MODE" = sftp ]; then lf "mirror -R --no-perms --delete '$PROJ/public/build' '$web/build'" >/dev/null
+  else rsync -az --delete -e "$SSHE" "$PROJ/public/build/" "$TARGET:$web/build/"; fi
   ok "Assets staan live"
 }
 
@@ -1584,8 +1669,7 @@ backup_live_full() {  # live wp-content zonder uploads, of bij Laravel de code z
   step "Back-up van de live bestanden…"
   mkdir -p "$BK/live-full"
   if is_laravel; then
-    if [ "$MODE" = sftp ]; then lf "mirror --parallel=4 $LARAVEL_LFTP_EXC '$REMOTE' '$BK/live-full'" >/dev/null || true
-    else rsync -az -e "$SSHE" "${LARAVEL_EXC[@]}" "$TARGET:$REMOTE/" "$BK/live-full/" || true; fi
+    laravel_pull_files "$BK/live-full" >/dev/null 2>&1 || true
     ok "Live code (zonder vendor en storage) bewaard"; return 0
   fi
   if [ "$MODE" = sftp ]; then lf "mirror --parallel=4 -x '^(uploads|cache|upgrade|backups?|ai1wm-backups|updraft|wflogs)(/|\$)' '$REMOTE' '$BK/live-full'" >/dev/null || true
@@ -1776,10 +1860,10 @@ mirror -R --no-perms --parallel=4 $MIGRATE_LFTP_EXC '$LWPC' '$REMOTE'" >/dev/nul
   # sitelijst: deze site wijst nu naar de nieuwe server
   if [ $was_local = 0 ] && [ $keep = 1 ]; then
     local oldname="$NAME-oud"; db_has "$oldname" && oldname="$NAME-oud-$(date +%Y%m%d%H%M)"
-    db_write "$oldname" "$oldname|$otarget|$oopts|$oremote|$omode|$oprov|$ourl|$TYPE"
+    db_write "$oldname" "$oldname|$otarget|$oopts|$oremote|$omode|$oprov|$ourl|$TYPE${PUBDIR:+|$PUBDIR}"
     ok "Oude server bewaard als '$oldname'"
   fi
-  db_write "$NAME" "$NAME|$TARGET|$OPTS|$REMOTE|$MODE|${prov:-$(provider_of "$TARGET" "$OPTS")}|$url|$TYPE"
+  db_write "$NAME" "$NAME|$TARGET|$OPTS|$REMOTE|$MODE|${prov:-$(provider_of "$TARGET" "$OPTS")}|$url|$TYPE${PUBDIR:+|$PUBDIR}"
   echo "$nhost" > "$PROJ/.wpopen-livehost"
   cd "$PROJ"; RESTART=0; write_uploads_proxy "$nhost"; [ $RESTART = 1 ] && { ddev_restart >/dev/null 2>&1 || true; }
   flush_live || true
@@ -1806,7 +1890,7 @@ cmd_domain() {  # live omzetten naar het definitieve domein, bv. van een tijdeli
     live_wp search-replace "\\/\\/$old" "\\/\\/$nhost" --all-tables --skip-columns=guid >/dev/null
   fi
   [ "$scheme" = https ] && live_wp search-replace "http://$nhost" "https://$nhost" --all-tables --skip-columns=guid >/dev/null
-  db_write "$NAME" "$NAME|$TARGET|$OPTS|$REMOTE|$MODE|$PROVIDER|$url|$TYPE"
+  db_write "$NAME" "$NAME|$TARGET|$OPTS|$REMOTE|$MODE|$PROVIDER|$url|$TYPE${PUBDIR:+|$PUBDIR}"
   if [ -d "$PROJ/.ddev" ]; then
     cd "$PROJ"; RESTART=0; write_uploads_proxy "$nhost"
     [ $RESTART = 1 ] && { ddev_restart >/dev/null 2>&1 || true; }
@@ -1832,6 +1916,16 @@ drift_check() {  # base — zijn de live-versies nog gelijk aan wat we de vorige
   warn "Deze bestanden zijn op live gewijzigd sinds de laatste sync:"
   printf '    %s\n' "${drift[@]}" >&2
   return 1
+}
+preview_drift() {  # base lijst — al vóór het live zetten laten zien wat er op live intussen anders is
+  local BK out; BK=$(mktemp -d)
+  printf '%s\n' "$2" > "$BK/files"
+  by_root get_files "$BK/live-files" "$BK/files"
+  if ! out=$(drift_check "$1" 2>&1); then
+    echo "Op live aangepast sinds de laatste sync:"
+    grep '^    ' <<<"$out" || true
+  fi
+  rm -rf "$BK"
 }
 flush_live() {
   step "Live cache legen…"
@@ -1917,6 +2011,7 @@ cmd_live() {
   fi
   # bij Laravel gaat public/build in z'n geheel mee na een verse build, niet als losse bestanden
   if is_laravel; then list=$(grep -v '^public/build/' <<<"$list" || true); fi
+  if [ -n "$PUBDIR" ]; then list=$(grep -vx 'public/index.php' <<<"$list" || true); fi
   if [ -z "$list" ] && [ $db = 0 ] && [ $uploads = 0 ]; then note "Niets nieuws om live te zetten."; return 0; fi
   if [ -n "$list" ]; then
     echo "Bestanden naar live ($(grep -c . <<<"$list")):"; sed 's/^/  ↑ /' <<<"$list"
@@ -1929,7 +2024,10 @@ cmd_live() {
     frontend_changed "$list" && note "Assets worden lokaal gebouwd (npm run build) en public/build gaat mee."
     grep -q '^database/migrations/' <<<"$list" && note "Nieuwe migraties draaien op live (php artisan migrate --force); de live database wordt eerst bewaard."
   fi
-  if [ $dry = 1 ]; then ok "Proefrun: er is niets veranderd."; return 0; fi
+  if [ $dry = 1 ]; then
+    [ -n "$list" ] && [ $nobackup = 0 ] && [ $force = 0 ] && preview_drift "$base" "$list"
+    ok "Proefrun: er is niets veranderd."; return 0
+  fi
   confirm "Dit overschrijft live ($LIVEHOST). Doorgaan?" || die "Afgebroken."
   local build_assets=0
   if is_laravel && frontend_changed "$list"; then laravel_build_assets; build_assets=1; fi
@@ -1952,19 +2050,7 @@ cmd_live() {
       git push -q origin main 2>/dev/null && ok "main gepusht naar GitHub" || note "Geen push naar GitHub (deploy gaat door)"
     fi
     step "Bestanden uploaden naar $LIVEHOST…"
-    if [ "$MODE" = sftp ]; then
-      need lftp
-      local cmds="" d f
-      while IFS= read -r d; do cmds+="mkdir -p -f '$REMOTE/$d'"$'\n'; done < <(xargs -d '\n' -n1 dirname <<<"$list" | sort -u)
-      while IFS= read -r f; do cmds+="put -O '$REMOTE/$(dirname "$f")' '$f'"$'\n'; done <<<"$list"
-      lf "lcd '$LWPC'"$'\n'"$cmds" >/dev/null || { git checkout -q dev; die "Uploaden mislukt. Terugdraaien: wpopen restore $NAME $(basename "$BK") --live-files"; }
-    else
-      need rsync
-      local rlog rc=0; rlog=$(mktemp)
-      rsync -az -e "$SSHE" --files-from=<(printf '%s\n' "$list") ./ "$TARGET:$REMOTE/" > "$rlog" 2>&1 || rc=$?
-      cat "$rlog" >&2; rm -f "$rlog"
-      [ $rc = 0 ] || { git checkout -q dev; die "Uploaden mislukt. Terugdraaien: wpopen restore $NAME $(basename "$BK") --live-files"; }
-    fi
+    by_root put_files "$LWPC" "$BK/files" || { git checkout -q dev; die "Uploaden mislukt. Terugdraaien: wpopen restore $NAME $(basename "$BK") --live-files"; }
     git tag -f deployed main >/dev/null
     git checkout -q dev
     ok "Bestanden staan live"
@@ -2022,7 +2108,8 @@ cmd_test() {
 }
 cmd_updates() {
   [ $# -ge 1 ] || die "Gebruik: wpopen updates <naam> [--local] [--json]"
-  get "$1"; need_wordpress; shift
+  get "$1"; shift
+  if is_laravel; then laravel_updates "$@"; return; fi
   local where=live json=0 out
   is_local && where=local
   while [ $# -gt 0 ]; do case "$1" in --local) where=local;; --live) where=live;; --json) json=1;; esac; shift; done
@@ -2037,6 +2124,257 @@ for c in d["core"]: print("WordPress  → " + c["version"])
 for p in d["plugins"]: print("plugin  %-40s %s → %s" % (p["name"], p["version"], p["update_version"]))
 for t in d["themes"]: print("thema   %-40s %s → %s" % (t["name"], t["version"], t["update_version"]))
 if not any(d.values()): print("✓ Alles is up-to-date")'
+}
+# ───────────── Laravel: pakketten ─────────────
+# lokaal bepaald: lokaal en live draaien op dezelfde composer.lock en package-lock.json
+laravel_updates() {
+  local json=0 c="" n=""
+  while [ $# -gt 0 ]; do case "$1" in --json) json=1;; esac; shift; done
+  built; cd "$PROJ"; ddev_up >/dev/null 2>&1 || true
+  c=$(ddev composer outdated --direct --format=json --no-interaction 2>/dev/null || true)
+  # npm outdated stopt met code 1 zodra er iets te updaten valt
+  [ -f package.json ] && n=$(ddev npm outdated --json 2>/dev/null || true)
+  C="$c" N="$n" JSON="$json" python3 - <<'PY2'
+import json, os
+def load(s):
+    i = (s or "").find("{")
+    try:
+        return json.loads(s[i:]) if i >= 0 else {}
+    except ValueError:
+        return {}
+v = lambda x: (x or "").lstrip("v")
+out = {"composer": [], "npm": []}
+for p in load(os.environ["C"]).get("installed", []):
+    if v(p.get("latest")) and v(p.get("latest")) != v(p.get("version")):
+        out["composer"].append({"name": p["name"], "version": v(p.get("version")), "update_version": v(p.get("latest")),
+                                "major": p.get("latest-status") == "update-possible"})
+for name, p in load(os.environ["N"]).items():
+    if not isinstance(p, dict):
+        continue
+    cur, wanted, latest = p.get("current") or "", p.get("wanted") or "", p.get("latest") or ""
+    # wanted = wat npm update binnen package.json mag; alleen latest erboven is een nieuwe hoofdversie
+    if wanted and wanted != cur:
+        out["npm"].append({"name": name, "version": cur or "-", "update_version": wanted, "major": False})
+    elif latest and latest != cur:
+        out["npm"].append({"name": name, "version": cur or "-", "update_version": latest, "major": True})
+if os.environ["JSON"] == "1":
+    print(json.dumps(out, ensure_ascii=False))
+else:
+    for kind in ("composer", "npm"):
+        for p in out[kind]:
+            print("%-8s %-40s %s → %s%s" % (kind, p["name"], p["version"], p["update_version"], "  (nieuwe hoofdversie, handmatig)" if p["major"] else ""))
+    if not any(out.values()):
+        print("✓ Alles is up-to-date")
+PY2
+}
+# composer.lock en package-lock.json voor en na → leesbare lijst; directe pakketten bij naam, de rest geteld
+lock_changes() {  # map met de oude lock-bestanden
+  OLD="$1" python3 - <<'PY2'
+import json, os
+def read(p):
+    try:
+        return json.load(open(p))
+    except (OSError, ValueError):
+        return {}
+def composer(d):
+    return {p["name"]: p.get("version", "").lstrip("v") for k in ("packages", "packages-dev") for p in d.get(k, [])}
+def npm(d):
+    return {k[13:]: x.get("version", "") for k, x in d.get("packages", {}).items() if k.startswith("node_modules/") and "/node_modules/" not in k[13:]}
+cj, pj = read("composer.json"), read("package.json")
+direct = {"composer": set(cj.get("require", {})) | set(cj.get("require-dev", {})),
+          "npm": set(pj.get("dependencies", {})) | set(pj.get("devDependencies", {}))}
+lines = []
+for kind, fn, f in (("composer", composer, "composer.lock"), ("npm", npm, "package-lock.json")):
+    a, b = fn(read(os.path.join(os.environ["OLD"], f))), fn(read(f))
+    changed = sorted(n for n in set(a) | set(b) if a.get(n) != b.get(n))
+    lines += ["%s %s %s → %s" % (kind, n, a.get(n) or "nieuw", b.get(n) or "weg") for n in changed if n in direct[kind]]
+    rest = len([n for n in changed if n not in direct[kind]])
+    if rest:
+        lines.append("%s: en %d onderliggende pakket(ten)" % (kind, rest))
+print("\n".join(lines))
+PY2
+}
+upgrade_failed() {  # reden — terug naar de staat van vóór de update en stoppen
+  warn "$1. De pakketten worden teruggezet naar de staat van vóór de update…"
+  cd "$PROJ"
+  git reset -q --hard HEAD
+  ddev composer install --no-interaction --no-progress >/dev/null 2>&1 || true
+  if [ -f package.json ]; then
+    ddev npm ci --no-audit --no-fund >/dev/null 2>&1 || true
+    if grep -q '"build"' package.json; then ddev npm run build >/dev/null 2>&1 || true; fi
+  fi
+  rm -rf "${UPGRADE_OLD:-}"
+  die "$1. Er is niets veranderd; de lokale back-up staat in $(basename "$BK")."
+}
+# nieuwe hoofdversies kan composer/npm niet zelf nemen: de versie-eis in composer.json of package.json moet omhoog.
+# Eén voor één met een proefrun, zodat een pakket dat botst met een ander (bv. guzzle 8 met een pakket dat guzzle 7 eist)
+# wordt overgeslagen in plaats van de hele update te laten mislukken.
+set_constraint() {  # bestand naam versie-eis → drukt de oude eis af
+  FILE="$1" NAME="$2" VALUE="$3" python3 - <<'PY2'
+import json, os, re
+path, name, value = os.environ["FILE"], os.environ["NAME"], os.environ["VALUE"]
+text = open(path).read()
+data = json.loads(text)
+old = ""
+for section in ("require", "require-dev", "dependencies", "devDependencies"):
+    if name in data.get(section, {}):
+        old = data[section][name]
+        data[section][name] = value
+if old:
+    indent = 4 if re.search(r'\n    "', text) else 2
+    open(path, "w").write(json.dumps(data, indent=indent, ensure_ascii=False) + "\n")
+print(old)
+PY2
+}
+# regels "naam nieuwe-versie" van de pakketten met een nieuwe hoofdversie; laravel/framework eerst
+major_rows() {  # json soort
+  OUT="$1" KIND="$2" python3 - <<'PY2'
+import json, os
+rows = [(p["name"], p["update_version"]) for p in json.loads(os.environ["OUT"] or "{}").get(os.environ["KIND"], []) if p.get("major")]
+for r in sorted(rows, key=lambda r: (r[0] != "laravel/framework", r[0])):
+    print(*r)
+PY2
+}
+# Pakketten die elkaar nodig hebben (laravel/framework met tinker, vite met laravel-vite-plugin) moeten samen omhoog,
+# dus eerst alles tegelijk proberen. Past dat niet, dan valt steeds het pakket af dat de rest tegenhoudt.
+bump_kind_majors() {  # soort json
+  local kind="$1" file dry n v old i dropped idx reason
+  local -a keep=()
+  local -A ver=() was=()
+  if [ "$kind" = composer ]; then file=composer.json; dry=(ddev composer update --with-all-dependencies --dry-run --no-interaction --no-progress)
+  else file=package.json; dry=(ddev npm install --dry-run --no-audit --no-fund); fi
+  [ -f "$file" ] || return 0
+  while read -r n v; do
+    [ -n "$n" ] || continue
+    old=$(set_constraint "$file" "$n" "^$v")
+    [ -n "$old" ] || continue
+    keep+=("$n"); ver[$n]=$v; was[$n]=$old
+  done < <(major_rows "$2" "$kind")
+  while [ ${#keep[@]} -gt 0 ] && ! reason=$("${dry[@]}" 2>&1); do
+    dropped="" idx=""
+    for ((i=${#keep[@]}-1; i>=0; i--)); do
+      n=${keep[i]}; set_constraint "$file" "$n" "${was[$n]}" >/dev/null
+      if "${dry[@]}" >/dev/null 2>&1; then dropped=$n; idx=$i; break; fi
+      set_constraint "$file" "$n" "^${ver[$n]}" >/dev/null
+    done
+    if [ -z "$dropped" ]; then   # geen pakket is de enige boosdoener: de laatste laten afvallen en opnieuw proberen
+      idx=$((${#keep[@]}-1)); dropped=${keep[idx]}; set_constraint "$file" "$dropped" "${was[$dropped]}" >/dev/null
+    fi
+    echo "  ✗ $dropped blijft op ${was[$dropped]}: past niet samen met de andere pakketten"
+    { grep -E '^ *- |Could not resolve|peer ' <<<"$reason" | head -3 | sed 's/^ */      /'; } || true
+    unset 'keep[idx]'; keep=("${keep[@]}")
+  done
+  for n in "${keep[@]}"; do echo "  ↑ $n ${was[$n]} → ^${ver[$n]}"; done
+}
+bump_majors() {
+  local out; out=$(laravel_updates --json | tail -1)
+  bump_kind_majors composer "$out"
+  [ ! -f package.json ] || bump_kind_majors npm "$out"
+}
+# versie en of het een hoofdversie is, voor één pakket uit de lijst met updates
+package_info() {  # json soort naam → "versie 0|1"
+  OUT="$1" KIND="$2" NAME="$3" python3 - <<'PY2'
+import json, os
+for p in json.loads(os.environ["OUT"] or "{}").get(os.environ["KIND"], []):
+    if p["name"] == os.environ["NAME"]:
+        print(p["update_version"], 1 if p.get("major") else 0)
+PY2
+}
+# gekozen pakketten bijwerken; een nieuwe hoofdversie gaat mee, want daar is bewust voor gekozen
+upgrade_packages() {  # composer:naam of npm:naam, meerdere mogelijk
+  local json spec kind name version major old
+  local -a cnames=() nspecs=()
+  json=$(laravel_updates --json | tail -1)
+  for spec in "$@"; do
+    kind=${spec%%:*}; name=${spec#*:}
+    read -r version major <<<"$(package_info "$json" "$kind" "$name")"
+    [ -n "$version" ] || upgrade_failed "$name staat niet in de lijst met updates"
+    if [ "$kind" = composer ]; then
+      if [ "$major" = 1 ]; then
+        old=$(set_constraint composer.json "$name" "^$version")
+        [ -n "$old" ] || upgrade_failed "$name staat niet direct in composer.json"
+        step "$name $old → ^$version"
+      else step "$name → $version"; fi
+      cnames+=("$name")
+    else
+      step "$name → ^$version"; nspecs+=("$name@^$version")
+    fi
+  done
+  if [ ${#cnames[@]} -gt 0 ]; then
+    ddev composer update "${cnames[@]}" --with-all-dependencies --no-interaction --no-progress 2>&1 | sed 's/^/  /' || upgrade_failed "composer update mislukt"
+  fi
+  if [ ${#nspecs[@]} -gt 0 ]; then
+    ddev npm install "${nspecs[@]}" --no-audit --no-fund 2>&1 | sed 's/^/  /' || upgrade_failed "npm install mislukt; pakketten die elkaar nodig hebben (zoals vite en laravel-vite-plugin) moet je samen kiezen"
+    if grep -q '"build"' package.json; then
+      step "Assets bouwen (npm run build)…"
+      ddev npm run build 2>&1 | tail -4 | sed 's/^/  /' || upgrade_failed "npm run build mislukt"
+    fi
+  fi
+}
+cmd_upgrade() {
+  [ $# -ge 1 ] || die "Gebruik: wpopen upgrade <naam> [--major] [--package composer:naam|npm:naam]… [--live]"
+  need ddev git curl; get "$1"; shift
+  is_laravel || die "Pakketten bijwerken kan alleen bij Laravel-sites. Voor WordPress: wpopen updates $NAME"
+  built
+  local live=0 major=0 code changes subject
+  local -a packages=()
+  while [ $# -gt 0 ]; do case "$1" in --live) live=1;; --major) major=1;; --package) packages+=("${2:-}"); shift;; *) die "Onbekende optie: $1";; esac; shift; done
+  [ $live = 0 ] || need_live
+  local package
+  for package in "${packages[@]}"; do
+    [[ "$package" =~ ^(composer|npm):[A-Za-z0-9@/._-]+$ ]] || die "Ongeldig pakket: $package (gebruik composer:naam of npm:naam)."
+  done
+  cd "$PROJ"
+  [ "$(git branch --show-current)" = dev ] || die "Je zit niet op dev (maar op '$(git branch --show-current)')."
+  # eigen werk en updates gescheiden houden, zodat elk los live kan of terug kan
+  [ -z "$(git status --porcelain)" ] || die "Er staan nog niet-gecommitte wijzigingen. Zet die eerst live (of commit ze), dan blijven de updates een losse stap."
+  ddev_up >/dev/null
+  new_backup upgrade; backup_local
+  UPGRADE_OLD=$(mktemp -d)
+  cp composer.lock package-lock.json "$UPGRADE_OLD/" 2>/dev/null || true
+
+  if [ ${#packages[@]} -gt 0 ]; then
+    upgrade_packages "${packages[@]}"
+  else
+    if [ $major = 1 ]; then
+      step "Nieuwe hoofdversies toestaan…"
+      bump_majors
+    fi
+    step "Composer-pakketten bijwerken…"
+    ddev composer update --with-all-dependencies --no-interaction --no-progress 2>&1 | sed 's/^/  /' || upgrade_failed "composer update mislukt"
+    if [ -f package.json ]; then
+      step "npm-pakketten bijwerken…"
+      ddev npm update --no-audit --no-fund 2>&1 | sed 's/^/  /' || upgrade_failed "npm update mislukt"
+      if grep -q '"build"' package.json; then
+        step "Assets bouwen (npm run build)…"
+        ddev npm run build 2>&1 | tail -4 | sed 's/^/  /' || upgrade_failed "npm run build mislukt"
+      fi
+    fi
+  fi
+  ddev artisan optimize:clear >/dev/null 2>&1 || true
+
+  step "Lokale site controleren…"
+  code=$(curl -sk -o /dev/null --max-time 30 -w '%{http_code}' "$LOCALURL/" 2>/dev/null || true)
+  case "$code" in
+    5*) upgrade_failed "De lokale site geeft een serverfout (HTTP $code) na de update";;
+    ""|000) note "Kon de lokale site niet bereiken; kijk zelf even op $LOCALURL";;
+    *) ok "Lokale site werkt (HTTP $code)";;
+  esac
+
+  changes=$(lock_changes "$UPGRADE_OLD"); rm -rf "$UPGRADE_OLD"
+  if [ -z "$(git status --porcelain)" ]; then
+    ok "Niets bij te werken"
+    if [ $major = 0 ] && [ ${#packages[@]} -eq 0 ]; then note "Nieuwe hoofdversies (oranje) gaan alleen mee met 'Ook nieuwe hoofdversies', of per pakket met de knop in de lijst."; fi
+    return 0
+  fi
+  if [ -n "$changes" ]; then echo "Bijgewerkt:"; sed 's/^/  ↑ /' <<<"$changes"; fi
+  git add -A
+  subject="Pakketten bijgewerkt (Composer en npm)"
+  if [ ${#packages[@]} -gt 0 ]; then subject="Pakket bijgewerkt: $(printf '%s, ' "${packages[@]#*:}" | sed 's/, $//')"; fi
+  gitc commit -qm "$subject" ${changes:+-m "$changes"}
+  ok "Gecommit op dev"
+  if [ $live = 1 ]; then cmd_live "$NAME"
+  else note "Bekijk de site lokaal en zet de updates daarna live met 'Naar live'."; fi
 }
 cmd_cache() {
   [ $# -ge 1 ] || die "Gebruik: wpopen cache <naam> [--live]"
@@ -2165,6 +2503,7 @@ case "${1:-}" in
   restore)  shift; cmd_restore "$@";;
   test)     shift; cmd_test "$@";;
   updates)  shift; cmd_updates "$@";;
+  upgrade)  shift; cmd_upgrade "$@";;
   cache)    shift; cmd_cache "$@";;
   login)    shift; cmd_login "$@";;
   wp)       shift; cmd_wp "$@";;

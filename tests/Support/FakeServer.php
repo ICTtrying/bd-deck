@@ -94,8 +94,23 @@ final class FakeServer
               *"db prefix"*) echo "lokaal_";;
               *"search-replace"*)
                 for a in "$@"; do case "$a" in --export=*) printf 'DROP TABLE IF EXISTS `lokaal_options`;\nINSERT INTO `lokaal_options` VALUES (1,\x27siteurl\x27,\x27https://nieuw.example.test\x27);\n' > "${a#--export=}";; esac; done;;
+              # pakketbeheer: de test bepaalt via de omgeving wat er "verandert" of mislukt
+              *"composer outdated"*) printf '%s' "${FAKE_COMPOSER_OUTDATED:-}";;
+              *"composer update"*"--dry-run"*) [ -z "${FAKE_COMPOSER_CONFLICT:-}" ] || ! grep -q "$FAKE_COMPOSER_CONFLICT" composer.json || { echo "Your requirements could not be resolved to an installable set of packages." >&2; exit 2; };;
+              *"composer update"*) [ -z "${FAKE_COMPOSER_LOCK:-}" ] || printf '%s' "$FAKE_COMPOSER_LOCK" > composer.lock;;
+              *"npm outdated"*) printf '%s' "${FAKE_NPM_OUTDATED:-}"; [ -z "${FAKE_NPM_OUTDATED:-}" ] || exit 1;;
+              *"npm update"*) [ -z "${FAKE_NPM_FAILS:-}" ] || exit 1;;
             esac
             exit 0
+            BASH);
+
+        // alleen de lokale site nabootsen; al het andere verkeer gaat naar de echte curl
+        $server->stub('curl', <<<'BASH'
+            #!/usr/bin/env bash
+            case "$*" in
+              *.ddev.site*) echo "curl $*" >> "$FAKE_LOG"; printf '%s' "${FAKE_LOCAL_HTTP:-000}";;
+              *) exec /usr/bin/curl "$@";;
+            esac
             BASH);
 
         // database- en composer-gereedschap op de "server": loggen wat er gebeurt, inclusief of het wachtwoord via de omgeving komt
