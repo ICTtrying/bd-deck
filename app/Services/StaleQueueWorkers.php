@@ -42,7 +42,8 @@ final class StaleQueueWorkers
     public static function isStale(string $command, int $parentPid, string $parentCommand): bool
     {
         $isNativeWorker = str_contains($command, 'resources/build/php/php')
-            && str_contains($command, 'artisan queue:listen')
+            // ontwikkeling gebruikt queue:listen, de gebouwde app queue:work
+            && (str_contains($command, 'artisan queue:listen') || str_contains($command, 'artisan queue:work'))
             && str_contains($command, '--name=');
 
         $isThisApp = str_contains($command, '.mount_BD') || str_contains($command, 'BD Deck') || str_contains($command, 'bd-deck');

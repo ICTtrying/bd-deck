@@ -9,7 +9,8 @@ $worker = '/tmp/.mount_BD-Dec123/resources/build/php/php -d memory_limit=256M ar
 
 it('herkent een achtergebleven worker van BD Deck', function () use ($worker): void {
     expect(StaleQueueWorkers::isStale($worker, 3643, '/usr/lib/systemd/systemd --user'))->toBeTrue()
-        ->and(StaleQueueWorkers::isStale($worker, 1, '/sbin/init'))->toBeTrue();
+        ->and(StaleQueueWorkers::isStale($worker, 1, '/sbin/init'))->toBeTrue()
+        ->and(StaleQueueWorkers::isStale('/opt/BD Deck/resources/build/php/php artisan queue:work --name=quick --queue=quick', 3643, '/usr/lib/systemd/systemd --user'))->toBeTrue();
 });
 
 it('laat de workers van de draaiende app staan', function () use ($worker): void {
