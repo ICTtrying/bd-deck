@@ -1,0 +1,668 @@
+#!/usr/bin/env bash
+# wpopen — alles in 1 bestand.
+#   wpopen setup              controleert of alles geïnstalleerd is
+#   wpopen install            installeert wpopen + wplive
+#   wpopen import             zoekt zelf bestaande SSH/SFTP-verbindingen en voegt alle WordPress-sites toe
+#   wpopen add <naam> ssh -p 65002 u@host     1 site handmatig toevoegen
+#   wpopen <naam> [--pull] [--live]           site lokaal openen (bouwt hem de 1e keer zelf)
+#   wpopen fix <naam> [--plugins]            bestaande site repareren (prefix, URL's, uploads, constanten, kapotte plugins)
+#   wplive [naam] [-n]                        naar live zetten (-n = dry-run)
+#   wpopen list
+set -euo pipefail
+DB="$HOME/.config/wpsites/sites"; mkdir -p "$(dirname "$DB")"; touch "$DB"
+BASE="${WP_SITES_DIR:-$HOME/wp-sites}"
+EXC=(--exclude=uploads --exclude=cache --exclude=upgrade --exclude='/*backup*' --exclude=updraft
+     --exclude=ai1wm-backups --exclude=wflogs --exclude=debug.log
+     --exclude=object-cache.php --exclude=advanced-cache.php)
+die()  { echo "✗ $*" >&2; exit 1; }
+need() { for c in "$@"; do command -v "$c" >/dev/null || die "'$c' ontbreekt — draai: wpopen setup"; done; }
+slug() { echo "$1" | tr 'A-Z_ ' 'a-z--' | tr -cd 'a-z0-9-'; }
+
+get() {
+  local l; l=$(awk -F'|' -v n="$1" '$1==n' "$DB" | head -1)
+  [ -n "$l" ] || die "Site '$1' onbekend. Zie: wpopen list  (of: wpopen import)"
+  IFS='|' read -r NAME TARGET OPTS REMOTE MODE <<<"$l"
+  SLUG=$(slug "$NAME"); PROJ="$BASE/$SLUG"; LWPC="$PROJ/wp-content"
+  ROOT="$(dirname "$REMOTE")"; SSHE="ssh $OPTS"
+}
+# shellcheck disable=SC2086
+rssh() { ssh -n $OPTS "$TARGET" "$@"; }
+# lftp-hulp voor sites met alleen SFTP (geen SSH): lf "<lftp-commando's>"
+lf() {
+  local f port="" rc=0; f=$(mktemp)
+  [[ "$OPTS" =~ -p\ ([0-9]+) ]] && port="-p ${BASH_REMATCH[1]} "
+  { echo "set sftp:auto-confirm yes"; echo "set sftp:connect-program 'ssh -a -x -oBatchMode=yes'"
+    echo "set net:max-retries 2"; echo "open -u '${TARGET%@*},' ${port}sftp://${TARGET#*@}"; printf '%s\n' "$1"; } > "$f"
+  lftp -f "$f" || rc=$?; rm -f "$f"; return $rc
+}
+
+# ───────────── setup / install / list ─────────────
+cmd_setup() {
+  local ok=1
+  for c in git rsync ssh python3 code docker ddev lftp; do
+    if command -v "$c" >/dev/null; then echo "✓ $c"; else echo "✗ $c ontbreekt"; ok=0; fi
+  done
+  command -v sshpass >/dev/null && echo "✓ sshpass (optioneel)" || echo "· sshpass (optioneel, bespaart wachtwoord typen bij import): sudo apt install sshpass"
+  command -v gh >/dev/null && echo "✓ gh (optioneel, maakt GitHub-repo's automatisch)" || echo "· gh (optioneel, maakt GitHub-repo's automatisch): https://cli.github.com"
+  if [ $ok = 0 ]; then
+    echo; echo "Ontbrekende onderdelen installeren (Ubuntu/Debian):"
+    echo "  sudo apt install -y git rsync python3 docker.io && sudo usermod -aG docker \$USER   # daarna uit- en inloggen"
+    echo "  curl -fsSL https://ddev.com/install.sh | bash"
+    echo "  VS Code ('code'): https://code.visualstudio.com"
+  else echo; echo "Alles aanwezig."; fi
+}
+cmd_install() {
+  mkdir -p ~/.local/bin
+  cp "$(readlink -f "$0")" ~/.local/bin/wpopen; chmod +x ~/.local/bin/wpopen
+  ln -sf ~/.local/bin/wpopen ~/.local/bin/wplive
+  echo "✓ Geïnstalleerd (wpopen + wplive)."
+  case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *)
+    echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+    echo "! ~/.local/bin toegevoegd aan je PATH — open een nieuwe terminal.";; esac
+}
+cmd_list() { [ -s "$DB" ] && cut -d'|' -f1 "$DB" || echo "Nog geen sites. Draai: wpopen import"; }
+
+# ───────────── sites registreren ─────────────
+ensure_key() {  # target opts pw
+  local target="$1" opts="$2" pw="${3:-}"
+  [ -f ~/.ssh/id_ed25519 ] || ssh-keygen -q -t ed25519 -N "" -f ~/.ssh/id_ed25519
+  # shellcheck disable=SC2086
+  if ssh -n $opts -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "$target" true 2>/dev/null; then return 0; fi
+  echo "  → sleutel zetten voor $target…"
+  if [ -n "$pw" ] && command -v sshpass >/dev/null; then
+    # shellcheck disable=SC2086
+    sshpass -p "$pw" ssh-copy-id -o StrictHostKeyChecking=accept-new $opts "$target" >/dev/null 2>&1
+  else
+    # shellcheck disable=SC2086
+    ssh-copy-id -o StrictHostKeyChecking=accept-new $opts "$target"
+  fi
+}
+suffix() {
+  local p b; p="$(dirname "$1")"; b="$(basename "$p")"
+  case "$b" in public_html|www|htdocs|html|httpdocs) b="$(basename "$(dirname "$p")")";; esac
+  case "$b" in .|/|"") b="site";; esac
+  echo "$b"
+}
+register_sftp() {  # naam target opts  (server staat alleen SFTP toe)
+  local name="$1" target="$2" opts="$3" TARGET="$1" OPTS="$3" found=() f n
+  TARGET="$target"; need lftp
+  echo "  · $name: alleen SFTP (geen SSH) — zoeken naar wp-content…"
+  mapfile -t found < <(lf "find -d 5 ." 2>/dev/null | sed 's#^\./##; s#/$##' | awk '/(^|\/)wp-content$/ && !/wp-content\/./' | head -20)
+  [ ${#found[@]} -gt 0 ] || { echo "  ✗ $name: wp-content niet gevonden via SFTP"; return 0; }
+  for f in "${found[@]}"; do
+    n="$name"; [ ${#found[@]} -gt 1 ] && n="$name-$(suffix "$f")"
+    if awk -F'|' -v n="$n" '$1==n{x=1} END{exit !x}' "$DB"; then echo "  = $n staat er al in"; continue; fi
+    echo "$n|$target|$opts|$f|sftp" >> "$DB"; echo "  ✓ $n (SFTP-modus)"
+  done
+}
+register() {  # naam target opts [pw] [hint]
+  local name="$1" target="$2" opts="$3" pw="${4:-}" hint="${5:-}" found=() f n
+  local probe
+  # shellcheck disable=SC2086
+  probe=$(ssh -n $opts -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "$target" true 2>&1 || true)
+  if grep -qi "sftp connections only" <<<"$probe"; then register_sftp "$name" "$target" "$opts"; return 0; fi
+  ensure_key "$target" "$opts" "$pw" || { echo "  ✗ $name: inloggen mislukt"; return 0; }
+  # eerst in het pad uit sftp.json (als bekend), anders in je home-map, /var/www en /srv
+  local roots
+  for roots in "${hint:+$(printf %q "$hint")}" '"$HOME" /var/www /srv'; do
+    [ -n "$roots" ] || continue
+    # shellcheck disable=SC2086
+    mapfile -t found < <(ssh -n $opts "$target" "for d in $roots; do [ -d \"\$d\" ] && find \"\$d\" -maxdepth 7 -type d -name wp-content -not -path '*/wp-content/*' 2>/dev/null; done | awk '!s[\$0]++' | head -20")
+    [ ${#found[@]} -gt 0 ] && break
+  done
+  [ ${#found[@]} -gt 0 ] || { echo "  · $name: geen WordPress gevonden"; return 0; }
+  for f in "${found[@]}"; do
+    n="$name"; [ ${#found[@]} -gt 1 ] && n="$name-$(suffix "$f")"
+    if awk -F'|' -v n="$n" '$1==n{x=1} END{exit !x}' "$DB"; then echo "  = $n staat er al in"; continue; fi
+    echo "$n|$target|$opts|$f" >> "$DB"; echo "  ✓ $n"
+  done
+}
+cmd_add() {
+  # Snelkoppeling: wpopen add sftp://gebruiker@host[:poort]  (naam wordt uit de host gehaald)
+  #   of met eigen naam: wpopen add <naam> sftp://gebruiker@host
+  local url="${1:-}" given=""
+  [[ "${2:-}" == s*ftp://* ]] && { given="$1"; url="$2"; }
+  if [[ "$url" =~ ^s?ftp://([^@/]+)@([^:/]+)(:([0-9]+))?/?$ ]]; then
+    local u="${BASH_REMATCH[1]}" h="${BASH_REMATCH[2]}" pt="${BASH_REMATCH[4]:-}" nm
+    nm="${h%%.*}"; nm="${nm%-serverwpmu}"
+    register "${given:-$nm}" "$u@$h" "${pt:+-p $pt}"; return
+  fi
+  local name="${1:-}"; shift || true
+  [ -n "$name" ] && [ $# -gt 0 ] || die "Gebruik: wpopen add <naam> ssh -p 65002 user@host"
+  [ "$1" = ssh ] && shift
+  local target="${!#}" opts=""
+  [ $# -gt 1 ] && opts="${*:1:$#-1}"
+  register "$name" "$target" "$opts"
+}
+cmd_import() {
+  need python3
+  echo "→ Zoeken in ~/.ssh/config, FileZilla en VS Code sftp.json…"
+  local n=0 name target opts pwb hint pw
+  while IFS='|' read -r name target opts pwb hint <&3; do
+    pw=""; [ -n "$pwb" ] && pw=$(printf %s "$pwb" | base64 -d)
+    n=$((n+1)); echo "• $name ($target)"
+    register "$name" "$target" "$opts" "$pw" "$hint"
+  done 3< <(python3 - <<'PY'
+import os, re, json, base64
+import xml.etree.ElementTree as ET
+H = os.path.expanduser("~")
+seen = set()
+def emit(name, target, opts="", pw="", hint=""):
+    name = re.sub(r'[^A-Za-z0-9._-]+', '-', (name or "").strip()).strip('-')
+    key = (target, opts, hint or name)
+    if name and target and not target.startswith("@") and not target.endswith("@") and key not in seen:
+        seen.add(key)
+        print("|".join([name, target, opts, base64.b64encode(pw.encode()).decode() if pw else "", (hint or "").replace("|", "")]))
+# 1) ~/.ssh/config
+p = os.path.join(H, ".ssh", "config")
+if os.path.exists(p):
+    hosts, cur = {}, None
+    for line in open(p, errors="ignore"):
+        s = line.strip()
+        if not s or s.startswith("#"): continue
+        m = re.match(r'(?i)host\s+(.+)', s)
+        if m:
+            names = [x for x in m.group(1).split() if not re.search(r'[*?!]', x)]
+            cur = names[0] if names else None
+            if cur: hosts[cur] = {}
+            continue
+        m = re.match(r'(?i)(hostname|user|port)\s+(\S+)', s)
+        if m and cur: hosts[cur][m.group(1).lower()] = m.group(2)
+    for h, d in hosts.items():
+        if "hostname" in d and not re.search(r'github|gitlab|bitbucket|azure', d["hostname"], re.I):
+            emit(h, h)
+# 2) FileZilla
+fz = os.path.join(H, ".config", "filezilla", "sitemanager.xml")
+if os.path.exists(fz):
+    try:
+        for s in ET.parse(fz).getroot().iter("Server"):
+            g = lambda t: (s.findtext(t) or "").strip()
+            if g("Protocol") != "1": continue            # 1 = SFTP
+            pw, e = "", s.find("Pass")
+            if e is not None and e.text:
+                pw = base64.b64decode(e.text).decode(errors="ignore") if e.get("encoding") == "base64" else e.text
+            port = g("Port") or "22"
+            emit(g("Name") or g("Host"), g("User") + "@" + g("Host"), "" if port == "22" else "-p " + port, pw)
+    except Exception: pass
+# 3) VS Code sftp.json
+skip = {"node_modules", "snap", "wp-sites", "Local Sites", "__pycache__"}
+for root, dirs, files in os.walk(H):
+    depth = root[len(H):].count(os.sep)
+    dirs[:] = [d for d in dirs if d not in skip and (not d.startswith(".") or d == ".vscode") and depth < 5]
+    if os.path.basename(root) == ".vscode" and "sftp.json" in files:
+        try:
+            raw = re.sub(r'(?m)^\s*//.*$', '', open(os.path.join(root, "sftp.json"), errors="ignore").read())
+            d = json.loads(re.sub(r',(\s*[}\]])', r'\1', raw))
+        except Exception: continue
+        for c in (d if isinstance(d, list) else [d]):
+            if c.get("host") and c.get("username") and c.get("protocol", "sftp") == "sftp":
+                port = str(c.get("port", 22))
+                proj = os.path.basename(os.path.dirname(root))
+                emit(proj or c.get("name"), c["username"] + "@" + c["host"],
+                     "" if port == "22" else "-p " + port, c.get("password", "") or "", c.get("remotePath", "") or "")
+PY
+)
+  [ $n -gt 0 ] && echo "Klaar. Sites: $(cut -d'|' -f1 "$DB" | tr '\n' ' ')" \
+    || echo "Niets gevonden. Voeg handmatig toe: wpopen add <naam> ssh -p POORT user@host"
+}
+
+# ───────────── lokaal bouwen en openen ─────────────
+bootstrap() {
+  echo "→ Eerste keer: lokale omgeving bouwen (een paar minuten)…"
+  rssh "wp --info" >/dev/null 2>&1 || die "WP-CLI niet gevonden op de server van $NAME."
+  local ver php f
+  ver=$(rssh "wp core version --path='$ROOT'" 2>/dev/null || true)
+  php=$(rssh 'php -r "echo PHP_MAJOR_VERSION.\".\".PHP_MINOR_VERSION;"' 2>/dev/null || true)
+  [[ "$php" =~ ^[78]\.[0-9]$ ]] || php=""
+
+  mkdir -p "$PROJ/.ddev/nginx"; cd "$PROJ"
+  ddev config --project-type=wordpress --project-name="$SLUG" --docroot=. ${php:+--php-version="$php"} >/dev/null
+  ddev start
+  [ -f wp-load.php ] || ddev wp core download ${ver:+--version="$ver"} --skip-content
+  echo "↓ Code ophalen…"
+  mkdir -p "$LWPC"; rsync -az -e "$SSHE" "${EXC[@]}" "$TARGET:$REMOTE/" "$LWPC/"
+  pull_avia
+  echo "↓ Database ophalen…"
+  f=$(fetch_db_ssh) || die "Database ophalen mislukt."
+  import_db "$f"; rm -rf "$(dirname "$f")"   # prefix, URL's, uploads-proxy en plugins regelt import_db
+  cd "$PROJ"
+  init_git
+  touch "$PROJ/.wpopen-ready"
+}
+
+init_git() {  # .gitignore automatisch: actief (child)thema + plugins van dezelfde auteur
+  cd "$LWPC"
+  local theme author plugins=() p f
+  theme=$(cd "$PROJ" && ddev wp option get stylesheet 2>/dev/null | tr -d '\r' || true)
+  author=$(grep -iE '^\s*Author:' "themes/$theme/style.css" 2>/dev/null | head -1 | sed -E 's/^[^:]*:\s*//' | tr -d '\r' || true)
+  if [ -n "$author" ]; then
+    for p in plugins/*/; do
+      for f in "$p"*.php; do
+        [ -f "$f" ] || continue
+        if grep -iE '^[ */#]*Author:' "$f" 2>/dev/null | grep -iqF "$author"; then plugins+=("$(basename "$p")"); break; fi
+      done
+    done
+  fi
+  { echo '/*'; echo '!/.gitignore'; echo '!/themes/'; echo '/themes/*'
+    [ -n "$theme" ] && echo "!/themes/$theme/"
+    echo '!/plugins/'; echo '/plugins/*'
+    for p in "${plugins[@]:-}"; do [ -n "$p" ] && echo "!/plugins/$p/"; done
+  } > .gitignore
+  git init -q -b main 2>/dev/null || git init -q
+  git add -A; git -c user.name="${GIT_AUTHOR_NAME:-wpopen}" -c user.email="${GIT_AUTHOR_EMAIL:-wpopen@localhost}" commit -qm "Start: live-staat" || true
+  echo "✓ Git bijgehouden: thema '${theme:-?}' + ${#plugins[@]} eigen plugin(s) ${plugins[*]:-}"
+  if command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then
+    gh repo create "$SLUG" --private --source=. --remote=origin --push >/dev/null 2>&1 \
+      && echo "✓ Privé GitHub-repo '$SLUG' aangemaakt" || echo "· GitHub-repo niet aangemaakt (bestaat misschien al)"
+  fi
+}
+
+fetch_db_ssh() {   # echo pad naar .sql (SSH-sites: via WP-CLI)
+  local out; out="$(mktemp -d)/db.sql"
+  rssh "wp db export - --single-transaction --path='$ROOT'" > "$out" || return 1
+  echo "$out"
+}
+
+fetch_db_sftp() {   # echo pad naar .sql (alleen SFTP): tijdelijk PHP-exportbestand op de site
+  need lftp curl
+  local tok name tmp out base code
+  tok=$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')
+  name="wpo-$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n').php"
+  tmp=$(mktemp -d); out="$tmp/db.sql"
+  sed -e "s/__TOKEN__/$tok/" -e "s/__EXPIRES__/$(( $(date +%s) + 900 ))/" > "$tmp/$name" <<'PHP'
+<?php
+// wpopen: tijdelijke database-export. Verwijdert zichzelf direct.
+$t = '__TOKEN__'; $exp = __EXPIRES__;
+if (time() > $exp) { @unlink(__FILE__); http_response_code(404); exit; }
+if (!isset($_POST['t']) || !hash_equals($t, (string)$_POST['t'])) { http_response_code(404); exit; }
+register_shutdown_function(function () { @unlink(__FILE__); });
+@set_time_limit(0); @ini_set('memory_limit', '512M');
+define('SHORTINIT', true);
+require __DIR__ . '/wp-load.php';
+global $wpdb;
+while (ob_get_level()) { ob_end_clean(); }
+header('Content-Type: text/plain; charset=utf-8');
+$db = $wpdb->dbh;
+$esc = function ($v) use ($db) { return ($db instanceof mysqli) ? mysqli_real_escape_string($db, (string)$v) : addslashes((string)$v); };
+echo "SET NAMES utf8mb4;\nSET FOREIGN_KEY_CHECKS=0;\nSET sql_mode='NO_AUTO_VALUE_ON_ZERO';\n";
+$tables = $wpdb->get_col("SHOW TABLES LIKE '" . $wpdb->esc_like($wpdb->base_prefix) . "%'");
+foreach ($tables as $tb) {
+  $c = $wpdb->get_row("SHOW CREATE TABLE `$tb`", ARRAY_N);
+  echo "DROP TABLE IF EXISTS `$tb`;\n" . $c[1] . ";\n";
+  $off = 0; $n = 100;
+  do {
+    $rows = $wpdb->get_results("SELECT * FROM `$tb` LIMIT $off,$n", ARRAY_A);
+    if (!$rows) { break; }
+    $vals = array();
+    foreach ($rows as $r) {
+      $one = array();
+      foreach ($r as $v) { $one[] = ($v === null) ? 'NULL' : "'" . $esc($v) . "'"; }
+      $vals[] = '(' . implode(',', $one) . ')';
+    }
+    echo "INSERT INTO `$tb` VALUES " . implode(",\n", $vals) . ";\n";
+    flush();
+    $off += $n;
+  } while (count($rows) === $n);
+}
+echo "SET FOREIGN_KEY_CHECKS=1;\n-- wpopen-done\n";
+PHP
+  base="${WPO_BASE:-https://${TARGET#*@}}"
+  echo "↓ Database ophalen via tijdelijk exportbestand…" >&2
+  lf "put -O '$ROOT' '$tmp/$name'" >&2 || { echo "✗ Uploaden mislukt" >&2; return 1; }
+  code=$(curl -sS -L --post301 --post302 --post303 --compressed --max-time 3600 -d "t=$tok" -o "$out" -w '%{http_code}' "$base/$name" 2>/dev/null || true)
+  lf "rm -f '$ROOT/$name'" >&2 || true
+  if [ "$code" = 200 ] && tail -c 200 "$out" | grep -q -- '-- wpopen-done'; then echo "$out"; return 0; fi
+  echo "✗ Database ophalen mislukt (HTTP ${code:-?}). Mogelijk blokkeert de site/firewall de export." >&2
+  return 1
+}
+
+dbcat() { case "$1" in *.zip) unzip -p "$1";; *) zcat -f "$1";; esac; }
+import_db() {   # bestand (.sql, .sql.gz of .zip) → lokale DDEV-site
+  local f="$1" prefix old
+  [ -f "$f" ] || die "Databasebestand niet gevonden: $f"
+  cd "$PROJ"
+  prefix=$(dump_prefix "$f" || true)
+  [ -n "$prefix" ] || prefix=$(dbcat "$f" | grep -m1 -oE 'CREATE TABLE (IF NOT EXISTS )?`[A-Za-z0-9_]*options`' | sed -E 's/.*`(.*)options`/\1/' || true)
+  prefix="${prefix:-wp_}"
+  # tabelprefix van live overnemen: wp-config.php opnieuw schrijven met de juiste prefix (betrouwbaarder dan een regel aanpassen)
+  ddev wp config create --dbname=db --dbuser=db --dbpass=db --dbhost=db --dbprefix="$prefix" --skip-check --force >/dev/null \
+    || die "Kon wp-config.php niet schrijven."
+  grep -qE "table_prefix[[:space:]]*=[[:space:]]*'$prefix'" "$PROJ/wp-config.php" \
+    || die "De prefix '$prefix' staat niet in $PROJ/wp-config.php."
+  echo "↓ Database importeren (prefix $prefix)…"
+  dbcat "$f" | ddev import-db
+  # let op: deze stappen draaien zonder plugins/thema, zodat een live plugin de import niet kan laten crashen
+  local W="--skip-plugins --skip-themes"
+  # shellcheck disable=SC2086
+  old=$(ddev wp option get siteurl $W 2>/dev/null | tr -d '\r') || old=""
+  if [ -z "$old" ]; then
+    echo "✗ WordPress kan de geïmporteerde database niet lezen (prefix '$prefix'). De echte melding:" >&2
+    # shellcheck disable=SC2086
+    ddev wp option get siteurl $W >&2 || true
+    echo "  Config: $(grep -n 'table_prefix' "$PROJ/wp-config.php" | tr '\n' ' ')" >&2
+    die "Importeren afgebroken."
+  fi
+  old="${old#*//}"; old="${old%%/*}"
+  # shellcheck disable=SC2086
+  if [ -n "$old" ] && [ "$old" != "$SLUG.ddev.site" ]; then
+    # shellcheck disable=SC2086
+    ddev wp search-replace "//$old" "//$SLUG.ddev.site" --all-tables --skip-columns=guid $W >/dev/null
+    # JSON-geëscapete URL's (page builders, blokken) staan als \/\/host in de database
+    # shellcheck disable=SC2086
+    ddev wp search-replace "\\/\\/$old" "\\/\\/$SLUG.ddev.site" --all-tables --skip-columns=guid $W >/dev/null
+    write_uploads_proxy "$old"
+  fi
+  # shellcheck disable=SC2086
+  ddev wp user create dev dev@example.test --role=administrator --user_pass=dev $W >/dev/null 2>&1 \
+    || ddev wp user update dev --user_pass=dev $W >/dev/null 2>&1 || true
+  quiet_php; write_local_mu
+  ddev restart >/dev/null
+  activate_all_plugins
+  fix_site refresh
+  echo "✓ Database geïmporteerd — login: dev / dev  (of je eigen live-gebruiker met het live-wachtwoord)"
+}
+
+# Enfold: gegenereerde icon-fonts staan in uploads en worden via PHP include geladen, dus de nginx-proxy volstaat niet
+pull_avia() {
+  mkdir -p "$LWPC/uploads/dynamic_avia"
+  if [ "$MODE" = sftp ]; then
+    lf "mirror '$REMOTE/uploads/dynamic_avia' '$LWPC/uploads/dynamic_avia'" >/dev/null 2>&1 || true
+  else
+    rsync -az -e "$SSHE" "$TARGET:$REMOTE/uploads/dynamic_avia/" "$LWPC/uploads/dynamic_avia/" 2>/dev/null || true
+  fi
+}
+
+# ───────────── zelfherstel: idempotent, draait na elke bouw en bij elke start ─────────────
+RESTART=0   # fix_site zet dit op 1 als ddev één keer opnieuw moet starten
+
+# plugins die lokaal alleen last geven: caches, beveiliging, back-ups, hostingspecifiek, SMTP (geen echte mail vanaf je laptop), WPMU DEV-dashboard
+ENV_PLUGIN_RE='^(wp-rocket|w3-total-cache|wp-super-cache|wp-fastest-cache|litespeed-cache|sg-cachepress|breeze|redis-cache|object-cache-pro|wordfence|better-wp-security|ithemes-security-pro|sucuri-scanner|all-in-one-wp-security-and-firewall|wp-hummingbird|hummingbird-performance|wp-defender|defender-security|shipper|snapshot|updraftplus|backwpup|duplicator|hostinger.*|wp-mail-smtp|wp-mail-smtp-pro|post-smtp|fluent-smtp|easy-wp-smtp|wpmudev-updates|broken-link-checker)$'
+
+# constanten uit de live wp-config die we nooit overnemen (database, salts, URL's, paden, cache, mail, betalingen, wachtwoorden)
+CONST_DENY_RE='^(DB_|AUTH_|SECURE_AUTH_|LOGGED_IN_|NONCE_|WP_HOME$|WP_SITEURL$|WP_CACHE$|WP_DEBUG|WP_ENVIRONMENT_TYPE$|SCRIPT_DEBUG$|SAVEQUERIES$|COOKIE|SITECOOKIEPATH|ADMIN_COOKIE_PATH|PLUGINS_COOKIE_PATH|FORCE_SSL|MULTISITE|SUBDOMAIN_INSTALL|WP_ALLOW_MULTISITE|DOMAIN_CURRENT_SITE|PATH_CURRENT_SITE|SITE_ID_CURRENT_SITE|BLOG_ID_CURRENT_SITE|NOBLOGREDIRECT|WP_CONTENT_|WP_PLUGIN_|WPMU_PLUGIN_|UPLOADS$|WP_TEMP_DIR|WP_REDIS|WP_MEMORY_LIMIT|WP_MAX_MEMORY_LIMIT|DISABLE_WP_CRON|ALTERNATE_WP_CRON|AUTOMATIC_UPDATER|WP_AUTO_UPDATE|DISALLOW_FILE|FS_METHOD|FTP_|WPE_|WP_POST_REVISIONS|EMPTY_TRASH|CONCATENATE|COMPRESS|WP_LOCAL_DEV)'
+CONST_DENY_WORDS_RE='(SMTP|MAIL|WPMS|PASS|STRIPE|MOLLIE|PAYPAL|PAYMENT|MERCHANT|ADYEN|BUCKAROO|SENDGRID|MAILGUN|POSTMARK|SES_)'
+
+# lokaal geen PHP-warnings in de pagina (blijven wel in `ddev logs`); ze breken o.a. headers/cookies
+quiet_php() {
+  local f="$PROJ/.ddev/php/quiet-warnings.ini"
+  grep -q 'ddev-silent-no-warn' "$f" 2>/dev/null && return 0
+  mkdir -p "$(dirname "$f")"; printf ';#ddev-silent-no-warn\n[PHP]\ndisplay_errors = Off\n' > "$f"; RESTART=1
+}
+
+# ontbrekende uploads komen live vandaan; $1 = live hostnaam
+write_uploads_proxy() {
+  local host="$1" f="$PROJ/.ddev/nginx/uploads-proxy.conf" tmp
+  [ -n "$host" ] || return 0
+  mkdir -p "$PROJ/.ddev/nginx"; tmp=$(mktemp)
+  printf '#ddev-silent-no-warn\nlocation ^~ /wp-content/uploads/ {\n    try_files $uri @live_uploads;\n}\nlocation @live_uploads {\n    proxy_pass https://%s;\n    proxy_ssl_server_name on;\n    proxy_set_header Host %s;\n}\n' "$host" "$host" > "$tmp"
+  if cmp -s "$tmp" "$f" 2>/dev/null; then rm -f "$tmp"; else mv "$tmp" "$f"; RESTART=1; fi
+  echo "$host" > "$PROJ/.wpopen-livehost"
+}
+
+# kleine lokale mu-plugin: geen admin-e-mailcontrole, geen update-gezeur. Staat in .gitignore van wp-content, dus nooit naar live.
+write_local_mu() {
+  mkdir -p "$LWPC/mu-plugins"
+  cat > "$LWPC/mu-plugins/wpopen-local.php" <<'PHP'
+<?php
+/* wpopen: lokale instellingen. Niet deployen. */
+add_filter( 'admin_email_check_interval', '__return_false' );
+add_filter( 'automatic_updater_disabled', '__return_true' );
+add_filter( 'auto_update_core', '__return_false' );
+add_action( 'admin_init', static function (): void {
+	remove_action( 'admin_notices', 'update_nag', 3 );
+	remove_action( 'network_admin_notices', 'update_nag', 3 );
+} );
+PHP
+}
+
+# prefix met de meeste data in de dump (een dump kan meerdere installs bevatten); WPO_PREFIX forceert een waarde
+dump_prefix() {
+  [ -n "${WPO_PREFIX:-}" ] && { echo "$WPO_PREFIX"; return; }
+  dbcat "$1" | awk '
+    /^INSERT INTO `[A-Za-z0-9_]*options` / { t=$3; gsub(/`/,"",t); sub(/options$/,"",t); s[t]+=length($0) }
+    END { for (k in s) if (s[k]>m) { m=s[k]; b=k } print b }'
+}
+
+# prefix van de tabellen die nu echt in de lokale database staan (grootste options-tabel met een siteurl)
+db_prefix() {
+  local t
+  while read -r t; do
+    [ -n "$t" ] || continue
+    [ "$(ddev mysql -N -B -e "SELECT COUNT(*) FROM \`$t\` WHERE option_name='siteurl'" 2>/dev/null | tr -d '\r')" = 1 ] && { echo "${t%options}"; return; }
+  done < <(ddev mysql -N -B -e "SELECT table_name FROM information_schema.tables WHERE table_schema='db' AND table_name LIKE '%options' ORDER BY table_rows DESC" 2>/dev/null | tr -d '\r')
+}
+
+# alle plugins aanzetten na een import; een plugin die crasht wordt daarna door heal_fatals weer uitgezet
+activate_all_plugins() {
+  ddev wp plugin activate --all --skip-themes >/dev/null 2>&1 || true
+  echo "✓ Alle plugins geactiveerd"
+}
+
+deactivate_env_plugins() {
+  local W="--skip-plugins --skip-themes" p todo=()
+  while read -r p; do [[ "$p" =~ $ENV_PLUGIN_RE ]] && todo+=("$p"); done < <(ddev wp plugin list --status=active --field=name $W 2>/dev/null | tr -d '\r')
+  [ ${#todo[@]} -gt 0 ] || return 0
+  ddev wp plugin deactivate "${todo[@]}" $W >/dev/null 2>&1 && echo "✓ Lokaal uitgezet: ${todo[*]}"
+  return 0
+}
+
+# live-constanten (bv. API-keys) uit de live wp-config.php, zodat plugins lokaal niet klagen over een ontbrekende sleutel
+fetch_live_constants() {
+  [ -z "${WPO_NO_CONSTANTS:-}" ] || return 0
+  local cfg out="$PROJ/wp-config-live-constants.php" tmp py
+  if [ "$MODE" = sftp ]; then cfg=$(lf "cat '$ROOT/wp-config.php'" 2>/dev/null || true); [ -n "$cfg" ] || cfg=$(lf "cat '$(dirname "$ROOT")/wp-config.php'" 2>/dev/null || true)
+  else cfg=$(rssh "cat '$ROOT/wp-config.php' 2>/dev/null || cat '$(dirname "$ROOT")/wp-config.php'" 2>/dev/null || true); fi
+  [ -n "$cfg" ] || { echo "· Live wp-config niet kunnen lezen: constanten niet overgenomen"; return 0; }
+  tmp=$(mktemp); py=$(mktemp)
+  cat > "$py" <<'PY'
+import os, re, sys
+src = sys.stdin.read()
+src = re.sub(r'/\*.*?\*/', '', src, flags=re.S)
+src = '\n'.join(l for l in src.splitlines() if not re.match(r'\s*(//|#)', l))
+deny, words = re.compile(os.environ['DENY']), re.compile(os.environ['WORDS'], re.I)
+val = r'''('(?:[^'\\]|\\.)*'|"(?:[^"\\$]|\\.)*"|-?\d+(?:\.\d+)?|true|false|null)'''
+pat = re.compile(r'''define\(\s*['"]([A-Z][A-Z0-9_]*)['"]\s*,\s*''' + val + r'''\s*\)\s*;''', re.I)
+seen, out = set(), ['<?php', '// wpopen: constanten uit de live wp-config (zonder database, salts, mail en betalingen). Niet committen.']
+for m in pat.finditer(src):
+    name, v = m.group(1), m.group(2)
+    if name in seen or deny.match(name) or words.search(name): continue
+    seen.add(name)
+    out.append("if ( ! defined( '%s' ) ) { define( '%s', %s ); }" % (name, name, v))
+    print(name, file=sys.stderr)
+print('\n'.join(out))
+PY
+  DENY="$CONST_DENY_RE" WORDS="$CONST_DENY_WORDS_RE" python3 "$py" <<<"$cfg" > "$tmp" 2> "$tmp.names" || { rm -f "$tmp" "$tmp.names" "$py"; return 0; }
+  mv "$tmp" "$out"; chmod 600 "$out"
+  [ -s "$tmp.names" ] && echo "✓ Live-constanten overgenomen (alleen namen): $(tr '\n' ' ' < "$tmp.names")" || echo "· Geen overneembare constanten in de live wp-config"
+  rm -f "$tmp.names" "$py"
+}
+
+# wp-config.php laadt de live-constanten (opnieuw toevoegen na elke wp-config-rewrite)
+link_live_constants() {
+  [ -f "$PROJ/wp-config.php" ] || return 0
+  # ddev klaagt bij elke start als wp-config.php zijn settings-bestand niet kent; onze config is zelfstandig
+  grep -q 'wp-config-ddev.php not needed' "$PROJ/wp-config.php" || sed -i '0,/^<?php/s//<?php\n\/\/ wp-config-ddev.php not needed/' "$PROJ/wp-config.php"
+  [ -f "$PROJ/wp-config-live-constants.php" ] || return 0
+  grep -q 'wpopen-live-constants' "$PROJ/wp-config.php" && return 0
+  sed -i '0,/^<?php/s//<?php\n\/* wpopen-live-constants *\/ if ( file_exists( __DIR__ . "\/wp-config-live-constants.php" ) ) { require_once __DIR__ . "\/wp-config-live-constants.php"; }/' "$PROJ/wp-config.php"
+}
+
+# fatale fout in een plugin → die plugin uitzetten en opnieuw proberen
+heal_fatals() {
+  local W="--skip-plugins --skip-themes" i out slug
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    out=$(ddev wp eval 'echo "wpo-" . "ok";' 2>&1 || true)   # token wordt pas door PHP samengesteld: een foutmelding herhaalt de commandotekst
+    grep -q 'wpo-ok' <<<"$out" && return 0
+    slug=$(grep -iE 'fatal error|uncaught|parse error' <<<"$out" | grep -oE 'wp-content/plugins/[^/ :]+' | sed -n '1s#.*/##p' || true)   # sed i.p.v. head: SIGPIPE + pipefail zou het script stilzetten
+    if [ -z "$slug" ]; then
+      echo "! WordPress start niet en de oorzaak is geen plugin. Eerste melding:" >&2
+      grep -m3 -iE 'fatal|error' <<<"$out" | cut -c1-300 >&2; return 0
+    fi
+    ddev wp plugin deactivate "$slug" $W >/dev/null 2>&1 && echo "✓ Plugin '$slug' veroorzaakte een fatale fout en is lokaal uitgezet"
+  done
+}
+
+fix_site() {   # $1=refresh: live-constanten opnieuw ophalen
+  local W="--skip-plugins --skip-themes" best cur old host
+  cd "$PROJ"; RESTART=0
+  link_live_constants   # eerst: voorkomt de ddev-melding over wp-config.php bij de wp-aanroepen hieronder
+  quiet_php
+  write_local_mu
+  # 1) prefix in wp-config moet bij de database passen
+  best=$(db_prefix || true)
+  cur=$(ddev wp eval 'global $wpdb; echo $wpdb->prefix;' $W 2>/dev/null | tr -d '\r' || true)
+  if [ -n "$best" ] && [ "$best" != "$cur" ]; then
+    ddev wp config set table_prefix "$best" --type=variable >/dev/null 2>&1 \
+      && echo "✓ Tabelprefix rechtgezet: '$cur' → '$best'" || echo "! Kon tabelprefix niet aanpassen (database heeft '$best')" >&2
+  fi
+  # 2) live-constanten
+  if [ "${1:-}" = refresh ] || [ ! -f wp-config-live-constants.php ]; then fetch_live_constants || true; fi
+  link_live_constants
+  # 3) site-URL moet lokaal zijn (herstelt een mislukte search-replace)
+  old=$(ddev wp option get siteurl $W 2>/dev/null | tr -d '\r' || true)
+  host="${old#*//}"; host="${host%%/*}"
+  if [ -n "$host" ] && [ "$host" != "$SLUG.ddev.site" ]; then
+    ddev wp search-replace "//$host" "//$SLUG.ddev.site" --all-tables --skip-columns=guid $W >/dev/null \
+      && ddev wp search-replace "\\/\\/$host" "\\/\\/$SLUG.ddev.site" --all-tables --skip-columns=guid $W >/dev/null \
+      && echo "✓ URL's omgezet: $host → $SLUG.ddev.site"
+    write_uploads_proxy "$host"
+  elif [ -f .wpopen-livehost ]; then write_uploads_proxy "$(cat .wpopen-livehost)"; fi
+  # 4) plugins die niet starten
+  heal_fatals
+  if [ $RESTART = 1 ]; then ddev restart >/dev/null 2>&1 || true; fi
+  return 0
+}
+
+pull_sftp() {
+  mkdir -p "$LWPC"
+  local pid=""
+  # voortgang: elke 10 sec het aantal lokale bestanden tonen
+  ( while sleep 10; do printf '\r  … %s bestanden binnen   ' "$(find "$LWPC" -type f 2>/dev/null | wc -l)"; done ) &
+  pid=$!
+  lf "set sftp:max-packets-in-flight 64
+set sftp:size-read 32768
+mirror --parallel=6 -x '^(uploads|cache|upgrade|backups?|backup-db|ai1wm-backups|updraft|wflogs)(/|\$)' -x '(^|/)(node_modules|\\.git)(/|\$)' -x '^(object|advanced)-cache\\.php\$' -x '\\.(zip|tar|gz|sql|log)\$' '$REMOTE' '$LWPC'" || true
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
+  echo; echo "  ✓ $(find "$LWPC" -type f | wc -l) bestanden opgehaald"
+}
+
+bootstrap_sftp() {   # alleen SFTP: code ophalen, database optioneel via --db bestand
+  need lftp
+  echo "→ Eerste keer: lokale omgeving bouwen (SFTP-modus)…"
+  local ver prefix="" theme t
+  ver=$(lf "cat '$ROOT/wp-includes/version.php'" 2>/dev/null | sed -nE "s/^.wp_version = '([^']+)'.*/\1/p" | head -1 || true)
+  prefix="${prefix:-wp_}"
+  mkdir -p "$PROJ"; cd "$PROJ"
+  ddev config --project-type=wordpress --project-name="$SLUG" --docroot=. >/dev/null
+  ddev start
+  [ -f wp-load.php ] || ddev wp core download ${ver:+--version="$ver"} --skip-content
+  [ -f wp-config.php ] || ddev wp config create --dbname=db --dbuser=db --dbpass=db --dbhost=db --dbprefix="$prefix" --skip-check
+  echo "↓ Code ophalen via SFTP…"; pull_sftp; pull_avia
+  local auto=0
+  if [ -z "${DBFILE:-}" ]; then DBFILE=$(fetch_db_sftp) && auto=1 || DBFILE=""; fi
+  if [ -n "${DBFILE:-}" ]; then
+    import_db "$DBFILE"; [ $auto = 1 ] && rm -rf "$(dirname "$DBFILE")"
+  else
+    echo "· Database niet automatisch opgehaald: lokale site wordt een lege WordPress. Later: wpopen $NAME --db bestand.sql"
+    ddev wp core is-installed 2>/dev/null || ddev wp core install --url="https://$SLUG.ddev.site" --title="$NAME" --admin_user=dev --admin_password=dev \
+      --admin_email=dev@example.test --skip-email >/dev/null
+    for t in "$LWPC"/themes/*/; do   # child thema activeren
+      grep -qiE '^\s*Template:' "${t}style.css" 2>/dev/null && { theme=$(basename "$t"); break; }
+    done
+    [ -n "${theme:-}" ] && ddev wp theme activate "$theme" >/dev/null && echo "✓ Thema '$theme' geactiveerd (lokale site is leeg: geen pagina's/berichten)"
+  fi
+  init_git
+  touch "$PROJ/.wpopen-ready"
+}
+
+cmd_open() {
+  [ $# -ge 1 ] || { cmd_list; return; }
+  need ddev git
+  get "$1"; shift
+  local pull=0 live=0 dbpull=0 DBFILE=""
+  while [ $# -gt 0 ]; do case "$1" in --pull) pull=1;; --live) live=1;; --dbpull) dbpull=1;; --db) shift; DBFILE="$(readlink -f "${1:-}")";; esac; shift; done
+  if [ $live = 1 ]; then
+    [ "$MODE" = sftp ] && die "--live kan niet: $NAME heeft alleen SFTP, geen SSH."
+    code --remote "ssh-remote+$TARGET" "$REMOTE"; return
+  fi
+
+  local built=0
+  if [ ! -f "$PROJ/.wpopen-ready" ]; then built=1; if [ "$MODE" = sftp ]; then bootstrap_sftp; else bootstrap; fi; fi
+  if [ $pull = 1 ]; then
+    cd "$LWPC"; [ -z "$(git status --porcelain)" ] || die "Eerst committen: --pull zou lokale wijzigingen overschrijven."
+    if [ "$MODE" = sftp ]; then pull_sftp; else rsync -az -e "$SSHE" "${EXC[@]}" "$TARGET:$REMOTE/" "$LWPC/"; fi
+    pull_avia
+    echo "✓ Code van live opgehaald"
+  fi
+  cd "$PROJ"; ddev start >/dev/null; fix_site
+  [ -n "$DBFILE" ] && [ $built = 0 ] && import_db "$DBFILE"
+  if [ $dbpull = 1 ] && [ $built = 0 ]; then   # verse database van live (overschrijft de lokale!)
+    local f; if [ "$MODE" = sftp ]; then f=$(fetch_db_sftp) || die "Database ophalen mislukt."; else f=$(fetch_db_ssh) || die "Database ophalen mislukt."; fi
+    import_db "$f"; rm -rf "$(dirname "$f")"
+  fi
+  cd "$LWPC"
+  git rev-parse --verify -q dev >/dev/null && git checkout -q dev || git checkout -q -b dev
+  echo "✓ Branch: dev   |   login: dev / dev"
+  code "$LWPC" || true
+  cd "$PROJ"; ddev launch /wp-admin
+}
+
+cmd_fix() {   # bestaande site repareren zonder opnieuw te bouwen: prefix, URL's, uploads-proxy, constanten, kapotte plugins
+  [ $# -ge 1 ] || die "Gebruik: wpopen fix <naam> [--plugins]   (--plugins zet ook caches/beveiliging/SMTP weer uit)"
+  need ddev; get "$1"; shift
+  [ -d "$PROJ/.ddev" ] || die "$NAME is nog niet gebouwd. Draai eerst: wpopen $NAME"
+  cd "$PROJ"; ddev start >/dev/null 2>&1
+  [ "${1:-}" = "--plugins" ] && deactivate_env_plugins
+  fix_site refresh
+  echo "✓ $NAME gecontroleerd en hersteld waar nodig"
+}
+
+cmd_live() {
+  need git
+  local dry=0 site="" a n l
+  for a in "$@"; do case "$a" in -n) dry=1;; *) site="$a";; esac; done
+  if [ -z "$site" ]; then
+    while IFS='|' read -r n _; do
+      case "$PWD" in "$BASE/$(slug "$n")"*) site="$n"; break;; esac
+    done < "$DB"
+  fi
+  [ -n "$site" ] || die "Geen site herkend. Gebruik: wplive <naam>"
+  get "$site"; cd "$LWPC"
+  [ -z "$(git status --porcelain)" ] || die "Niet-gecommitte wijzigingen. Commit eerst op dev."
+  [ "$(git branch --show-current)" = dev ] || die "Je zit niet op dev."
+  if [ $dry = 0 ]; then
+    git checkout -q main && git merge --no-edit dev
+    git push -q origin main 2>/dev/null && echo "✓ main gepusht" || echo "· geen push naar GitHub (deploy gaat door)"
+  fi
+  echo "→ Naar live ($NAME)…"
+  if [ "$MODE" = sftp ]; then
+    need lftp
+    local list cmds="" d f
+    if git rev-parse -q --verify deployed >/dev/null; then list=$(git diff --name-only --diff-filter=d deployed HEAD)
+    else list=$(git ls-files); fi
+    if [ -z "$list" ]; then echo "· Niets nieuws om te uploaden."
+    elif [ $dry = 1 ]; then echo "$list"
+    else
+      while IFS= read -r d; do cmds+="mkdir -p -f '$REMOTE/$d'"$'\n'; done < <(echo "$list" | xargs -d '\n' -n1 dirname | sort -u)
+      while IFS= read -r f; do cmds+="put -O '$REMOTE/$(dirname "$f")' '$f'"$'\n'; done <<<"$list"
+      lf "lcd '$LWPC'"$'\n'"$cmds" && git tag -f deployed >/dev/null
+    fi
+  else
+    need rsync
+    local o="-az"; [ $dry = 1 ] && o="-azn"
+    git ls-files | rsync $o -v -e "$SSHE" --files-from=- ./ "$TARGET:$REMOTE/" | grep -vE '^(sending|$)' || true
+  fi
+  [ $dry = 1 ] || { git checkout -q dev; echo "✓ Live! Terug op dev."; }
+}
+
+case "$(basename "$0")" in wplive) cmd_live "$@"; exit;; esac
+case "${1:-}" in
+  setup)   cmd_setup;;
+  install) cmd_install;;
+  import)  cmd_import;;
+  add)     shift; cmd_add "$@";;
+  live)    shift; cmd_live "$@";;
+  fix)     shift; cmd_fix "$@";;
+  list|"") cmd_list;;
+  *)       cmd_open "$@";;
+esac
