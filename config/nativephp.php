@@ -15,7 +15,7 @@ return [
      * usually in the form of a reverse domain name.
      * For example: com.nativephp.app
      */
-    'app_id' => env('NATIVEPHP_APP_ID', 'com.nativephp.app'),
+    'app_id' => env('NATIVEPHP_APP_ID', 'nl.borgmandigital.bddeck'),
 
     /**
      * If your application allows deep linking, you can specify the scheme
@@ -31,22 +31,22 @@ return [
     /**
      * The author of your application.
      */
-    'author' => env('NATIVEPHP_APP_AUTHOR'),
+    'author' => env('NATIVEPHP_APP_AUTHOR', 'Borgman Digital'),
 
     /**
      * The copyright notice for your application.
      */
-    'copyright' => env('NATIVEPHP_APP_COPYRIGHT'),
+    'copyright' => env('NATIVEPHP_APP_COPYRIGHT', '© Borgman Digital'),
 
     /**
      * The description of your application.
      */
-    'description' => env('NATIVEPHP_APP_DESCRIPTION', 'An awesome app built with NativePHP'),
+    'description' => env('NATIVEPHP_APP_DESCRIPTION', 'Lokale en live WordPress-sites beheren'),
 
     /**
      * The Website of your application.
      */
-    'website' => env('NATIVEPHP_APP_WEBSITE', 'https://nativephp.com'),
+    'website' => env('NATIVEPHP_APP_WEBSITE', 'https://borgmandigital.nl'),
 
     /**
      * The default service provider for your application. This provider
@@ -153,11 +153,19 @@ return [
      * The queue workers that get auto-started on your application start.
      */
     'queue_workers' => [
+        // lange acties (bouwen, migreren, pushen); per site nooit twee tegelijk
         'default' => [
             'queues' => ['default'],
+            'memory_limit' => 256,
+            'timeout' => 7200,
+            'sleep' => 1,
+        ],
+        // korte acties (test, updates, cache) wachten zo niet op een lange bouw
+        'quick' => [
+            'queues' => ['quick'],
             'memory_limit' => 128,
-            'timeout' => 60,
-            'sleep' => 3,
+            'timeout' => 600,
+            'sleep' => 1,
         ],
     ],
 
@@ -165,7 +173,7 @@ return [
      * Define your own scripts to run before and after the build process.
      */
     'prebuild' => [
-        // 'npm run build',
+        'npm run build',
     ],
 
     'postbuild' => [

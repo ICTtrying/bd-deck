@@ -3,6 +3,7 @@
 namespace Database\Factories;
 
 use App\Models\User;
+use App\Services\Vault;
 use Illuminate\Database\Eloquent\Factories\Factory;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Str;
@@ -31,6 +32,19 @@ class UserFactory extends Factory
             'password' => static::$password ??= Hash::make('password'),
             'remember_token' => Str::random(10),
         ];
+    }
+
+    /**
+     * Eigenaar met een echte kluis, zodat inloggen en geheimen in tests werken.
+     */
+    public function owner(string $password = 'geheim-wachtwoord'): static
+    {
+        return $this->state(fn (): array => [
+            'name' => 'Eigenaar',
+            'email' => 'eigenaar@bd-deck.local',
+            'password' => Hash::make($password),
+            ...app(Vault::class)->create($password),
+        ]);
     }
 
     /**

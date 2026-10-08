@@ -1087,7 +1087,7 @@ pull_code() {
   else gitc commit -qm "Live-staat $(date '+%Y-%m-%d %H:%M')"; ok "Live-wijzigingen vastgelegd op main"; fi
   git tag -f deployed >/dev/null
   ensure_dev
-  git merge -q --no-edit main 2>/dev/null || { git merge --abort 2>/dev/null || true; die "dev botst met de nieuwe live-staat. Voeg main handmatig samen met dev (bv. in VS Code)."; }
+  gitc merge -q --no-edit main 2>/dev/null || { git merge --abort 2>/dev/null || true; die "dev botst met de nieuwe live-staat. Voeg main handmatig samen met dev (bv. in VS Code)."; }
   ok "Code van live opgehaald (main → dev)"
 }
 pull_db() {
@@ -1294,7 +1294,7 @@ cmd_live() {
       fi
     fi
     git checkout -q main
-    git merge -q --ff-only dev 2>/dev/null || git merge -q --no-edit dev || { git merge --abort 2>/dev/null || true; git checkout -q dev; die "Samenvoegen van dev in main mislukt."; }
+    git merge -q --ff-only dev 2>/dev/null || gitc merge -q --no-edit dev || { git merge --abort 2>/dev/null || true; git checkout -q dev; die "Samenvoegen van dev in main mislukt."; }
     if git remote get-url origin >/dev/null 2>&1; then
       git push -q origin main 2>/dev/null && ok "main gepusht naar GitHub" || note "Geen push naar GitHub (deploy gaat door)"
     fi

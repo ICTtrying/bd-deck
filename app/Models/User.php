@@ -11,11 +11,19 @@ use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 
 #[Fillable(['name', 'email', 'password'])]
-#[Hidden(['password', 'remember_token'])]
+#[Hidden(['password', 'remember_token', 'vault_salt', 'vault_key'])]
 class User extends Authenticatable
 {
     /** @use HasFactory<UserFactory> */
     use HasFactory, Notifiable;
+
+    /**
+     * De app kent één eigenaar: wie het hoofdwachtwoord heeft.
+     */
+    public static function owner(): ?self
+    {
+        return static::query()->oldest('id')->first();
+    }
 
     /**
      * Get the attributes that should be cast.
