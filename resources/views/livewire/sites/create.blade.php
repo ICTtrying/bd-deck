@@ -24,8 +24,8 @@
         <form wire:submit="createLocal" class="grid gap-6">
             <x-panel :title="__('Nieuwe lokale site')" :description="__('BD Deck maakt een DDEV-omgeving met de nieuwste WordPress (Nederlands), permalinks op berichtnaam en git voor je thema en plugins. Inloggen: dev / dev.')">
                 <div class="grid gap-4 sm:grid-cols-2">
-                    <x-field :label="__('Naam')" for="local-name" error="localName" :hint="__('Wordt de map in je sites-map en het adres naam.ddev.site.')">
-                        <x-input id="local-name" wire:model="localName" mono autocomplete="off" spellcheck="false" placeholder="klant-nieuw" />
+                    <x-field :label="__('Naam')" for="local-name" error="localName" :hint="__('Adres: :host. De code erachter maakt het adres uniek, anders kan WPMU DEV het al aan iemand anders gekoppeld hebben.', ['host' => $this->localHost])">
+                        <x-input id="local-name" wire:model.live.debounce.300ms="localName" mono autocomplete="off" spellcheck="false" placeholder="klant-nieuw" />
                     </x-field>
                     <x-field :label="__('Titel van de website (optioneel)')" for="local-title" error="localTitle">
                         <x-input id="local-title" wire:model="localTitle" :placeholder="__('Bijvoorbeeld: Bakkerij De Korenaar')" />

@@ -10,6 +10,7 @@ use App\Livewire\Sites\DeleteDialog;
 use App\Livewire\Sites\Migrate;
 use App\Livewire\Sites\Show;
 use App\Models\CommandRun;
+use App\Models\Setting;
 use App\Models\Site;
 use App\Models\User;
 use App\Services\WpOpen\SiteRegistry;
@@ -22,6 +23,7 @@ beforeEach(function (): void {
     Queue::fake();
     Process::fake();
     $this->actingAs(User::factory()->owner()->create());
+    Setting::query()->create(['key' => 'local_site_suffix', 'value' => 'abcd']);
 });
 
 describe('verbinding plakken', function (): void {
@@ -51,7 +53,19 @@ describe('lokale sites', function (): void {
             ->assertHasNoErrors();
 
         Queue::assertPushed(RunWpOpenCommand::class, fn (RunWpOpenCommand $job): bool => $job->run->action === WpOpenAction::NewSite
-            && $job->run->arguments === ['new', 'bakkerij', '--title', 'Bakkerij De Korenaar']);
+            && $job->run->arguments === ['new', 'bakkerij-abcd', '--title', 'Bakkerij De Korenaar']);
+    });
+
+    it('maakt de naam uniek met een vaste code per installatie, ook als je die zelf al typt', function (): void {
+        Livewire::test(Create::class)
+            ->set('kind', 'lokaal')
+            ->set('localName', 'test')
+            ->assertSee('test-abcd.ddev.site')
+            ->set('localName', 'test-abcd')
+            ->call('createLocal')
+            ->assertHasNoErrors();
+
+        Queue::assertPushed(RunWpOpenCommand::class, fn (RunWpOpenCommand $job): bool => $job->run->arguments === ['new', 'test-abcd']);
     });
 
     it('gaat na het toevoegen terug naar de sitelijst', function (): void {
@@ -72,7 +86,7 @@ describe('lokale sites', function (): void {
     });
 
     it('weigert een naam die al bestaat', function (): void {
-        Site::factory()->create(['name' => 'bakkerij']);
+        Site::factory()->create(['name' => 'bakkerij-abcd']);
 
         Livewire::test(Create::class)->set('localName', 'bakkerij')->call('createLocal')->assertHasErrors('localName');
 

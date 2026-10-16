@@ -550,7 +550,6 @@
     "De site staat al online. BD Deck haalt hem op en bouwt hem lokaal na.": "The site is already online. BD Deck fetches it and rebuilds it locally.",
     "Een lege WordPress-site op je computer. Als hij af is, zet je hem met één knop live.": "An empty WordPress site on your computer. When it's done, take it live with one button.",
     "BD Deck maakt een DDEV-omgeving met de nieuwste WordPress (Nederlands), permalinks op berichtnaam en git voor je thema en plugins. Inloggen: dev / dev.": "BD Deck creates a DDEV environment with the latest WordPress (Dutch), post-name permalinks and git for your theme and plugins. Log in: dev / dev.",
-    "Wordt de map in je sites-map en het adres naam.ddev.site.": "Becomes the folder in your sites folder and the address name.ddev.site.",
     "Titel van de website (optioneel)": "Website title (optional)",
     "Bijvoorbeeld: Bakkerij De Korenaar": "For example: Cornfield Bakery",
     "Deze site bestaat alleen op je computer. De map :path en de DDEV-database worden weggegooid; er wordt eerst een back-up gemaakt.": "This site only exists on your computer. The folder :path and the DDEV database are deleted; a backup is made first.",
@@ -722,5 +721,7 @@
     "Klaar": "Done",
     "Plugins kiezen": "Choose plugins",
     "WPMU DEV-plugins, gratis versie": "WPMU DEV plugins, free version",
-    "Van wordpress.org, dus zonder inloggen. De Pro-versies installeer je daarna via het WPMU DEV Dashboard, als je daar bent ingelogd.": "From wordpress.org, so no login needed. Install the Pro versions afterwards through the WPMU DEV Dashboard once you are logged in there."
+    "Van wordpress.org, dus zonder inloggen. De Pro-versies installeer je daarna via het WPMU DEV Dashboard, als je daar bent ingelogd.": "From wordpress.org, so no login needed. Install the Pro versions afterwards through the WPMU DEV Dashboard once you are logged in there.",
+    "Adres: :host. De code erachter maakt het adres uniek, anders kan WPMU DEV het al aan iemand anders gekoppeld hebben.": "Address: :host. The code at the end makes the address unique; otherwise WPMU DEV may already have linked it to someone else.",
+    "Er bestaat al een site :name.": "A site :name already exists."
 }

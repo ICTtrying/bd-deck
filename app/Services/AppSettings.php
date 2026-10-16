@@ -67,6 +67,33 @@ final class AppSettings
         $this->values = null;
     }
 
+    /**
+     * Vaste code per installatie achter elke nieuwe lokale site: WPMU DEV koppelt een adres
+     * als test.ddev.site aan één account wereldwijd, dus algemene namen zijn vaak al bezet.
+     */
+    public function localSiteSuffix(): string
+    {
+        $suffix = $this->get('local_site_suffix');
+
+        if (is_string($suffix) && preg_match('/^[a-z0-9]{4}$/', $suffix)) {
+            return $suffix;
+        }
+
+        $suffix = Str::lower(Str::random(4));
+        Setting::query()->updateOrCreate(['key' => 'local_site_suffix'], ['value' => $suffix]);
+        $this->values = null;
+
+        return $suffix;
+    }
+
+    public function uniqueLocalSiteName(string $name): string
+    {
+        $suffix = '-'.$this->localSiteSuffix();
+        $name = trim($name);
+
+        return Str::endsWith($name, $suffix) ? $name : $name.$suffix;
+    }
+
     public function homeDirectory(): string
     {
         return rtrim((string) (getenv('HOME') ?: ($_SERVER['HOME'] ?? '/root')), '/');

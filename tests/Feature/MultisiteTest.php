@@ -4,6 +4,7 @@ use App\Jobs\RunWpOpenCommand;
 use App\Livewire\Sites\Create;
 use App\Livewire\Sites\Multisite;
 use App\Livewire\Sites\Show;
+use App\Models\Setting;
 use App\Models\Site;
 use App\Models\User;
 use Illuminate\Support\Facades\Process;
@@ -107,6 +108,7 @@ describe('multisite-paneel', function (): void {
         Queue::fake();
         Process::fake();
         $this->actingAs(User::factory()->owner()->create());
+        Setting::query()->create(['key' => 'local_site_suffix', 'value' => 'abcd']);
     });
 
     it('staat alleen bij lokale WordPress-sites', function (): void {
@@ -122,7 +124,7 @@ describe('multisite-paneel', function (): void {
             ->call('createLocal')
             ->assertHasNoErrors();
 
-        Queue::assertPushed(RunWpOpenCommand::class, fn (RunWpOpenCommand $job): bool => $job->run->arguments === ['new', 'proef', '--multisite']);
+        Queue::assertPushed(RunWpOpenCommand::class, fn (RunWpOpenCommand $job): bool => $job->run->arguments === ['new', 'proef-abcd', '--multisite']);
     });
 
     it('zet een site om naar multisite', function (): void {

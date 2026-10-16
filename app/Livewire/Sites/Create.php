@@ -7,6 +7,8 @@ use App\Enums\SiteProvider;
 use App\Livewire\Concerns\FillsConnectionFields;
 use App\Livewire\Concerns\InteractsWithSites;
 use App\Livewire\Forms\SiteForm;
+use App\Models\Site;
+use App\Services\AppSettings;
 use App\Services\WpOpen\CommandRunner;
 use App\Services\WpOpen\PremiumLibrary;
 use App\Services\WpOpen\WpOpenCommand;
@@ -29,9 +31,23 @@ class Create extends Component
 
     protected PremiumLibrary $library;
 
-    public function boot(PremiumLibrary $library): void
+    protected AppSettings $settings;
+
+    public function boot(PremiumLibrary $library, AppSettings $settings): void
     {
         $this->library = $library;
+        $this->settings = $settings;
+    }
+
+    /**
+     * Het adres dat de site echt krijgt, voor het voorbeeld onder het naamveld.
+     */
+    #[Computed]
+    public function localHost(): string
+    {
+        $name = $this->localName !== '' ? $this->localName : 'naam';
+
+        return Str::lower($this->settings->uniqueLocalSiteName($name)).'.ddev.site';
     }
 
     public string $connection = '';
@@ -125,7 +141,7 @@ class Create extends Component
     public function createLocal(CommandRunner $runner): void
     {
         $this->validate([
-            'localName' => ['required', 'string', 'max:60', 'regex:/^[A-Za-z0-9._-]+$/', Rule::unique('sites', 'name')],
+            'localName' => ['required', 'string', 'max:55', 'regex:/^[A-Za-z0-9._-]+$/'],
             'localTitle' => ['nullable', 'string', 'max:120', 'not_regex:/[|\n\r]/'],
             'premium' => ['array'],
             'premium.*' => ['string', Rule::in($this->premiumPackages()->keys())],
@@ -139,6 +155,14 @@ class Create extends Component
             'localTitle' => __('titel'),
         ]);
 
+        $name = $this->settings->uniqueLocalSiteName($this->localName);
+
+        if (Site::query()->where('name', $name)->exists()) {
+            $this->addError('localName', __('Er bestaat al een site :name.', ['name' => $name]));
+
+            return;
+        }
+
         $extraPlugins = $this->extraPluginSlugs();
         $invalid = collect($extraPlugins)->reject(fn (string $slug): bool => (bool) preg_match('/^[a-z0-9-]+$/', $slug));
 
@@ -149,12 +173,12 @@ class Create extends Component
             return;
         }
 
-        $this->attempt(function () use ($runner, $extraPlugins): void {
+        $this->attempt(function () use ($runner, $extraPlugins, $name): void {
             // alles aangevinkt is het standaardgedrag van wpopen; zo pakt hij ook zips mee die net zijn toegevoegd
             $allPremium = array_diff($this->premiumPackages()->keys()->all(), $this->premium) === [];
 
             $run = $this->queueCommand($runner, WpOpenCommand::newSite(
-                name: $this->localName,
+                name: $name,
                 title: $this->localTitle,
                 multisite: $this->localMultisite,
                 premium: $allPremium ? null : array_values($this->premium),

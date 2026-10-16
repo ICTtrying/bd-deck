@@ -2,6 +2,7 @@
 
 use App\Jobs\RunWpOpenCommand;
 use App\Livewire\Sites\Create;
+use App\Models\Setting;
 use App\Models\User;
 use App\Services\AppSettings;
 use Illuminate\Support\Facades\File;
@@ -15,6 +16,7 @@ describe('plugins kiezen', function (): void {
         Queue::fake();
         Process::fake();
         $this->actingAs(User::factory()->owner()->create());
+        Setting::query()->create(['key' => 'local_site_suffix', 'value' => 'abcd']);
 
         $this->originalHome = getenv('HOME');
         $this->home = sys_get_temp_dir().'/bd-deck-packages-'.uniqid();
@@ -46,7 +48,7 @@ describe('plugins kiezen', function (): void {
             ->call('createLocal')
             ->assertHasNoErrors();
 
-        expect(($this->queued)(['new', 'proef']))->toBeTrue();
+        expect(($this->queued)(['new', 'proef-abcd']))->toBeTrue();
     });
 
     it('geeft alleen de gekozen pakketten door', function (): void {
@@ -59,7 +61,7 @@ describe('plugins kiezen', function (): void {
             ->assertHasNoErrors();
 
         expect(($this->queued)([
-            'new', 'proef', '--premium', 'theme:enfold',
+            'new', 'proef-abcd', '--premium', 'theme:enfold',
             '--plugin', 'forminator', '--plugin', 'wordfence', '--plugin', 'redirection',
         ]))->toBeTrue();
     });
@@ -70,7 +72,7 @@ describe('plugins kiezen', function (): void {
             ->set('premium', [])
             ->call('createLocal');
 
-        expect(($this->queued)(['new', 'proef', '--no-premium']))->toBeTrue();
+        expect(($this->queued)(['new', 'proef-abcd', '--no-premium']))->toBeTrue();
     });
 
     it('weigert onbekende of ongeldige pakketten', function (string $property, mixed $value): void {
