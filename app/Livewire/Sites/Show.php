@@ -314,7 +314,7 @@ class Show extends Component
         $run = $this->lastRun;
 
         $deployed = $run?->status === RunStatus::Succeeded
-            && in_array($run->action, [WpOpenAction::Push, WpOpenAction::Upgrade], true)
+            && in_array($run->action, [WpOpenAction::Push, WpOpenAction::Upgrade, WpOpenAction::SafeUpdate], true)
             && $run->finished_at?->gt(now()->subHours(2))
             && $run->backupId() !== null;
 
@@ -329,7 +329,7 @@ class Show extends Component
         return match ($this->activeRun?->action) {
             WpOpenAction::Push => 'push',
             WpOpenAction::PullCode, WpOpenAction::PullDatabase, WpOpenAction::PullUploads, WpOpenAction::Build, WpOpenAction::Rebuild => 'pull',
-            WpOpenAction::Migrate => 'push',
+            WpOpenAction::Migrate, WpOpenAction::SafeUpdate => 'push',
             default => null,
         };
     }

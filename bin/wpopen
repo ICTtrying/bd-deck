@@ -6,6 +6,9 @@
 #   wpopen version                            versie van dit script
 #
 #   wpopen import                             zoekt zelf SSH/SFTP-verbindingen en voegt alle WordPress-sites toe
+#   wpopen export-sites [--notes-from bestand] sitelijst als JSON, zonder persoonlijke paden (om te delen)
+#   wpopen import-sites <bestand> [--only naam]… [--update] [--json]
+#                                             sitelijst van een collega inlezen
 #   wpopen add <naam> ssh -p 65002 u@host     1 site toevoegen (zoekt zelf WordPress of Laravel)
 #   wpopen add sftp://u@host[:poort]          idem, naam uit de host
 #     [--remote pad] [--mode ssh|sftp] [--provider wpmudev|hostinger|other] [--url https://…]
@@ -42,6 +45,8 @@
 #                                             winkel.<naam>.ddev.site → winkel.<live-domein>, alleen via SSH)
 #                                             lokale site in één keer naar een nieuwe (lege) WordPress-installatie
 #   wpopen domain <naam> https://klant.nl      live omzetten naar het definitieve domein (na DNS, alleen SSH)
+#   wpopen golive <naam> [--json] [--mail-to adres] [--fix onderdeel]
+#                                             go-live-checklist: zoekmachines, WP_DEBUG, mail, lokale URL's, www, sitemap
 #
 #   wpopen test <naam> [--json]               verbinding, WP-CLI en HTTP controleren
 #   wpopen updates <naam> [--local] [--json]  beschikbare updates (standaard live; Laravel: Composer en npm)
@@ -50,11 +55,17 @@
 #                                             committen op dev (--major: ook nieuwe hoofdversies, zoals Laravel 12 → 13;
 #                                             --package: alleen dat pakket (herhaalbaar), ook bij een nieuwe hoofdversie;
 #                                             --live: daarna meteen live zetten)
+#   wpopen safe-update <naam> [--only plugin:slug|theme:slug|core]… [--no-live] [--force]
+#                                             updates veilig doorvoeren: live ophalen, lokaal bijwerken, pagina's
+#                                             controleren en daarna live zetten met back-up en driftcontrole
 #   wpopen premium <naam>                     Enfold en WPMU DEV-plugins uit de premium-map in een lokale site zetten
 #   wpopen cache <naam> [--live]              cache legen (lokaal of live)
 #   wpopen login <naam> [--live] [--user u]   eenmalige inloglink voor wp-admin
 #   wpopen wp <naam> [--live] <args…>         WP-CLI lokaal of op live
 #   wpopen ssh <naam>                         SSH- (of SFTP-)sessie naar live
+#   wpopen share <naam> [--minutes n] | --stop | --status [--json]
+#                                             lokale site tijdelijk delen via een openbare link (ddev share)
+#   wpopen mailpit <naam> [--json] [--test]   Mailpit van de lokale site: adres, aantal mails, testmail
 #   wpopen artisan <naam> <args…>             php artisan op live (Laravel-sites)
 #
 #   Algemeen: --yes slaat bevestigingsvragen over (de app vraagt zelf om bevestiging).
@@ -655,6 +666,10 @@ cmd_remove() {
   db_write "$NAME" ""
   ok "$NAME uit de sitelijst gehaald"
 }
+# ───────────── sitelijst delen ─────────────
+cmd_export_sites() { die "Nog niet beschikbaar."; }
+cmd_import_sites() { die "Nog niet beschikbaar."; }
+
 cmd_import() {
   need python3
   echo "→ Zoeken in ~/.ssh/config, FileZilla en VS Code sftp.json…"
@@ -2199,6 +2214,9 @@ cmd_domain() {  # live omzetten naar het definitieve domein, bv. van een tijdeli
   ok "Live gebruikt nu $url (back-up: $(basename "$BK"))"
 }
 
+# ───────────── go-live-checklist ─────────────
+cmd_golive() { die "Nog niet beschikbaar."; }
+
 # ───────────── live zetten ─────────────
 deploy_base() {  # laatst bekende live-staat
   git rev-parse -q --verify refs/tags/deployed 2>/dev/null || git rev-list --max-parents=0 main | tail -1
@@ -2363,6 +2381,9 @@ cmd_live() {
   [ $flush = 1 ] && { flush_live || true; }
   ok "Live! Back-up: $(basename "$BK")  (terugdraaien: wpopen restore $NAME $(basename "$BK") --live-files)"
 }
+
+# ───────────── updates veilig doorvoeren ─────────────
+cmd_safe_update() { die "Nog niet beschikbaar."; }
 
 # ───────────── controles en hulpmiddelen ─────────────
 ms_since() { echo $(( ($(date +%s%N) - $1) / 1000000 )); }
@@ -2767,6 +2788,10 @@ cmd_ssh() {
   exec ssh $OPTS -t "$TARGET" "cd '$ROOT' 2>/dev/null; exec \$SHELL -l"
 }
 
+# ───────────── delen en Mailpit ─────────────
+cmd_share() { die "Nog niet beschikbaar."; }
+cmd_mailpit() { die "Nog niet beschikbaar."; }
+
 # ───────────── start ─────────────
 # algemene vlaggen weghalen; niet bij `wp`, daar horen ze bij WP-CLI zelf
 if [ "${1:-}" != wp ] && [ "${1:-}" != artisan ]; then
@@ -2783,6 +2808,8 @@ case "${1:-}" in
   version|--version) echo "$WPO_VERSION";;
   help|-h|--help) usage;;
   import)   cmd_import;;
+  export-sites) shift; cmd_export_sites "$@";;
+  import-sites) shift; cmd_import_sites "$@";;
   add)      shift; cmd_add "$@";;
   update)   shift; cmd_update "$@";;
   remove)   shift; cmd_remove "$@";;
@@ -2790,6 +2817,7 @@ case "${1:-}" in
   multisite) shift; cmd_multisite "$@";;
   migrate)  shift; cmd_migrate "$@";;
   domain)   shift; cmd_domain "$@";;
+  golive)   shift; cmd_golive "$@";;
   list)     shift; cmd_list "$@";;
   "")       cmd_list;;
   info)     shift; cmd_info "$@";;
@@ -2807,10 +2835,13 @@ case "${1:-}" in
   test)     shift; cmd_test "$@";;
   updates)  shift; cmd_updates "$@";;
   upgrade)  shift; cmd_upgrade "$@";;
+  safe-update) shift; cmd_safe_update "$@";;
   cache)    shift; cmd_cache "$@";;
   login)    shift; cmd_login "$@";;
   wp)       shift; cmd_wp "$@";;
   artisan)  shift; cmd_artisan "$@";;
   ssh)      shift; cmd_ssh "$@";;
+  share)    shift; cmd_share "$@";;
+  mailpit)  shift; cmd_mailpit "$@";;
   *)        cmd_open "$@";;
 esac

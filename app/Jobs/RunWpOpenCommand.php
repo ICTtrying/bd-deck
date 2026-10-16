@@ -141,7 +141,7 @@ class RunWpOpenCommand implements ShouldBeEncrypted, ShouldQueue
                 match ($run->action) {
                     WpOpenAction::Test => $registry->recordHealth($site, (array) WpOpen::decode((string) $run->output)),
                     WpOpenAction::Updates => $this->recordUpdates($run, $site, $registry, $notifier),
-                    WpOpenAction::Upgrade => $registry->forgetUpdates($site),
+                    WpOpenAction::Upgrade, WpOpenAction::SafeUpdate => $registry->forgetUpdates($site),
                     default => null,
                 };
             }, report: false);

@@ -33,6 +33,10 @@ enum WpOpenAction: string
     case Import = 'import';
     case InstallScript = 'install-script';
     case Setup = 'setup';
+    case SafeUpdate = 'safe-update';
+    case GoLive = 'go-live';
+    case Share = 'share';
+    case ImportSites = 'import-sites';
 
     public function label(): string
     {
@@ -66,6 +70,10 @@ enum WpOpenAction: string
             self::Import => __('Sites importeren'),
             self::InstallScript => __('wpopen installeren'),
             self::Setup => __('Systeemcontrole'),
+            self::SafeUpdate => __('Updates veilig doorvoeren'),
+            self::GoLive => __('Go-live-checklist'),
+            self::Share => __('Lokale site delen'),
+            self::ImportSites => __('Sitelijst importeren'),
         };
     }
 
@@ -85,9 +93,12 @@ enum WpOpenAction: string
             self::Backup => 'archive',
             self::Test => 'activity',
             self::Updates, self::Upgrade => 'refresh',
+            self::SafeUpdate => 'shield',
+            self::GoLive => 'flag',
+            self::Share => 'external',
             self::CacheLocal, self::CacheLive => 'zap',
             self::WpCli, self::Artisan => 'terminal',
-            self::AddSite, self::Import, self::NewSite => 'plus',
+            self::AddSite, self::Import, self::NewSite, self::ImportSites => 'plus',
             self::RemoveSite => 'trash',
             self::InstallScript, self::Setup => 'settings',
         };
@@ -98,7 +109,7 @@ enum WpOpenAction: string
      */
     public function locksSite(): bool
     {
-        return ! in_array($this, [self::Test, self::Updates, self::PushPreview, self::CacheLive, self::CacheLocal, self::WpCli, self::Artisan], true);
+        return ! in_array($this, [self::Test, self::Updates, self::PushPreview, self::CacheLive, self::CacheLocal, self::WpCli, self::Artisan, self::GoLive, self::Share], true);
     }
 
     /**
@@ -114,7 +125,7 @@ enum WpOpenAction: string
      */
     public function changesSiteList(): bool
     {
-        return in_array($this, [self::AddSite, self::Import, self::InstallScript, self::NewSite, self::Migrate, self::RemoveSite], true);
+        return in_array($this, [self::AddSite, self::Import, self::InstallScript, self::NewSite, self::Migrate, self::RemoveSite, self::ImportSites], true);
     }
 
     /**
@@ -122,6 +133,6 @@ enum WpOpenAction: string
      */
     public function refreshesSite(): bool
     {
-        return ! in_array($this, [self::Test, self::Updates, self::PushPreview, self::CacheLive, self::CacheLocal, self::Setup], true);
+        return ! in_array($this, [self::Test, self::Updates, self::PushPreview, self::CacheLive, self::CacheLocal, self::Setup, self::GoLive], true);
     }
 }

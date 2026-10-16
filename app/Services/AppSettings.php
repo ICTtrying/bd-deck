@@ -37,6 +37,8 @@ final class AppSettings
             'uptime_interval_minutes' => 5,
             'daily_update_check' => true,
             'new_site_packages' => null,
+            'go_live_mail_to' => '',
+            'offsite_backups' => null,
         ];
     }
 
