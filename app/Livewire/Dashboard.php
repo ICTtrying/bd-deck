@@ -3,6 +3,7 @@
 namespace App\Livewire;
 
 use App\Enums\SiteProvider;
+use App\Enums\UptimeStatus;
 use App\Enums\WpOpenAction;
 use App\Livewire\Concerns\InteractsWithSites;
 use App\Models\CommandRun;
@@ -49,7 +50,7 @@ class Dashboard extends Component
     {
         $this->attempt(fn (): int => $registry->sync());
 
-        unset($this->sites, $this->stats);
+        unset($this->sites, $this->stats, $this->offlineSites);
         $this->dispatch('sites-changed');
     }
 
@@ -62,7 +63,7 @@ class Dashboard extends Component
     #[On('run-started')]
     public function sitesChanged(): void
     {
-        unset($this->sites, $this->stats, $this->pendingSiteChanges);
+        unset($this->sites, $this->stats, $this->pendingSiteChanges, $this->offlineSites);
     }
 
     /**
@@ -78,27 +79,50 @@ class Dashboard extends Component
             ->ordered()
             ->get()
             ->filter(fn (Site $site): bool => match ($this->scope) {
-                'built' => $site->isBuilt(),
                 'pending' => $site->pendingChanges() > 0,
+                'updates' => $site->updatesCount() > 0,
                 default => true,
             })
             ->values();
     }
 
     /**
-     * @return array{total: int, built: int, running: int, pending: int}
+     * @return array{total: int, pending: int, updates: int}
      */
     #[Computed]
     public function stats(): array
     {
-        $all = Site::query()->get(['id', 'snapshot']);
+        $all = Site::query()->get(['id', 'snapshot', 'updates']);
 
         return [
             'total' => $all->count(),
-            'built' => $all->filter->isBuilt()->count(),
-            'running' => $all->filter->isRunning()->count(),
             'pending' => $all->filter(fn (Site $site): bool => $site->pendingChanges() > 0)->count(),
+            'updates' => $all->filter(fn (Site $site): bool => $site->updatesCount() > 0)->count(),
         ];
+    }
+
+    /**
+     * Het aantal verschillende providers; bij één provider is een providerfilter ruis.
+     */
+    #[Computed]
+    public function providerCount(): int
+    {
+        return Site::query()->get(['id', 'snapshot'])->pluck('providerType')->unique()->count();
+    }
+
+    /**
+     * Sites waarvan de uptime-bewaking een storing heeft bevestigd.
+     *
+     * @return Collection<int, Site>
+     */
+    #[Computed]
+    public function offlineSites(): Collection
+    {
+        return Site::query()
+            ->where('uptime_enabled', true)
+            ->where('uptime_status', UptimeStatus::Down->value)
+            ->ordered()
+            ->get(['id', 'name', 'is_favorite', 'uptime_status_since']);
     }
 
     /**

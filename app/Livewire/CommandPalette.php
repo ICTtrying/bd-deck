@@ -6,6 +6,7 @@ use App\Livewire\Concerns\InteractsWithSites;
 use App\Models\Site;
 use App\Services\AppSettings;
 use App\Services\DesktopLauncher;
+use App\Services\SiteLinks;
 use App\Services\WpOpen\WpOpen;
 use Illuminate\View\View;
 use Livewire\Attributes\Computed;
@@ -52,6 +53,7 @@ class CommandPalette extends Component
 
         $pages = [
             ['label' => __('Site toevoegen'), 'icon' => 'plus', 'url' => route('sites.create')],
+            ['label' => __('Uptime & onderhoud'), 'icon' => 'activity', 'url' => route('maintenance.index')],
             ['label' => __('Activiteit'), 'icon' => 'history', 'url' => route('activity.index')],
             ['label' => __('SSH-sleutels'), 'icon' => 'key', 'url' => route('keys.index')],
             ['label' => __('Kluis'), 'icon' => 'shield', 'url' => route('vault.index')],
@@ -67,7 +69,7 @@ class CommandPalette extends Component
         return $items;
     }
 
-    public function choose(int $index, DesktopLauncher $launcher, AppSettings $settings, WpOpen $wpopen): void
+    public function choose(int $index, DesktopLauncher $launcher, AppSettings $settings, WpOpen $wpopen, SiteLinks $links): void
     {
         $item = $this->results[$index] ?? null;
 
@@ -84,7 +86,7 @@ class CommandPalette extends Component
             return;
         }
 
-        $this->launch($item['site'], $item['target'], $launcher, $settings, $wpopen);
+        $this->launch($item['site'], $item['target'], $launcher, $settings, $wpopen, $links);
     }
 
     public function render(): View

@@ -5,10 +5,12 @@ namespace App\Livewire\Concerns;
 use App\Exceptions\DesktopLaunchException;
 use App\Exceptions\VaultLockedException;
 use App\Exceptions\WpOpenException;
+use App\Jobs\OpenLocalSite;
 use App\Models\CommandRun;
 use App\Models\Site;
 use App\Services\AppSettings;
 use App\Services\DesktopLauncher;
+use App\Services\SiteLinks;
 use App\Services\WpOpen\CommandRunner;
 use App\Services\WpOpen\WpOpen;
 use App\Services\WpOpen\WpOpenCommand;
@@ -19,18 +21,22 @@ use InvalidArgumentException;
  */
 trait InteractsWithSites
 {
-    public function launch(int $siteId, string $target, DesktopLauncher $launcher, AppSettings $settings, WpOpen $wpopen): void
+    public function launch(int $siteId, string $target, DesktopLauncher $launcher, AppSettings $settings, WpOpen $wpopen, SiteLinks $links): void
     {
         $site = Site::query()->findOrFail($siteId);
 
-        $this->attempt(function () use ($site, $target, $launcher, $settings, $wpopen): void {
+        $this->attempt(function () use ($site, $target, $launcher, $settings, $wpopen, $links): void {
+            if (in_array($target, ['local-site', 'local-admin'], true)) {
+                $this->requireBuilt($site);
+
+                $site->isRunning() ? $launcher->openUrl($links->local($site, $target)) : $this->openAfterStart($site, $target);
+
+                return;
+            }
+
             match ($target) {
-                'local-site' => $launcher->openUrl($this->requireBuilt($site)->localUrl('/')),
                 'live-site' => $launcher->openUrl($site->liveUrl('/')),
                 // Laravel heeft geen vaste beheerpagina: dan gewoon de site
-                'local-admin' => $launcher->openUrl($site->isLaravel() ? $this->requireBuilt($site)->localUrl('/') : ($settings->autoLoginLocal()
-                    ? $wpopen->loginUrl($this->requireBuilt($site)->name, live: false)
-                    : $site->localUrl('/wp-admin/'))),
                 'live-admin' => $launcher->openUrl($site->isLaravel() ? $site->liveUrl('/') : ($settings->autoLoginLive()
                     ? $wpopen->loginUrl($site->name, live: true, user: $site->live_login_user)
                     : $site->liveUrl('/wp-admin/'))),
@@ -46,6 +52,16 @@ trait InteractsWithSites
                 default => throw new InvalidArgumentException(__('Onbekende actie.')),
             };
         });
+    }
+
+    /**
+     * Starten duurt even; de browser opent daarna vanzelf (zie OpenLocalSite).
+     */
+    private function openAfterStart(Site $site, string $target): void
+    {
+        OpenLocalSite::dispatch($site->id, $target)->onQueue('quick');
+
+        $this->dispatch('toast', title: __('Lokale site wordt gestart…'), message: __(':site opent vanzelf in je browser zodra hij klaar is, meestal na zo\'n 15 seconden.', ['site' => $site->name]), tone: 'info');
     }
 
     public function runQuick(int $siteId, string $action, CommandRunner $runner): void

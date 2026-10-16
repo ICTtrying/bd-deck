@@ -24,6 +24,8 @@ class SiteFactory extends Factory
         return [
             'name' => $name,
             'is_favorite' => false,
+            'uptime_enabled' => true,
+            'uptime_failures' => 0,
             'snapshot' => $this->snapshot($name),
             'synced_at' => now(),
         ];
@@ -74,6 +76,14 @@ class SiteFactory extends Factory
             'remote' => '', 'root' => '.', 'provider' => SiteProvider::Other->value,
             'live_host' => null, 'live_site_url' => null,
         ]);
+    }
+
+    /**
+     * @param  list<array{id: int, url: string}>  $subsites
+     */
+    public function multisite(array $subsites = []): static
+    {
+        return $this->localOnly()->snapshotState(['multisite' => true, 'subsites' => $subsites]);
     }
 
     public function laravel(): static

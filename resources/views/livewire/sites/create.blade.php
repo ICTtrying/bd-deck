@@ -31,6 +31,9 @@
                         <x-input id="local-title" wire:model="localTitle" :placeholder="__('Bijvoorbeeld: Bakkerij De Korenaar')" />
                     </x-field>
                 </div>
+                <div class="mt-4">
+                    <x-toggle wire:model="localMultisite" :label="__('Als multisite')" :description="__('Meerdere sites met elk een eigen adres in één WordPress. Subsites voeg je daarna toe op de sitepagina. Een multisite kan BD Deck niet live zetten.')" />
+                </div>
                 <p class="mt-4 text-[0.8125rem] text-muted">{{ __('Enfold en de WPMU DEV-plugins worden automatisch geïnstalleerd en geactiveerd.') }} <a href="{{ route('settings.index') }}#premium" wire:navigate class="font-medium text-local-ink hover:underline">{{ __('Zips beheren in Instellingen') }}</a></p>
             </x-panel>
             <div class="flex items-center justify-end gap-2">

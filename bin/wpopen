@@ -12,7 +12,11 @@
 #   wpopen update <naam> [--name|--target|--opts|--remote|--mode|--provider|--url|--public waarde]
 #   wpopen remove <naam> [--purge]            uit de lijst halen (--purge: ook lokale site weggooien)
 #   wpopen list [--json] | info <naam> [--json]
-#   wpopen new <naam> [--title "Titel"]        nieuwe lokale WordPress-site, nog zonder live-server
+#   wpopen new <naam> [--title "Titel"] [--multisite]
+#                                             nieuwe lokale WordPress-site, nog zonder live-server
+#   wpopen multisite <naam> [--add adres] [--remove id]
+#                                             lokale site omzetten naar multisite, subsite toevoegen of weghalen
+#                                             (adres: "winkel" → winkel.<naam>.ddev.site, of een eigen domein zoals klant2.test)
 #
 #   wpopen <naam> [--pull] [--dbpull] [--db bestand] [--live] [--no-launch]
 #                                             site lokaal openen (bouwt hem de 1e keer zelf)
@@ -51,7 +55,7 @@
 #
 #   Algemeen: --yes slaat bevestigingsvragen over (de app vraagt zelf om bevestiging).
 set -euo pipefail
-WPO_VERSION="2.8.0"
+WPO_VERSION="2.9.0"
 DB="${WPO_DB:-$HOME/.config/wpsites/sites}"; mkdir -p "$(dirname "$DB")"; touch "$DB"
 BASE="${WP_SITES_DIR:-$HOME/wp-sites}"
 BACKUPS="${WPO_BACKUP_DIR:-$BASE/.wpopen-backups}"
@@ -358,6 +362,8 @@ for line in open(dbf, errors="ignore"):
         "live_url": liveurl or None, "live_host": livehost or None, "live_site_url": ("https://" + livehost) if livehost else None,
         "local_url": "https://%s.ddev.site" % s, "project_dir": proj, "wp_content_dir": wpc,
         "built": os.path.exists(os.path.join(proj, ".wpopen-ready")),
+        "multisite": kind != "laravel" and bool(re.search(r"define\(\s*['\"]MULTISITE['\"]\s*,\s*true", read(os.path.join(proj, "wp-config.php")))),
+        "subsites": [{"id": int(i), "url": u} for i, _, u in (x.partition("|") for x in read(os.path.join(proj, ".wpopen-subsites")).splitlines()) if i.isdigit()],
         "ddev_status": d.get("status") or ("absent" if not os.path.isdir(os.path.join(proj, ".ddev")) else "stopped"),
         "git": None, "backups": 0, "last_backup": None,
     }
@@ -1688,9 +1694,9 @@ cmd_premium() {  # Enfold en WPMU DEV-plugins in een bestaande lokale site zette
   install_premium
 }
 cmd_new() {
-  local name="" TITLE=""
-  while [ $# -gt 0 ]; do case "$1" in --title) TITLE="${2:-}"; shift;; -*) die "Onbekende optie: $1";; *) name="$1";; esac; shift; done
-  [ -n "$name" ] || die "Gebruik: wpopen new <naam> [--title \"Titel\"]"
+  local name="" TITLE="" multisite=0
+  while [ $# -gt 0 ]; do case "$1" in --title) TITLE="${2:-}"; shift;; --multisite) multisite=1;; -*) die "Onbekende optie: $1";; *) name="$1";; esac; shift; done
+  [ -n "$name" ] || die "Gebruik: wpopen new <naam> [--title \"Titel\"] [--multisite]"
   [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || die "Naam mag alleen letters, cijfers, punt, - en _ bevatten."
   valid_field "$TITLE"
   db_has "$name" && die "Er bestaat al een site '$name'."
@@ -1700,6 +1706,7 @@ cmd_new() {
   get "$name"
   bootstrap_local
   ensure_dev
+  [ $multisite = 0 ] || cmd_multisite "$name"
   ok "Lokale site $NAME klaar — login: dev / dev. Live zetten: wpopen migrate $NAME user@host --url https://…"
 }
 
@@ -1837,6 +1844,7 @@ cmd_migrate() {
   [ $# -ge 2 ] || die "Gebruik: wpopen migrate <naam> [ssh-opties] user@host --url https://… [--remote pad] [--mode ssh|sftp] [--provider p] [--keep-old] [--no-uploads]"
   need git rsync
   get "$1"; need_wordpress; shift
+  is_multisite && die "$NAME is een multisite; die kan BD Deck niet live zetten of verhuizen."
   local remote="" mode="" prov="" url="" keep=0 uploads=1 rest=() ntarget="" nopts="" nhost probe
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -1950,6 +1958,92 @@ mirror -R --no-perms --parallel=4 $MIGRATE_LFTP_EXC '$LWPC' '$REMOTE'" >/dev/nul
   flush_live || true
   ok "Verhuisd! $NAME staat op $url  (back-up van de nieuwe server vooraf: $(basename "$BK"))"
   note "Verandert het domein nog (DNS omzetten)? Daarna: wpopen domain $NAME https://jouwdomein.nl"
+}
+
+# ───────────── multisite (alleen lokale sites) ─────────────
+# Een multisite live zetten of ophalen kan wpopen niet, dus alleen bij sites zonder live-server.
+is_multisite() { grep -qE "define\(\s*['\"]MULTISITE['\"]\s*,\s*true" "$PROJ/wp-config.php" 2>/dev/null; }
+valid_host() { [[ "$1" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$ ]]; }
+# subsites als "id|adres" voor de app; elk adres moet ook als hostnaam in DDEV, anders komt de router er niet bij
+sync_subsites() {
+  local hosts=() id url h f="$PROJ/.ddev/config.wpopen-multisite.yaml" tmp
+  # domein in plaats van url: die laatste loopt via de home-optie en kan dus afwijken
+  { ddev wp site list --fields=blog_id,domain --format=csv --skip-plugins --skip-themes 2>/dev/null || true; } \
+    | tr -d '\r' | awk -F, 'NR > 1 && $1 != 1 && $1 ~ /^[0-9]+$/ {print $1 "|https://" $2}' > "$PROJ/.wpopen-subsites"
+  while IFS='|' read -r id url; do
+    h="${url#*//}"; valid_host "$h" && hosts+=("$h")
+  done < "$PROJ/.wpopen-subsites"
+  tmp=$(mktemp)
+  if [ ${#hosts[@]} -gt 0 ]; then
+    { echo "# wpopen: adressen van de subsites, wordt bij elke wijziging opnieuw geschreven"; echo "additional_fqdns:"; printf '  - %s\n' "${hosts[@]}"; } > "$tmp"
+    for h in "${hosts[@]}"; do ensure_hostname "$h"; done
+  fi
+  if [ ! -s "$tmp" ]; then rm -f "$tmp"; [ -f "$f" ] && { rm -f "$f"; RESTART=1; }; return 0; fi
+  if cmp -s "$tmp" "$f" 2>/dev/null; then rm -f "$tmp"; else mkdir -p "$PROJ/.ddev"; mv "$tmp" "$f"; RESTART=1; fi
+}
+# wp-config-ddev.php zet WP_HOME vast op de hoofdsite, waardoor elke subsite daarheen wijst; met eigen
+# databasegegevens laadt ddev dat bestand niet meer. Zonder cookiedomein werkt inloggen ook op een eigen domein.
+ms_config() {
+  local f="$PROJ/wp-config.php" lines
+  # anders mag ddev het bestand overschrijven, en dan is de multisite weg
+  sed -i 's/#ddev-generated:/wpopen: niet meer door ddev beheerd (multisite) —/' "$f"
+  grep -q 'wpopen-multisite' "$f" && return 0
+  lines=$(cat <<'PHP'
+/* wpopen-multisite */
+defined( 'DB_NAME' ) || define( 'DB_NAME', 'db' );
+defined( 'DB_USER' ) || define( 'DB_USER', 'db' );
+defined( 'DB_PASSWORD' ) || define( 'DB_PASSWORD', 'db' );
+defined( 'DB_HOST' ) || define( 'DB_HOST', 'db' );
+if ( empty( $table_prefix ) ) { $table_prefix = 'wp_'; }
+defined( 'COOKIE_DOMAIN' ) || define( 'COOKIE_DOMAIN', false );
+PHP
+)
+  # vlak voor "stop editing": daar staan de databasegegevens van een eigen wp-config al boven
+  LINES="$lines" awk '!done && /That.s all, stop editing/ { print ENVIRON["LINES"]; print ""; done = 1 } { print }' "$f" > "$f.wpo" && mv "$f.wpo" "$f"
+  grep -q 'wpopen-multisite' "$f" || die "Kon wp-config.php niet aanpassen voor multisite."
+}
+cmd_multisite() {
+  local name="" add="" remove="" host id
+  while [ $# -gt 0 ]; do case "$1" in --add) add="${2:-}"; shift;; --remove) remove="${2:-}"; shift;; -*) die "Onbekende optie: $1";; *) name="$1";; esac; shift; done
+  [ -n "$name" ] || die "Gebruik: wpopen multisite <naam> [--add adres] [--remove id]"
+  need ddev; get "$name"; need_wordpress
+  is_local || die "Multisite kan alleen bij lokale sites zonder live-server: live zetten of ophalen zou de live site breken."
+  built; cd "$PROJ"; RESTART=0
+  ddev_up >/dev/null
+  if ! is_multisite; then
+    [ -z "$add$remove" ] || die "$NAME is nog geen multisite. Zet hem eerst om: wpopen multisite $NAME"
+    step "$NAME omzetten naar multisite…"
+    ddev wp core multisite-convert --subdomains --skip-plugins --skip-themes >/dev/null
+    is_multisite || die "Omzetten mislukt: wp-config.php heeft geen MULTISITE-regel gekregen."
+    ms_config
+    sync_subsites
+    ok "$NAME is nu een multisite. Netwerkbeheer: $LOCALURL/wp-admin/network/"
+    return
+  fi
+  if [ -n "$add" ]; then
+    host=$(printf '%s' "$add" | tr 'A-Z' 'a-z'); host="${host#*//}"; host="${host%%/*}"
+    [[ "$host" == *.* ]] || host="$host.$SLUG.ddev.site"
+    valid_host "$host" || die "Ongeldig adres: $add. Gebruik bijvoorbeeld 'winkel' of 'klant2.test'."
+    [ "$host" != "$SLUG.ddev.site" ] || die "Dat is het adres van de hoofdsite."
+    step "Subsite $host toevoegen…"
+    # $host is hierboven gecontroleerd, dus veilig in de PHP-code; bij een subdomein-install zet WordPress zelf http neer
+    id=$(ddev wp eval "\$u = get_user_by('login', get_super_admins()[0] ?? 'dev'); \$id = wpmu_create_blog('$host', '/', '$host', \$u ? \$u->ID : 1);
+      if (is_wp_error(\$id)) { echo 'fout: ' . \$id->get_error_message(); return; }
+      switch_to_blog(\$id); update_option('home', 'https://$host'); update_option('siteurl', 'https://$host'); restore_current_blog(); echo \$id;" \
+      --skip-plugins --skip-themes 2>&1 | tr -d '\r' | tail -1 || true)
+    [[ "$id" =~ ^[0-9]+$ ]] || die "Subsite maken mislukt${id:+: ${id#fout: }}"
+    ok "Subsite $id staat op https://$host"
+  fi
+  if [ -n "$remove" ]; then
+    [[ "$remove" =~ ^[0-9]+$ ]] && [ "$remove" != 1 ] || die "Ongeldige subsite: $remove (de hoofdsite kan niet weg)."
+    step "Subsite $remove verwijderen…"
+    ddev wp site delete "$remove" --yes --skip-plugins --skip-themes >/dev/null
+    ok "Subsite $remove verwijderd"
+  fi
+  sync_subsites
+  if [ $RESTART = 1 ]; then step "DDEV herstarten voor de nieuwe adressen…"; ddev_restart >/dev/null; fi
+  [ -n "$add$remove" ] || note "$NAME is al een multisite."
+  return 0
 }
 
 cmd_domain() {  # live omzetten naar het definitieve domein, bv. van een tijdelijk adres na het verhuizen
@@ -2567,6 +2661,7 @@ case "${1:-}" in
   update)   shift; cmd_update "$@";;
   remove)   shift; cmd_remove "$@";;
   new)      shift; cmd_new "$@";;
+  multisite) shift; cmd_multisite "$@";;
   migrate)  shift; cmd_migrate "$@";;
   domain)   shift; cmd_domain "$@";;
   list)     shift; cmd_list "$@";;

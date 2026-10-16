@@ -2,7 +2,13 @@
     /** @var \App\Models\Site $site */
     $active = $this->activeRun;
     $git = $site->data('git');
-    $tabs = ['overzicht' => __('Overzicht'), 'back-ups' => __('Back-ups'), 'wp-cli' => $site->isLaravel() ? 'Artisan' : __('WP-CLI'), 'logboek' => __('Logboek')];
+    $tabs = [
+        'overzicht' => __('Overzicht'),
+        ...($site->hasLiveUrl() ? ['uptime' => __('Uptime')] : []),
+        'back-ups' => __('Back-ups'),
+        'wp-cli' => $site->isLaravel() ? 'Artisan' : __('WP-CLI'),
+        'logboek' => __('Logboek'),
+    ];
 @endphp
 
 <div class="grid gap-6" @if ($active) wire:poll.1500ms="poll" @endif>
@@ -27,23 +33,40 @@
                     <x-badge>{{ $site->mode->label() }}</x-badge>
                     <span class="font-mono text-xs">{{ $site->data('target') }}</span>
                 @endif
+                @if ($site->isMonitored() && $site->uptime === \App\Enums\UptimeStatus::Up)
+                    <button type="button" wire:click="$set('tab', 'uptime')" title="{{ __('Uptime bekijken') }}"><x-badge :tone="$site->uptime->tone()" dot>{{ $site->uptime->label() }}</x-badge></button>
+                @endif
             </div>
         </div>
         <div class="flex flex-wrap items-center gap-2">
             @if ($site->isLocalOnly())
                 <x-button variant="live" icon="rocket" :href="route('sites.migrate', $site)" wire:navigate>{{ __('Live zetten') }}</x-button>
-            @else
-                @if ($site->providerType->dashboardUrl())
-                    <x-button icon="external" wire:click="launch({{ $site->id }}, 'hosting')">{{ $site->providerType->label() }}</x-button>
-                @endif
-                @unless ($site->isLaravel())
-                    <x-button icon="rocket" :href="route('sites.migrate', $site)" wire:navigate>{{ __('Verhuizen') }}</x-button>
-                @endunless
-                <x-button icon="pencil" :href="route('sites.edit', $site)" wire:navigate>{{ __('Gegevens') }}</x-button>
             @endif
-            <x-button size="icon" variant="danger-ghost" icon="trash" x-on:click="$dispatch('confirm-delete-site', { siteId: {{ $site->id }} })" :title="__('Verwijderen')" />
+            <x-dropdown width="w-64" class="inline-flex h-9 items-center gap-2 rounded-lg border border-line bg-surface px-3.5 text-sm font-medium transition-colors hover:border-line-strong hover:bg-raised">
+                <x-slot:trigger><x-icon name="more" />{{ __('Meer') }}</x-slot:trigger>
+                @unless ($site->isLocalOnly())
+                    @if ($site->providerType->dashboardUrl())
+                        <x-menu-item icon="external" wire:click="launch({{ $site->id }}, 'hosting')">{{ __(':provider openen', ['provider' => $site->providerType->label()]) }}</x-menu-item>
+                    @endif
+                    <x-menu-item icon="pencil" :href="route('sites.edit', $site)" wire:navigate :description="__('Server, gebruiker en inloggegevens aanpassen.')">{{ __('Gegevens bewerken') }}</x-menu-item>
+                    @unless ($site->isLaravel())
+                        <x-menu-item icon="rocket" :href="route('sites.migrate', $site)" wire:navigate :description="__('Naar een nieuwe WordPress-installatie.')">{{ __('Verhuizen naar nieuwe server') }}</x-menu-item>
+                    @endunless
+                    <div class="my-1 h-px bg-line"></div>
+                @endunless
+                <x-menu-item icon="trash" :danger="true" x-on:click="$dispatch('confirm-delete-site', { siteId: {{ $site->id }} })">{{ __('Site verwijderen') }}</x-menu-item>
+            </x-dropdown>
         </div>
     </header>
+
+    @if ($site->isOffline())
+        <div class="flex flex-wrap items-center gap-3 rounded-xl border border-danger/30 bg-danger-soft px-4 py-3" role="alert">
+            <x-icon name="alert" class="text-danger" />
+            <p class="min-w-0 flex-1 text-sm"><span class="font-medium text-danger">{{ __(':site is offline', ['site' => $site->name]) }}</span> <span class="text-muted">{{ $site->uptime_status_since?->diffForHumans() ? __('sinds :time', ['time' => $site->uptime_status_since->diffForHumans()]) : '' }}</span></p>
+            <x-button size="sm" wire:click="$set('tab', 'uptime')">{{ __('Uptime bekijken') }}</x-button>
+            <x-button size="sm" icon="globe" wire:click="launch({{ $site->id }}, 'live-site')">{{ __('Website proberen') }}</x-button>
+        </div>
+    @endif
 
     {{-- de brug: lokaal links, live rechts, sync in het midden --}}
     <x-site-bridge :site="$site" size="lg" :flow="$this->flow()">
@@ -63,7 +86,9 @@
 
         <x-slot:actions>
             @if ($site->isLocalOnly())
-                <x-button size="sm" variant="live" icon="rocket" :href="route('sites.migrate', $site)" wire:navigate :disabled="(bool) $active">{{ __('Live zetten') }}</x-button>
+                @unless ($site->isMultisite())
+                    <x-button size="sm" variant="live" icon="rocket" :href="route('sites.migrate', $site)" wire:navigate :disabled="(bool) $active">{{ __('Live zetten') }}</x-button>
+                @endunless
             @elseif ($site->isBuilt())
                 <div x-data="{ open: false }" class="relative">
                     <x-button size="sm" icon="arrow-left" x-on:click="open = ! open" :disabled="(bool) $active">{{ __('Ophalen') }}</x-button>
@@ -122,105 +147,38 @@
                 '-mb-px border-b-2 px-3 pb-2.5 text-sm transition-colors',
                 'border-local font-medium text-ink' => $tab === $key,
                 'border-transparent text-muted hover:text-ink' => $tab !== $key,
-            ]) aria-current="{{ $tab === $key ? 'page' : 'false' }}">{{ $label }}</button>
+            ]) aria-current="{{ $tab === $key ? 'page' : 'false' }}">{{ $label }}@if ($key === 'uptime' && $site->isOffline())<span class="ml-1.5 inline-block size-1.5 animate-pulse rounded-full bg-danger align-middle"></span>@endif</button>
         @endforeach
     </nav>
 
     @if ($tab === 'overzicht')
         <div class="grid gap-5 lg:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)]">
             <div class="grid content-start gap-5">
-                <x-panel :title="__('Versiebeheer')" :description="$site->isLaravel() ? __('main is de laatst bekende live-staat, dev is jouw werk. Het hele project wordt bijgehouden, zonder vendor, node_modules, .env en storage.') : __('main is de laatst bekende live-staat, dev is jouw werk.')">
-                    @if ($git)
-                        <dl class="grid grid-cols-[auto_1fr] gap-x-6 gap-y-2.5 text-sm">
-                            <dt class="text-muted">{{ __('Branch') }}</dt>
-                            <dd class="flex items-center gap-1.5 font-mono text-[0.8125rem]"><x-icon name="git-branch" :size="14" class="text-faint" />{{ $git['branch'] ?: '–' }}</dd>
-                            <dt class="text-muted">{{ __('Klaar voor live') }}</dt>
-                            <dd>
-                                @if (($git['pending_files'] ?? 0) + ($git['dirty'] ?? 0) === 0)
-                                    {{ __('Niets, lokaal is gelijk aan live') }}
-                                @else
-                                    {{ trans_choice(':count gecommit bestand|:count gecommitte bestanden', $git['pending_files'] ?? 0) }}@if ($git['dirty'] ?? 0), <span class="text-warning">{{ trans_choice(':count nog niet gecommit|:count nog niet gecommit', $git['dirty']) }}</span>@endif
-                                @endif
-                            </dd>
-                            <dt class="text-muted">{{ __('Laatste commit') }}</dt>
-                            <dd class="min-w-0">
-                                @if ($git['last_commit'] ?? null)
-                                    <span class="truncate">{{ $git['last_commit']['subject'] }}</span>
-                                    <span class="text-faint"> {{ \Illuminate\Support\Carbon::parse($git['last_commit']['date'])->diffForHumans() }}</span>
-                                @else – @endif
-                            </dd>
-                            <dt class="text-muted">{{ __('Laatst live gezet') }}</dt>
-                            <dd>{{ ($git['last_deploy'] ?? null) ? \Illuminate\Support\Carbon::parse($git['last_deploy'])->diffForHumans() : __('Nog niet via BD Deck') }}</dd>
-                            <dt class="text-muted">{{ __('GitHub') }}</dt>
-                            <dd class="truncate font-mono text-[0.8125rem]">{{ $git['remote'] ?? __('Geen remote') }}</dd>
-                        </dl>
-                    @else
-                        <p class="text-muted">{{ $site->isLaravel() ? __('Bouw de site lokaal om versiebeheer te starten. BD Deck houdt dan het project bij in git.') : __('Bouw de site lokaal om versiebeheer te starten. BD Deck houdt dan je eigen thema en plugins bij in git.') }}</p>
-                    @endif
-                </x-panel>
-
-                <x-panel :title="__('Herstellen')" :description="__('Als er lokaal iets mis is gegaan. Deze acties raken live niet.')" :padding="false">
-                    <ul class="divide-y divide-line">
-                        @php
-                            $repairs = collect([
-                                ['action' => 'fix-plugins', 'icon' => 'wrench', 'label' => __('Site repareren'), 'text' => $site->isLaravel() ? __('.env, mappen, Composer-pakketten, storage-link en caches rechtzetten.') : __('Prefix, URL\'s, uploads en kapotte plugins rechtzetten.'), 'live' => false],
-                                ['action' => 'pull-database', 'icon' => 'database', 'label' => __('Database opnieuw ophalen'), 'text' => __('Verse database van live, lokaal eerst bewaard.'), 'live' => true],
-                                ['action' => 'reset', 'icon' => 'rotate-ccw', 'label' => __('Terugzetten naar main'), 'text' => __('Weg met lokale experimenten; werk blijft in een backup-branch.'), 'live' => false],
-                                ['action' => 'rebuild', 'icon' => 'hammer', 'label' => __('Opnieuw migreren'), 'text' => __('Alles lokaal opnieuw opbouwen vanaf live.'), 'live' => true],
-                            ])->reject(fn (array $repair): bool => $repair['live'] && $site->isLocalOnly());
-                        @endphp
-                        @foreach ($repairs as $repair)
-                            <li class="flex items-center gap-3 px-5 py-3">
-                                <x-icon :name="$repair['icon']" class="text-faint" />
-                                <div class="min-w-0 flex-1">
-                                    <p class="text-sm font-medium">{{ $repair['label'] }}</p>
-                                    <p class="text-[0.8125rem] text-muted">{{ $repair['text'] }}</p>
+                @if ($site->hasLiveUrl())
+                    <x-panel :title="__('Uptime')">
+                        <x-slot:actions>
+                            <x-button size="sm" variant="ghost" iconRight="chevron-right" wire:click="$set('tab', 'uptime')">{{ __('Details') }}</x-button>
+                        </x-slot:actions>
+                        @if (! $site->uptime_enabled)
+                            <p class="text-muted">{{ __('Bewaking staat uit voor deze site.') }}</p>
+                        @elseif ($this->recentChecks->isEmpty())
+                            <p class="text-muted">{{ __('Nog geen metingen. De eerste volgt binnen een minuut.') }}</p>
+                        @else
+                            <div class="grid gap-3">
+                                <div class="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+                                    <x-badge :tone="$site->uptime->tone()" dot>{{ $site->uptime->label() }}</x-badge>
+                                    @if ($site->uptime_status_since)
+                                        <span class="text-[0.8125rem] text-muted">{{ __('sinds :time', ['time' => $site->uptime_status_since->diffForHumans()]) }}</span>
+                                    @endif
+                                    @if (($uptime30 = $site->uptimePercentageSince(30)) !== null)
+                                        <span class="ml-auto text-[0.8125rem] text-muted"><span class="font-semibold tabular-nums text-ink">{{ \Illuminate\Support\Number::format($uptime30, maxPrecision: 2) }}%</span> {{ __('afgelopen 30 dagen') }}</span>
+                                    @endif
                                 </div>
-                                <x-button size="sm" wire:click="confirm('{{ $repair['action'] }}')" :disabled="(bool) $active || (! $site->isBuilt() && $repair['action'] !== 'rebuild')">{{ __('Uitvoeren') }}</x-button>
-                            </li>
-                        @endforeach
-                        @if ($site->isBuilt())
-                            <li class="flex items-center gap-3 px-5 py-3">
-                                <x-icon :name="$site->isRunning() ? 'square' : 'play'" class="text-faint" />
-                                <div class="min-w-0 flex-1">
-                                    <p class="text-sm font-medium">{{ $site->isRunning() ? __('Lokale site stoppen') : __('Lokale site starten') }}</p>
-                                    <p class="text-[0.8125rem] text-muted">{{ __('DDEV-containers van deze site.') }}</p>
-                                </div>
-                                <x-button size="sm" wire:click="run('{{ $site->isRunning() ? 'stop' : 'start' }}')" :disabled="(bool) $active">{{ $site->isRunning() ? __('Stoppen') : __('Starten') }}</x-button>
-                            </li>
+                                <x-uptime-bar :checks="$this->recentChecks" height="h-6" />
+                            </div>
                         @endif
-                    </ul>
-                </x-panel>
-            </div>
-
-            <div class="grid content-start gap-5">
-                <x-panel :title="__('Verbinding')" :description="$site->health_checked_at ? __('Getest :time', ['time' => $site->health_checked_at->diffForHumans()]) : __('Nog niet getest')">
-                    <x-slot:actions>
-                        <x-button size="sm" icon="activity" wire:click="run('test')">{{ __('Testen') }}</x-button>
-                    </x-slot:actions>
-                    @if ($site->health)
-                        <ul class="grid gap-2.5">
-                            @foreach ($site->health as $check)
-                                <li class="flex items-start gap-2.5">
-                                    <span @class([
-                                        'mt-1 grid size-4 shrink-0 place-items-center rounded-full',
-                                        'bg-success-soft text-success' => $check['status'] === 'ok',
-                                        'bg-danger-soft text-danger' => $check['status'] === 'fail',
-                                        'bg-raised text-faint' => $check['status'] === 'skip',
-                                    ])>
-                                        <x-icon :name="match ($check['status']) { 'ok' => 'check', 'fail' => 'x', default => 'more' }" :size="10" />
-                                    </span>
-                                    <span class="grid leading-snug">
-                                        <span class="text-sm font-medium">{{ $check['label'] }}</span>
-                                        <span class="text-[0.8125rem] text-muted">{{ $check['detail'] }}</span>
-                                    </span>
-                                </li>
-                            @endforeach
-                        </ul>
-                    @else
-                        <p class="text-muted">{{ $site->isLaravel() ? __('Controleert of SSH/SFTP werkt, Laravel op de server draait en de site online is.') : __('Controleert of SSH/SFTP werkt, WP-CLI op de server draait en de site online is.') }}</p>
-                    @endif
-                </x-panel>
+                    </x-panel>
+                @endif
 
                 @if ($site->isLaravel())
                 <x-panel :title="__('Pakketten')" :description="$site->updates_checked_at ? __('Gecontroleerd :time', ['time' => $site->updates_checked_at->diffForHumans()]) : __('Composer en npm, lokaal gecontroleerd')">
@@ -289,20 +247,132 @@
                 </x-panel>
                 @endif
 
-                <x-panel :title="__('Cache')">
-                    <div class="flex flex-wrap gap-2">
-                        <x-button size="sm" icon="zap" wire:click="run('cache-local')" :disabled="! $site->isBuilt()">{{ __('Lokaal legen') }}</x-button>
-                        @unless ($site->isLocalOnly())
-                            <x-button size="sm" icon="zap" wire:click="confirm('cache-live')">{{ __('Live legen') }}</x-button>
-                        @endunless
-                    </div>
+                <x-panel :title="__('Versiebeheer')" :description="$site->isLaravel() ? __('main is de laatst bekende live-staat, dev is jouw werk. Het hele project wordt bijgehouden, zonder vendor, node_modules, .env en storage.') : __('main is de laatst bekende live-staat, dev is jouw werk.')">
+                    @if ($git)
+                        <dl class="grid grid-cols-[auto_1fr] gap-x-6 gap-y-2.5 text-sm">
+                            <dt class="text-muted">{{ __('Branch') }}</dt>
+                            <dd class="flex items-center gap-1.5 font-mono text-[0.8125rem]"><x-icon name="git-branch" :size="14" class="text-faint" />{{ $git['branch'] ?: '–' }}</dd>
+                            <dt class="text-muted">{{ __('Klaar voor live') }}</dt>
+                            <dd>
+                                @if (($git['pending_files'] ?? 0) + ($git['dirty'] ?? 0) === 0)
+                                    {{ __('Niets, lokaal is gelijk aan live') }}
+                                @else
+                                    {{ trans_choice(':count gecommit bestand|:count gecommitte bestanden', $git['pending_files'] ?? 0) }}@if ($git['dirty'] ?? 0), <span class="text-warning">{{ trans_choice(':count nog niet gecommit|:count nog niet gecommit', $git['dirty']) }}</span>@endif
+                                @endif
+                            </dd>
+                            <dt class="text-muted">{{ __('Laatste commit') }}</dt>
+                            <dd class="min-w-0">
+                                @if ($git['last_commit'] ?? null)
+                                    <span class="truncate">{{ $git['last_commit']['subject'] }}</span>
+                                    <span class="text-faint"> {{ \Illuminate\Support\Carbon::parse($git['last_commit']['date'])->diffForHumans() }}</span>
+                                @else – @endif
+                            </dd>
+                            <dt class="text-muted">{{ __('Laatst live gezet') }}</dt>
+                            <dd>{{ ($git['last_deploy'] ?? null) ? \Illuminate\Support\Carbon::parse($git['last_deploy'])->diffForHumans() : __('Nog niet via BD Deck') }}</dd>
+                            <dt class="text-muted">{{ __('GitHub') }}</dt>
+                            <dd class="truncate font-mono text-[0.8125rem]">{{ $git['remote'] ?? __('Geen remote') }}</dd>
+                        </dl>
+                    @else
+                        <p class="text-muted">{{ $site->isLaravel() ? __('Bouw de site lokaal om versiebeheer te starten. BD Deck houdt dan het project bij in git.') : __('Bouw de site lokaal om versiebeheer te starten. BD Deck houdt dan je eigen thema en plugins bij in git.') }}</p>
+                    @endif
                 </x-panel>
+            </div>
+
+            <div class="grid content-start gap-5">
+                @if ($site->supportsMultisite())
+                    <livewire:sites.multisite :site="$site" :key="'multisite-'.$site->id" />
+                @endif
 
                 <x-panel :title="__('Notities')">
                     <x-textarea wire:model.blur="notes" wire:change="saveNotes" rows="4" :placeholder="__('Bijvoorbeeld: klant wil geen automatische plugin-updates.')" />
                 </x-panel>
+
+                <x-panel :title="__('Verbinding')" :description="$site->health_checked_at ? __('Getest :time', ['time' => $site->health_checked_at->diffForHumans()]) : __('Nog niet getest')">
+                    <x-slot:actions>
+                        <x-button size="sm" icon="activity" wire:click="run('test')">{{ __('Testen') }}</x-button>
+                    </x-slot:actions>
+                    @if ($site->health)
+                        <ul class="grid gap-2.5">
+                            @foreach ($site->health as $check)
+                                <li class="flex items-start gap-2.5">
+                                    <span @class([
+                                        'mt-1 grid size-4 shrink-0 place-items-center rounded-full',
+                                        'bg-success-soft text-success' => $check['status'] === 'ok',
+                                        'bg-danger-soft text-danger' => $check['status'] === 'fail',
+                                        'bg-raised text-faint' => $check['status'] === 'skip',
+                                    ])>
+                                        <x-icon :name="match ($check['status']) { 'ok' => 'check', 'fail' => 'x', default => 'more' }" :size="10" />
+                                    </span>
+                                    <span class="grid leading-snug">
+                                        <span class="text-sm font-medium">{{ $check['label'] }}</span>
+                                        <span class="text-[0.8125rem] text-muted">{{ $check['detail'] }}</span>
+                                    </span>
+                                </li>
+                            @endforeach
+                        </ul>
+                    @else
+                        <p class="text-muted">{{ $site->isLaravel() ? __('Controleert of SSH/SFTP werkt, Laravel op de server draait en de site online is.') : __('Controleert of SSH/SFTP werkt, WP-CLI op de server draait en de site online is.') }}</p>
+                    @endif
+                </x-panel>
+
+                <section x-data="{ open: false }" class="rounded-xl border border-line bg-surface">
+                    <button type="button" x-on:click="open = ! open" x-bind:aria-expanded="open" class="flex w-full items-center justify-between gap-3 px-5 py-3.5 text-left">
+                        <span class="grid gap-0.5">
+                            <span class="text-[0.9375rem] font-semibold">{{ __('Problemen oplossen') }}</span>
+                            <span class="text-[0.8125rem] text-muted">{{ __('Cache legen, repareren, terugzetten. Raakt live niet.') }}</span>
+                        </span>
+                        <x-icon name="chevron-down" class="shrink-0 text-faint transition-transform" x-bind:class="open && 'rotate-180'" />
+                    </button>
+                    <div x-show="open" x-cloak>
+<ul class="divide-y divide-line border-t border-line">
+                            <li class="flex items-center gap-3 px-5 py-3">
+                                <x-icon name="zap" class="text-faint" />
+                                <div class="min-w-0 flex-1">
+                                    <p class="text-sm font-medium">{{ __('Cache legen') }}</p>
+                                    <p class="text-[0.8125rem] text-muted">{{ __('Object- en paginacache. Bezoekers merken even een tragere eerste pagina.') }}</p>
+                                </div>
+                                <div class="flex gap-2">
+                                    <x-button size="sm" wire:click="run('cache-local')" :disabled="! $site->isBuilt()">{{ __('Lokaal') }}</x-button>
+                                    @unless ($site->isLocalOnly())
+                                        <x-button size="sm" wire:click="confirm('cache-live')">{{ __('Live') }}</x-button>
+                                    @endunless
+                                </div>
+                            </li>
+                        @php
+                            $repairs = collect([
+                                ['action' => 'fix-plugins', 'icon' => 'wrench', 'label' => __('Site repareren'), 'text' => $site->isLaravel() ? __('.env, mappen, Composer-pakketten, storage-link en caches rechtzetten.') : __('Prefix, URL\'s, uploads en kapotte plugins rechtzetten.'), 'live' => false],
+                                ['action' => 'pull-database', 'icon' => 'database', 'label' => __('Database opnieuw ophalen'), 'text' => __('Verse database van live, lokaal eerst bewaard.'), 'live' => true],
+                                ['action' => 'reset', 'icon' => 'rotate-ccw', 'label' => __('Terugzetten naar main'), 'text' => __('Weg met lokale experimenten; werk blijft in een backup-branch.'), 'live' => false],
+                                ['action' => 'rebuild', 'icon' => 'hammer', 'label' => __('Opnieuw migreren'), 'text' => __('Alles lokaal opnieuw opbouwen vanaf live.'), 'live' => true],
+                            ])->reject(fn (array $repair): bool => $repair['live'] && $site->isLocalOnly());
+                        @endphp
+                        @foreach ($repairs as $repair)
+                            <li class="flex items-center gap-3 px-5 py-3">
+                                <x-icon :name="$repair['icon']" class="text-faint" />
+                                <div class="min-w-0 flex-1">
+                                    <p class="text-sm font-medium">{{ $repair['label'] }}</p>
+                                    <p class="text-[0.8125rem] text-muted">{{ $repair['text'] }}</p>
+                                </div>
+                                <x-button size="sm" wire:click="confirm('{{ $repair['action'] }}')" :disabled="(bool) $active || (! $site->isBuilt() && $repair['action'] !== 'rebuild')">{{ __('Uitvoeren') }}</x-button>
+                            </li>
+                        @endforeach
+                        @if ($site->isBuilt())
+                            <li class="flex items-center gap-3 px-5 py-3">
+                                <x-icon :name="$site->isRunning() ? 'square' : 'play'" class="text-faint" />
+                                <div class="min-w-0 flex-1">
+                                    <p class="text-sm font-medium">{{ $site->isRunning() ? __('Lokale site stoppen') : __('Lokale site starten') }}</p>
+                                    <p class="text-[0.8125rem] text-muted">{{ __('DDEV-containers van deze site.') }}</p>
+                                </div>
+                                <x-button size="sm" wire:click="run('{{ $site->isRunning() ? 'stop' : 'start' }}')" :disabled="(bool) $active">{{ $site->isRunning() ? __('Stoppen') : __('Starten') }}</x-button>
+                            </li>
+                        @endif
+                    </ul>
+                    </div>
+                </section>
             </div>
         </div>
+    @elseif ($tab === 'uptime' && $site->hasLiveUrl())
+        <livewire:sites.uptime :site="$site" :key="'uptime-'.$site->id" />
     @elseif ($tab === 'back-ups')
         <livewire:sites.backups :site="$site" :key="'backups-'.$site->id" />
     @elseif ($tab === 'wp-cli')

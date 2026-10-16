@@ -11,6 +11,8 @@
     $liveHealth = collect($site->health ?? [])->firstWhere('key', 'http');
     $liveState = match (true) {
         $site->isLocalOnly() => ['label' => __('Nog niet live'), 'tone' => 'muted'],
+        $site->isOffline() => ['label' => __('Offline'), 'tone' => 'bad'],
+        $site->isMonitored() && $site->uptime === \App\Enums\UptimeStatus::Up => ['label' => __('Online'), 'tone' => 'ok'],
         ($liveHealth['status'] ?? null) === 'ok' => ['label' => __('Online'), 'tone' => 'ok'],
         ($liveHealth['status'] ?? null) === 'fail' => ['label' => __('Niet bereikbaar'), 'tone' => 'bad'],
         default => ['label' => __('Niet getest'), 'tone' => 'muted'],
@@ -76,8 +78,11 @@
         </div>
         <div @class(['flex items-center gap-1.5 text-xs text-ink/80', 'justify-end' => ! $large])>
             <span class="size-1.5 shrink-0 rounded-full {{ $dot($liveState['tone']) }}"></span>
-            <span class="truncate">{{ $large ? ($site->data('live_host') ?: $liveState['label']) : $liveState['label'] }}</span>
+            <span class="truncate">{{ $liveState['label'] }}@if ($large && $site->uptime_status_since && $site->isMonitored()) <span class="text-muted">· {{ __('sinds :time', ['time' => $site->uptime_status_since->diffForHumans()]) }}</span>@endif</span>
         </div>
+        @if ($large && $site->data('live_host'))
+            <p class="-mt-1.5 truncate font-mono text-xs text-ink/70">{{ $site->data('live_host') }}</p>
+        @endif
         @if ($large && isset($live))
             <div class="flex flex-wrap gap-1.5">{{ $live }}</div>
         @endif

@@ -43,6 +43,12 @@ class Index extends Component
 
     public bool $notifications = true;
 
+    public bool $uptimeEnabled = true;
+
+    public int $uptimeIntervalMinutes = 5;
+
+    public bool $dailyUpdateCheck = true;
+
     public string $currentPassword = '';
 
     public string $newPassword = '';
@@ -68,6 +74,9 @@ class Index extends Component
             'autoLoginLive' => $settings->autoLoginLive(),
             'autoLockMinutes' => $settings->autoLockMinutes(),
             'notifications' => $settings->notificationsEnabled(),
+            'uptimeEnabled' => $settings->uptimeEnabled(),
+            'uptimeIntervalMinutes' => $settings->uptimeIntervalMinutes(),
+            'dailyUpdateCheck' => $settings->dailyUpdateCheck(),
         ]);
     }
 
@@ -85,6 +94,9 @@ class Index extends Component
             'autoLoginLive' => ['boolean'],
             'autoLockMinutes' => ['required', 'integer', 'between:0,480'],
             'notifications' => ['boolean'],
+            'uptimeEnabled' => ['boolean'],
+            'uptimeIntervalMinutes' => ['required', 'integer', Rule::in(AppSettings::uptimeIntervals())],
+            'dailyUpdateCheck' => ['boolean'],
         ], [
             'editor.regex' => __('Alleen de naam of het pad van het programma, zonder speciale tekens.'),
         ]);
@@ -103,6 +115,9 @@ class Index extends Component
             'auto_login_live' => $validated['autoLoginLive'],
             'auto_lock_minutes' => $validated['autoLockMinutes'],
             'notifications' => $validated['notifications'],
+            'uptime_enabled' => $validated['uptimeEnabled'],
+            'uptime_interval_minutes' => $validated['uptimeIntervalMinutes'],
+            'daily_update_check' => $validated['dailyUpdateCheck'],
         ]);
 
         if ($localeChanged) {

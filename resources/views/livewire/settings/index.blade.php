@@ -28,6 +28,22 @@
             </div>
         </x-panel>
 
+        <x-panel :title="__('Meldingen en controles')" :description="__('Lopen op de achtergrond zolang BD Deck open staat, ook als het venster niet zichtbaar is.')">
+            <div class="grid gap-4">
+                <x-toggle wire:model="notifications" :label="__('Melding als een actie klaar is')" :description="__('Systeemmelding van Linux, ook als het venster niet zichtbaar is.')" />
+                <div class="h-px bg-line"></div>
+                <x-toggle wire:model="uptimeEnabled" :label="__('Uptime van live-sites bewaken')" :description="__('Meet of de website antwoordt en meldt een storing of het herstel daarvan. Je kunt dit per site uitzetten.')" />
+                <x-field :label="__('Meten om de')" for="uptime-interval" error="uptimeIntervalMinutes" class="max-w-48">
+                    <x-select id="uptime-interval" wire:model="uptimeIntervalMinutes">
+                        @foreach (\App\Services\AppSettings::uptimeIntervals() as $minutes)
+                            <option value="{{ $minutes }}">{{ trans_choice(':count minuut|:count minuten', $minutes) }}</option>
+                        @endforeach
+                    </x-select>
+                </x-field>
+                <x-toggle wire:model="dailyUpdateCheck" :label="__('Dagelijks op updates controleren')" :description="__('Kijkt per site of er WordPress-, plugin- of pakketupdates zijn en meldt nieuwe updates. Zie Uptime & onderhoud.')" />
+            </div>
+        </x-panel>
+
         <x-panel :title="__('Paden en programma\'s')">
             <div class="grid gap-4">
                 <x-field :label="__('Map met lokale sites')" for="sites-dir" error="sitesDirectory" :hint="__('Hier bouwt wpopen elke site in een eigen map. Back-ups komen in .wpopen-backups daarbinnen.')">
@@ -58,20 +74,18 @@
             </div>
         </x-panel>
 
-        <x-panel :title="__('Beveiliging en meldingen')">
-            <div class="grid gap-4">
-                <x-field :label="__('Automatisch vergrendelen na')" for="auto-lock" error="autoLockMinutes" :hint="__('Minuten zonder muis of toetsenbord. 0 is nooit.')">
-                    <div class="flex items-center gap-2">
-                        <x-input id="auto-lock" type="number" min="0" max="480" wire:model="autoLockMinutes" class="w-24" />
-                        <span class="text-muted">{{ __('minuten') }}</span>
-                    </div>
-                </x-field>
-                <x-toggle wire:model="notifications" :label="__('Melding als een actie klaar is')" :description="__('Systeemmelding van Linux, ook als het venster niet zichtbaar is.')" />
-            </div>
+        <x-panel :title="__('Beveiliging')">
+            <x-field :label="__('Automatisch vergrendelen na')" for="auto-lock" error="autoLockMinutes" :hint="__('Minuten zonder muis of toetsenbord. 0 is nooit.')">
+                <div class="flex items-center gap-2">
+                    <x-input id="auto-lock" type="number" min="0" max="480" wire:model="autoLockMinutes" class="w-24" />
+                    <span class="text-muted">{{ __('minuten') }}</span>
+                </div>
+            </x-field>
         </x-panel>
 
-        <div class="flex justify-end">
-            <x-button type="submit" variant="primary">{{ __('Instellingen opslaan') }}</x-button>
+        {{-- blijft in beeld, zodat opslaan nooit onderaan een lange pagina gezocht hoeft te worden --}}
+        <div class="sticky bottom-4 z-10 flex items-center justify-end gap-3 rounded-xl border border-line bg-surface/95 px-4 py-3 shadow-[0_8px_30px_-12px_rgb(7_19_31/0.35)] backdrop-blur">
+            <x-button type="submit" variant="primary" icon="check">{{ __('Instellingen opslaan') }}</x-button>
         </div>
     </form>
 

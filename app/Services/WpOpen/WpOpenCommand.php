@@ -6,6 +6,7 @@ use App\Enums\SiteMode;
 use App\Enums\SiteProvider;
 use App\Enums\WpOpenAction;
 use App\Models\Site;
+use Illuminate\Support\Str;
 use InvalidArgumentException;
 
 /**
@@ -249,7 +250,7 @@ final readonly class WpOpenCommand
         return new self(WpOpenAction::AddSite, $arguments);
     }
 
-    public static function newSite(string $name, ?string $title = null): self
+    public static function newSite(string $name, ?string $title = null, bool $multisite = false): self
     {
         if (! preg_match('/^[A-Za-z0-9._-]+$/', $name)) {
             throw new InvalidArgumentException(__('Gebruik alleen letters, cijfers, punt, - en _.'));
@@ -259,6 +260,10 @@ final readonly class WpOpenCommand
 
         if ($title !== null && trim($title) !== '') {
             array_push($arguments, '--title', trim($title));
+        }
+
+        if ($multisite) {
+            $arguments[] = '--multisite';
         }
 
         return new self(WpOpenAction::NewSite, $arguments);
@@ -322,6 +327,35 @@ final readonly class WpOpenCommand
         }
 
         return new self(WpOpenAction::ChangeDomain, ['domain', $site->name, rtrim($liveUrl, '/'), '--yes'], $site);
+    }
+
+    public static function convertToMultisite(Site $site): self
+    {
+        return new self(WpOpenAction::Multisite, ['multisite', $site->name], $site);
+    }
+
+    /**
+     * Een los woord wordt een subdomein van de lokale site; met een punt is het een eigen domein.
+     */
+    public static function addSubsite(Site $site, string $address): self
+    {
+        $address = Str::lower(trim($address));
+
+        if (! preg_match('/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/', $address)) {
+            throw new InvalidArgumentException(__('Gebruik een naam zoals winkel of een domein zoals klant2.test.'));
+        }
+
+        return new self(WpOpenAction::Multisite, ['multisite', $site->name, '--add', $address], $site);
+    }
+
+    public static function removeSubsite(Site $site, int $subsiteId): self
+    {
+        // 1 is de hoofdsite van het netwerk
+        if ($subsiteId < 2) {
+            throw new InvalidArgumentException(__('De hoofdsite kan niet weg.'));
+        }
+
+        return new self(WpOpenAction::Multisite, ['multisite', $site->name, '--remove', (string) $subsiteId], $site);
     }
 
     public static function removeSite(Site $site, bool $purgeLocal = false): self

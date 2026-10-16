@@ -18,7 +18,7 @@ class Sidebar extends Component
     #[Computed]
     public function favorites(): Collection
     {
-        return Site::query()->favorite()->ordered()->get(['id', 'name', 'snapshot']);
+        return Site::query()->favorite()->ordered()->get(['id', 'name', 'snapshot', 'uptime_enabled', 'uptime_status']);
     }
 
     /**
@@ -30,11 +30,32 @@ class Sidebar extends Component
         return CommandRun::query()->active()->latestFirst()->limit(5)->get(['id', 'label', 'site_name', 'status', 'created_at']);
     }
 
+    /**
+     * Waar de badge bij Uptime & onderhoud op staat: storingen eerst, daarna updates.
+     *
+     * @return array{offline: int, warnings: int}
+     */
+    #[Computed]
+    public function attention(): array
+    {
+        $sites = Site::query()->get(['id', 'name', 'snapshot', 'uptime_enabled', 'uptime_status', 'updates']);
+
+        return [
+            'offline' => $sites->filter->isOffline()->count(),
+            'warnings' => $sites->filter(fn (Site $site): bool => ! $site->isOffline() && $site->updatesCount() > 0)->count(),
+        ];
+    }
+
     #[On('sites-changed')]
     #[On('run-started')]
     public function refreshSidebar(): void
     {
-        unset($this->favorites, $this->activeRuns);
+        unset($this->favorites, $this->activeRuns, $this->attention);
+    }
+
+    public function poll(): void
+    {
+        $this->refreshSidebar();
     }
 
     public function render(): View

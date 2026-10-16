@@ -33,6 +33,9 @@ final class AppSettings
             'auto_login_live' => true,
             'auto_lock_minutes' => 30,
             'notifications' => true,
+            'uptime_enabled' => true,
+            'uptime_interval_minutes' => 5,
+            'daily_update_check' => true,
         ];
     }
 
@@ -140,6 +143,33 @@ final class AppSettings
     public function notificationsEnabled(): bool
     {
         return (bool) $this->get('notifications');
+    }
+
+    /**
+     * Keuzes voor het meetinterval in minuten.
+     *
+     * @return list<int>
+     */
+    public static function uptimeIntervals(): array
+    {
+        return [1, 5, 10, 15, 30];
+    }
+
+    public function uptimeEnabled(): bool
+    {
+        return (bool) $this->get('uptime_enabled');
+    }
+
+    public function uptimeIntervalMinutes(): int
+    {
+        $minutes = (int) $this->get('uptime_interval_minutes');
+
+        return in_array($minutes, self::uptimeIntervals(), true) ? $minutes : 5;
+    }
+
+    public function dailyUpdateCheck(): bool
+    {
+        return (bool) $this->get('daily_update_check');
     }
 
     private function expand(string $path): string

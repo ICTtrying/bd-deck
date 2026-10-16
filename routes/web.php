@@ -6,6 +6,7 @@ use App\Livewire\Auth\Login;
 use App\Livewire\Auth\Setup;
 use App\Livewire\Dashboard;
 use App\Livewire\Keys;
+use App\Livewire\Maintenance;
 use App\Livewire\Onboarding;
 use App\Livewire\Settings;
 use App\Livewire\Sites;
@@ -26,6 +27,8 @@ Route::middleware(['owner', 'auth'])->group(function (): void {
     Route::livewire('/sites/{site}', Sites\Show::class)->name('sites.show');
     Route::livewire('/sites/{site}/bewerken', Sites\Edit::class)->name('sites.edit');
     Route::livewire('/sites/{site}/verhuizen', Sites\Migrate::class)->name('sites.migrate');
+
+    Route::livewire('/onderhoud', Maintenance\Index::class)->name('maintenance.index');
 
     Route::livewire('/activiteit', Activity\Index::class)->name('activity.index');
     Route::livewire('/activiteit/{run}', Activity\Show::class)->name('activity.show');

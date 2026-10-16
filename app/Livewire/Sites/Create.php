@@ -35,6 +35,8 @@ class Create extends Component
 
     public string $localTitle = '';
 
+    public bool $localMultisite = false;
+
     public function save(CommandRunner $runner): void
     {
         $this->form->validate();
@@ -73,7 +75,7 @@ class Create extends Component
         ]);
 
         $this->attempt(function () use ($runner): void {
-            $run = $this->queueCommand($runner, WpOpenCommand::newSite($this->localName, $this->localTitle));
+            $run = $this->queueCommand($runner, WpOpenCommand::newSite($this->localName, $this->localTitle, $this->localMultisite));
 
             session()->flash('toast', ['title' => __('Lokale site wordt gemaakt'), 'message' => __('Dit duurt een paar minuten de eerste keer.'), 'tone' => 'info']);
             $this->redirectRoute('dashboard', navigate: true);

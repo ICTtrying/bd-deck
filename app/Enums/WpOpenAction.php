@@ -28,6 +28,7 @@ enum WpOpenAction: string
     case NewSite = 'new-site';
     case Migrate = 'migrate';
     case ChangeDomain = 'change-domain';
+    case Multisite = 'multisite';
     case RemoveSite = 'remove-site';
     case Import = 'import';
     case InstallScript = 'install-script';
@@ -60,6 +61,7 @@ enum WpOpenAction: string
             self::NewSite => __('Lokale site maken'),
             self::Migrate => __('Verhuizen naar nieuwe server'),
             self::ChangeDomain => __('Domein omzetten'),
+            self::Multisite => __('Multisite bijwerken'),
             self::RemoveSite => __('Site verwijderen'),
             self::Import => __('Sites importeren'),
             self::InstallScript => __('wpopen installeren'),
@@ -74,6 +76,7 @@ enum WpOpenAction: string
             self::PullCode, self::PullDatabase, self::PullUploads => 'download',
             self::Migrate => 'rocket',
             self::ChangeDomain => 'globe',
+            self::Multisite => 'grid',
             self::Push, self::PushPreview => 'upload',
             self::Reset, self::Restore => 'rotate-ccw',
             self::Fix => 'wrench',

@@ -5,6 +5,7 @@ namespace App\Jobs;
 use App\Enums\RunStatus;
 use App\Enums\WpOpenAction;
 use App\Models\CommandRun;
+use App\Models\Site;
 use App\Services\DesktopNotifier;
 use App\Services\WpOpen\SiteRegistry;
 use App\Services\WpOpen\WpOpen;
@@ -33,6 +34,7 @@ class RunWpOpenCommand implements ShouldBeEncrypted, ShouldQueue
         public CommandRun $run,
         public ?string $script = null,
         public array $secretEnvironment = [],
+        public bool $notify = true,
     ) {}
 
     /**
@@ -110,8 +112,11 @@ class RunWpOpenCommand implements ShouldBeEncrypted, ShouldQueue
             $run->finish(1);
         }
 
-        $this->afterRun($run, $registry);
-        $notifier->runFinished($run);
+        $this->afterRun($run, $registry, $notifier);
+
+        if ($this->notify) {
+            $notifier->runFinished($run);
+        }
     }
 
     private function syncSiteList(CommandRun $run, SiteRegistry $registry): void
@@ -121,7 +126,7 @@ class RunWpOpenCommand implements ShouldBeEncrypted, ShouldQueue
         }
     }
 
-    private function afterRun(CommandRun $run, SiteRegistry $registry): void
+    private function afterRun(CommandRun $run, SiteRegistry $registry, DesktopNotifier $notifier): void
     {
         $site = $run->action->changesSiteList() ? $run->site?->fresh() : $run->site;
 
@@ -132,10 +137,10 @@ class RunWpOpenCommand implements ShouldBeEncrypted, ShouldQueue
         $site->update(['last_activity_at' => now()]);
 
         if ($run->status === RunStatus::Succeeded) {
-            rescue(function () use ($run, $site, $registry): void {
+            rescue(function () use ($run, $site, $registry, $notifier): void {
                 match ($run->action) {
                     WpOpenAction::Test => $registry->recordHealth($site, (array) WpOpen::decode((string) $run->output)),
-                    WpOpenAction::Updates => $registry->recordUpdates($site, (array) WpOpen::decode((string) $run->output)),
+                    WpOpenAction::Updates => $this->recordUpdates($run, $site, $registry, $notifier),
                     WpOpenAction::Upgrade => $registry->forgetUpdates($site),
                     default => null,
                 };
@@ -144,6 +149,22 @@ class RunWpOpenCommand implements ShouldBeEncrypted, ShouldQueue
 
         if ($run->action->refreshesSite()) {
             rescue(fn () => $registry->refresh($site), report: false);
+        }
+    }
+
+    /**
+     * Een controle op de achtergrond zegt alleen iets als er sinds de vorige keer updates bij zijn gekomen.
+     */
+    private function recordUpdates(CommandRun $run, Site $site, SiteRegistry $registry, DesktopNotifier $notifier): void
+    {
+        $before = $site->updatesCount();
+
+        $registry->recordUpdates($site, (array) WpOpen::decode((string) $run->output));
+
+        $after = $site->updatesCount();
+
+        if (! $this->notify && $after > $before) {
+            $notifier->updatesFound($site, $after);
         }
     }
 }

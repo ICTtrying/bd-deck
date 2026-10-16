@@ -5,6 +5,7 @@ namespace App\Models;
 use App\Enums\SiteMode;
 use App\Enums\SiteProvider;
 use App\Enums\SiteType;
+use App\Enums\UptimeStatus;
 use Database\Factories\SiteFactory;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Attributes\Scope;
@@ -14,6 +15,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Support\Arr;
+use Illuminate\Support\Carbon;
 
 /**
  * Verbindingsgegevens staan in de sitelijst van wpopen; dit model bewaart een snapshot
@@ -22,6 +24,7 @@ use Illuminate\Support\Arr;
 #[Fillable([
     'name', 'is_favorite', 'notes', 'live_login_user', 'snapshot', 'health', 'health_checked_at',
     'updates', 'updates_checked_at', 'last_activity_at', 'synced_at',
+    'uptime_enabled', 'uptime_status', 'uptime_failures', 'uptime_status_since', 'uptime_checked_at',
 ])]
 class Site extends Model
 {
@@ -42,6 +45,10 @@ class Site extends Model
             'updates_checked_at' => 'datetime',
             'last_activity_at' => 'datetime',
             'synced_at' => 'datetime',
+            'uptime_enabled' => 'boolean',
+            'uptime_failures' => 'integer',
+            'uptime_status_since' => 'datetime',
+            'uptime_checked_at' => 'datetime',
         ];
     }
 
@@ -64,6 +71,22 @@ class Site extends Model
     public function credentials(): HasMany
     {
         return $this->hasMany(Credential::class);
+    }
+
+    /**
+     * @return HasMany<UptimeCheck, $this>
+     */
+    public function uptimeChecks(): HasMany
+    {
+        return $this->hasMany(UptimeCheck::class);
+    }
+
+    /**
+     * @return HasMany<UptimeIncident, $this>
+     */
+    public function uptimeIncidents(): HasMany
+    {
+        return $this->hasMany(UptimeIncident::class);
     }
 
     #[Scope]
@@ -147,6 +170,27 @@ class Site extends Model
         return (bool) $this->data('built', false);
     }
 
+    /**
+     * Alleen lokale WordPress-sites: een multisite live zetten of ophalen kan BD Deck niet.
+     */
+    public function supportsMultisite(): bool
+    {
+        return $this->isLocalOnly() && ! $this->isLaravel();
+    }
+
+    public function isMultisite(): bool
+    {
+        return (bool) $this->data('multisite', false);
+    }
+
+    /**
+     * @return list<array{id: int, url: string}>
+     */
+    public function subsites(): array
+    {
+        return $this->data('subsites', []);
+    }
+
     public function isRunning(): bool
     {
         return $this->data('ddev_status') === 'running';
@@ -198,5 +242,106 @@ class Site extends Model
     public function updatesCount(): int
     {
         return collect($this->updates ?? [])->sum(fn (mixed $items): int => is_array($items) ? count($items) : 0);
+    }
+
+    /**
+     * @return Attribute<UptimeStatus, never>
+     */
+    protected function uptime(): Attribute
+    {
+        return Attribute::get(fn (): UptimeStatus => UptimeStatus::tryFrom((string) $this->uptime_status) ?? UptimeStatus::Unknown)->withoutObjectCaching();
+    }
+
+    /**
+     * Alleen sites met een live-adres kunnen gemeten worden; een lokale site heeft dat niet.
+     */
+    public function hasLiveUrl(): bool
+    {
+        return ! $this->isLocalOnly() && filled($this->data('live_site_url') ?? $this->data('host'));
+    }
+
+    public function isMonitored(): bool
+    {
+        return $this->uptime_enabled && $this->hasLiveUrl();
+    }
+
+    /**
+     * Na een misser komt de volgende meting snel, zodat een storing vlot bevestigd of weerlegd wordt.
+     */
+    public function isDueForUptimeCheck(int $intervalMinutes): bool
+    {
+        if ($this->uptime_checked_at === null) {
+            return true;
+        }
+
+        $interval = $this->uptime_failures > 0 ? 1 : $intervalMinutes;
+
+        // de scheduler tikt elke minuut; een paar seconden speling voorkomt dat een meting steeds een minuut te laat valt
+        return $this->uptime_checked_at->lte(now()->subMinutes($interval)->addSeconds(15));
+    }
+
+    /**
+     * WordPress vraagt de updates op live op, Laravel kijkt in de lokale Composer- en npm-bestanden.
+     */
+    public function supportsUpdateCheck(): bool
+    {
+        return ! $this->isLocalOnly() && ($this->isLaravel() ? $this->isBuilt() : true);
+    }
+
+    public function isOffline(): bool
+    {
+        return $this->isMonitored() && $this->uptime === UptimeStatus::Down;
+    }
+
+    /**
+     * Uptime over de afgelopen 30 dagen; alleen beschikbaar als de metingen zijn meegeteld (zie scopeWithUptimeCounts).
+     */
+    public function uptimePercentage(): ?float
+    {
+        $total = (int) ($this->uptime_checks_count ?? 0);
+
+        return $total === 0 ? null : (int) $this->uptime_up_count / $total * 100;
+    }
+
+    /**
+     * Uptime in procenten over de afgelopen dagen; leeg zolang er nog niet gemeten is.
+     */
+    public function uptimePercentageSince(int $days): ?float
+    {
+        $checks = $this->uptimeChecks()->since(now()->subDays($days));
+        $total = (clone $checks)->count();
+
+        return $total === 0 ? null : (clone $checks)->where('is_up', true)->count() / $total * 100;
+    }
+
+    /**
+     * Gemiddelde reactietijd van de laatste 24 uur, in milliseconden.
+     */
+    public function averageResponseTime(): ?int
+    {
+        $average = $this->uptimeChecks()->since(now()->subDay())->where('is_up', true)->avg('response_ms');
+
+        return $average === null ? null : (int) round((float) $average);
+    }
+
+    #[Scope]
+    protected function withUptimeCounts(Builder $query): void
+    {
+        $since = now()->subDays(UptimeCheck::RETENTION_DAYS);
+
+        $query->withCount([
+            'uptimeChecks' => fn (Builder $checks) => $checks->since($since),
+            'uptimeChecks as uptime_up_count' => fn (Builder $checks) => $checks->since($since)->where('is_up', true),
+        ]);
+    }
+
+    /**
+     * Back-up-mappen heten datum-tijd-soort (20261008-160310-push).
+     */
+    public function lastBackupAt(): ?Carbon
+    {
+        $id = (string) $this->data('last_backup');
+
+        return preg_match('/^\d{8}-\d{6}/', $id) === 1 ? Carbon::createFromFormat('Ymd-His', substr($id, 0, 15)) ?: null : null;
     }
 }

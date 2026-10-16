@@ -7,10 +7,12 @@ use App\Enums\WpOpenAction;
 use App\Livewire\Concerns\InteractsWithSites;
 use App\Models\CommandRun;
 use App\Models\Site;
+use App\Models\UptimeCheck;
 use App\Services\WpOpen\CommandRunner;
 use App\Services\WpOpen\SiteRegistry;
 use App\Services\WpOpen\WpOpenCommand;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
+use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Support\Collection;
 use Illuminate\View\View;
 use InvalidArgumentException;
@@ -274,7 +276,7 @@ class Show extends Component
         unset($this->activeRun);
 
         if ($wasActive && $this->activeRun === null) {
-            unset($this->lastRun, $this->recentDeploy);
+            unset($this->lastRun, $this->recentDeploy, $this->recentChecks);
             $this->site->refresh();
             $this->dispatch('sites-changed');
         }
@@ -290,6 +292,17 @@ class Show extends Component
     public function lastRun(): ?CommandRun
     {
         return $this->site->runs()->latestFirst()->first();
+    }
+
+    /**
+     * De laatste metingen voor de uptime-samenvatting op het overzicht.
+     *
+     * @return EloquentCollection<int, UptimeCheck>
+     */
+    #[Computed]
+    public function recentChecks(): EloquentCollection
+    {
+        return $this->site->uptimeChecks()->latestFirst()->limit(40)->get()->reverse()->values();
     }
 
     /**

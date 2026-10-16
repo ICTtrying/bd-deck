@@ -10,8 +10,9 @@ final class CommandRunner
 {
     /**
      * @param  array<string, string>  $secretEnvironment  bv. WPO_PASS; gaat versleuteld de wachtrij in
+     * @param  bool  $notify  false voor controles op de achtergrond: die melden zich alleen als er iets te melden valt
      */
-    public function queue(WpOpenCommand $command, array $secretEnvironment = []): CommandRun
+    public function queue(WpOpenCommand $command, array $secretEnvironment = [], bool $notify = true): CommandRun
     {
         $run = CommandRun::query()->create([
             'site_id' => $command->site?->id,
@@ -22,7 +23,7 @@ final class CommandRunner
             'status' => RunStatus::Queued,
         ]);
 
-        RunWpOpenCommand::dispatch($run, $command->script, $secretEnvironment)->onQueue($command->action->queue());
+        RunWpOpenCommand::dispatch($run, $command->script, $secretEnvironment, $notify)->onQueue($command->action->queue());
 
         return $run;
     }

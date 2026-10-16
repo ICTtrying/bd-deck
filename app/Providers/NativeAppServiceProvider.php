@@ -9,6 +9,7 @@ use App\Services\WpOpen\SiteRegistry;
 use App\Support\MainWindow;
 use Illuminate\Filesystem\Filesystem;
 use Native\Desktop\Contracts\ProvidesPhpIni;
+use Native\Desktop\Facades\ChildProcess;
 use Native\Desktop\Facades\Menu;
 use Native\Desktop\Facades\MenuBar;
 
@@ -34,6 +35,9 @@ class NativeAppServiceProvider implements ProvidesPhpIni
         rescue(fn (): bool => $this->installer->installIfOutdated(), report: false);
         rescue(fn (): int => $this->registry->sync(), report: false);
 
+        // uptime-metingen en de dagelijkse updatecontrole draaien op de scheduler, zolang de app open is
+        rescue(fn () => ChildProcess::artisan('schedule:work', 'scheduler', persistent: true), report: false);
+
         $this->registerMenu();
         $this->registerTray();
 
@@ -57,9 +61,10 @@ class NativeAppServiceProvider implements ProvidesPhpIni
         Menu::create(
             Menu::make(
                 Menu::route('dashboard', __('Sites'), 'CmdOrCtrl+1'),
-                Menu::route('activity.index', __('Activiteit'), 'CmdOrCtrl+2'),
-                Menu::route('keys.index', __('SSH-sleutels'), 'CmdOrCtrl+3'),
-                Menu::route('vault.index', __('Kluis'), 'CmdOrCtrl+4'),
+                Menu::route('maintenance.index', __('Uptime & onderhoud'), 'CmdOrCtrl+2'),
+                Menu::route('activity.index', __('Activiteit'), 'CmdOrCtrl+3'),
+                Menu::route('keys.index', __('SSH-sleutels'), 'CmdOrCtrl+4'),
+                Menu::route('vault.index', __('Kluis'), 'CmdOrCtrl+5'),
                 Menu::separator(),
                 Menu::route('settings.index', __('Instellingen'), 'CmdOrCtrl+,'),
                 Menu::route('lock', __('Vergrendelen'), 'CmdOrCtrl+L'),

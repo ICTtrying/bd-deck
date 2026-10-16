@@ -63,12 +63,14 @@ BD Deck is een schil om het script **`wpopen`**. Alle logica voor bouwen, syncen
 
 - Dashboard als lijst met zoeken, filters (favorieten, lokaal gebouwd, klaar voor live, provider), favorieten en per site een menu met bewerken, verhuizen en verwijderen.
 - Aan de slag: systeemcontrole, SSH-sleutel maken en stap voor stap uitleg om de sleutel bij WPMU DEV of Hostinger te zetten.
+- **Uptime-bewaking**: elke paar minuten wordt de live-website opgehaald (interval kies je bij Instellingen). Na twee missers op rij volgt een systeemmelding, en weer een als de site terug is. Per site zie je uptime over 24 uur, 7 en 30 dagen, de reactietijd en de storingen. Draait op de scheduler van de app, dus alleen zolang BD Deck open staat.
+- **Onderhoud**: één overzicht van al je live-sites met uptime, beschikbare updates en leeftijd van de laatste back-up, plus een knop om alle updates in één keer te controleren. Op de achtergrond gebeurt dat ook dagelijks; nieuwe updates geven een melding.
 - Activiteitenlog met de volledige uitvoer van elk commando, live meelopend.
 - Sites toevoegen (zelf laten zoeken of pad opgeven), bewerken en verwijderen. Bestaande verbindingen importeren uit `~/.ssh/config`, FileZilla en VS Code `sftp.json`.
 - SSH-sleutels: publieke sleutels tonen en kopiëren, standaardsleutel kiezen, nieuwe ed25519-sleutel maken. Private sleutels worden nooit gelezen of getoond.
 - Kluis voor wachtwoorden en API-sleutels, versleuteld met je hoofdwachtwoord.
 - Instellingen: sites-map, editor, terminal, SSH-sleutel, taal (Nederlands/Engels), thema (licht/donker/systeem), auto-login, automatisch vergrendelen, meldingen, hoofdwachtwoord wijzigen, script opnieuw laden, systeemcontrole.
-- Native menubalk met sneltoetsen (Ctrl+1–4, Ctrl+N, Ctrl+L, Ctrl+,), tray-icoon met favorieten, systeemmeldingen als een actie klaar is, snelzoeker (Ctrl+K).
+- Native menubalk met sneltoetsen (Ctrl+1–5, Ctrl+N, Ctrl+L, Ctrl+,), tray-icoon met favorieten, systeemmeldingen als een actie klaar is, snelzoeker (Ctrl+K).
 
 ## Delen met collega's
 

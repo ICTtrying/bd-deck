@@ -1,7 +1,6 @@
 <div class="grid gap-7" wire:init="syncIfStale" wire:poll.60s="refreshSites">
     <x-page-header :title="__('Sites')" :description="trans_choice('{0} Nog geen sites gekoppeld.|{1} Eén site, lokaal en live naast elkaar.|[2,*] :count sites, lokaal en live naast elkaar.', $this->stats['total'])">
         <x-slot:actions>
-            <x-button icon="refresh" wire:click="refreshSites" :title="__('Status opnieuw ophalen')">{{ __('Vernieuwen') }}</x-button>
             <x-button variant="primary" icon="plus" :href="route('sites.create')" wire:navigate>{{ __('Site toevoegen') }}</x-button>
         </x-slot:actions>
     </x-page-header>
@@ -14,32 +13,48 @@
             </div>
 
             <div class="flex rounded-lg border border-line bg-surface p-0.5" role="group" aria-label="{{ __('Filter') }}">
-                @foreach (['all' => __('Alles'), 'favorites' => __('Favorieten'), 'built' => __('Lokaal gebouwd'), 'pending' => __('Klaar voor live')] as $value => $label)
+                @foreach (['all' => __('Alles'), 'favorites' => __('Favorieten'), 'pending' => __('Klaar voor live'), 'updates' => __('Updates')] as $value => $label)
+                    @php $count = $value === 'pending' ? $this->stats['pending'] : ($value === 'updates' ? $this->stats['updates'] : 0); @endphp
                     <button type="button" wire:click="$set('scope', '{{ $value }}')" @class([
                         'h-7 rounded-md px-2.5 text-[0.8125rem] transition-colors',
                         'bg-local-soft font-medium text-local-ink' => $scope === $value,
                         'text-muted hover:text-ink' => $scope !== $value,
                     ]) aria-pressed="{{ $scope === $value ? 'true' : 'false' }}">
                         {{ $label }}
-                        @if ($value === 'pending' && $this->stats['pending'] > 0)
-                            <span class="ml-1 rounded bg-live/20 px-1 text-2xs text-live-ink">{{ $this->stats['pending'] }}</span>
+                        @if ($count > 0)
+                            <span class="ml-1 rounded bg-live/20 px-1 text-2xs text-live-ink">{{ $count }}</span>
                         @endif
                     </button>
                 @endforeach
             </div>
 
-            <div class="w-40">
-                <x-select wire:model.live="provider" :aria-label="__('Provider')">
-                    <option value="">{{ __('Alle providers') }}</option>
-                    @foreach ($providers as $option)
-                        <option value="{{ $option->value }}">{{ $option->label() }}</option>
-                    @endforeach
-                </x-select>
-            </div>
+            @if ($this->providerCount > 1)
+                <div class="w-40">
+                    <x-select wire:model.live="provider" :aria-label="__('Provider')">
+                        <option value="">{{ __('Alle providers') }}</option>
+                        @foreach ($providers as $option)
+                            <option value="{{ $option->value }}">{{ $option->label() }}</option>
+                        @endforeach
+                    </x-select>
+                </div>
+            @endif
 
-            <p class="ml-auto text-[0.8125rem] text-faint">
-                {{ trans_choice(':count lokaal gebouwd|:count lokaal gebouwd', $this->stats['built']) }}, {{ trans_choice(':count draait|:count draaien', $this->stats['running']) }}
-            </p>
+            <x-button size="icon" variant="ghost" icon="refresh" class="ml-auto" wire:click="refreshSites" :title="__('Status opnieuw ophalen')"><span class="sr-only">{{ __('Vernieuwen') }}</span></x-button>
+        </div>
+    @endif
+
+    @if ($this->offlineSites->isNotEmpty())
+        <div class="grid gap-1.5 rounded-xl border border-danger/30 bg-danger-soft px-4 py-3" role="alert">
+            @foreach ($this->offlineSites as $offline)
+                <a href="{{ route('sites.show', ['site' => $offline, 'tab' => 'uptime']) }}" wire:navigate wire:key="offline-{{ $offline->id }}" class="flex items-center gap-2.5 text-sm text-danger hover:underline">
+                    <x-icon name="alert" :size="14" />
+                    <span class="font-medium">{{ __(':site is offline', ['site' => $offline->name]) }}</span>
+                    @if ($offline->uptime_status_since)
+                        <span class="opacity-80">{{ __('sinds :time', ['time' => $offline->uptime_status_since->diffForHumans()]) }}</span>
+                    @endif
+                    <span class="ml-auto text-xs opacity-70">{{ __('Bekijken') }}</span>
+                </a>
+            @endforeach
         </div>
     @endif
 
