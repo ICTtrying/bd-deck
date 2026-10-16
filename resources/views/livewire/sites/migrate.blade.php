@@ -94,7 +94,9 @@
         <x-panel :title="__('Nieuwe site')">
             <div class="grid gap-4">
                 <div class="grid gap-4 sm:grid-cols-2">
-                    <x-field :label="__('Adres van de nieuwe site')" for="live-url" error="form.liveUrl" :hint="__('Waar de nieuwe installatie nu bereikbaar is. Wijst de DNS nog naar de oude host? Gebruik dan het tijdelijke adres van de nieuwe host.')">
+                    <x-field :label="$site->isMultisite() ? __('Domein van de hoofdsite') : __('Adres van de nieuwe site')" for="live-url" error="form.liveUrl" :hint="$site->isMultisite()
+                        ? __('Hier komt de hoofdsite te staan.')
+                        : __('Waar de nieuwe installatie nu bereikbaar is. Wijst de DNS nog naar de oude host? Gebruik dan het tijdelijke adres van de nieuwe host.')">
                         <x-input id="live-url" type="url" wire:model.blur="form.liveUrl" placeholder="https://klant.nl" />
                     </x-field>
                     <x-field :label="__('Hosting')" for="provider" error="form.provider">
@@ -108,15 +110,15 @@
                 @if ($site->isMultisite() && $subsiteHosts !== [])
                     <div class="grid gap-3 rounded-lg border border-line p-3">
                         <div class="grid gap-0.5">
-                            <p class="text-sm font-medium">{{ __('Adressen van de subsites op live') }}</p>
-                            <p class="text-[0.8125rem] text-muted">{{ __('Leeg laten neemt het voorstel over. Een eigen domein moet je wel invullen.') }}</p>
+                            <p class="text-sm font-medium">{{ __('Domein per subsite') }}</p>
+                            <p class="text-[0.8125rem] text-muted">{{ __('Elke subsite mag een eigen domein, bijvoorbeeld bakkerij.nl. Leeg laten wordt een subdomein van de hoofdsite.') }}</p>
                         </div>
                         @foreach ($this->localSubsiteHosts() as $id => $localHost)
                             <div wire:key="subsite-host-{{ $id }}" class="grid items-center gap-2 sm:grid-cols-[1fr_auto_1fr]">
                                 <span class="truncate font-mono text-[0.8125rem] text-muted">{{ $localHost }}</span>
                                 <x-icon name="arrow-right" :size="14" class="hidden text-faint sm:block" />
-                                <x-field :label="__('Live-adres voor :host', ['host' => $localHost])" for="subsite-host-{{ $id }}" error="subsiteHosts.{{ $id }}" class="[&>label]:sr-only">
-                                    <x-input id="subsite-host-{{ $id }}" wire:model="subsiteHosts.{{ $id }}" mono autocomplete="off" spellcheck="false" :placeholder="$this->suggestedSubsiteHost($localHost) ?? 'klant2.nl'" />
+                                <x-field :label="__('Domein voor :host', ['host' => $localHost])" for="subsite-host-{{ $id }}" error="subsiteHosts.{{ $id }}" class="[&>label]:sr-only">
+                                    <x-input id="subsite-host-{{ $id }}" wire:model="subsiteHosts.{{ $id }}" mono autocomplete="off" spellcheck="false" :placeholder="$this->suggestedSubsiteHost($localHost) ?? 'bakkerij.nl'" />
                                 </x-field>
                             </div>
                         @endforeach
