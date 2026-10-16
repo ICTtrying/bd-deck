@@ -10,7 +10,7 @@ use Illuminate\Support\Facades\Queue;
 use Livewire\Livewire;
 use Tests\Support\FakeServer;
 
-describe('plugins en thema\'s kiezen', function (): void {
+describe('plugins kiezen', function (): void {
     beforeEach(function (): void {
         Queue::fake();
         Process::fake();
@@ -53,16 +53,14 @@ describe('plugins en thema\'s kiezen', function (): void {
         Livewire::test(Create::class)
             ->set('localName', 'proef')
             ->set('premium', ['theme:enfold'])
-            ->set('plugins', ['contact-form-7'])
-            ->set('themes', ['astra'])
-            ->set('extraPlugins', 'Wordfence, redirection contact-form-7')
+            ->set('plugins', ['forminator'])
+            ->set('extraPlugins', 'Wordfence, redirection forminator')
             ->call('createLocal')
             ->assertHasNoErrors();
 
         expect(($this->queued)([
             'new', 'proef', '--premium', 'theme:enfold',
-            '--plugin', 'contact-form-7', '--plugin', 'wordfence', '--plugin', 'redirection',
-            '--theme', 'astra',
+            '--plugin', 'forminator', '--plugin', 'wordfence', '--plugin', 'redirection',
         ]))->toBeTrue();
     });
 

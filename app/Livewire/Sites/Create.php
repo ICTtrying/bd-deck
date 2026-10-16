@@ -61,11 +61,6 @@ class Create extends Component
     public array $plugins = [];
 
     /**
-     * @var list<string>
-     */
-    public array $themes = [];
-
-    /**
      * Andere wordpress.org-plugins, gescheiden door komma's of spaties.
      */
     public string $extraPlugins = '';
@@ -136,8 +131,6 @@ class Create extends Component
             'premium.*' => ['string', Rule::in($this->premiumPackages()->keys())],
             'plugins' => ['array'],
             'plugins.*' => ['string', Rule::in(array_keys(config('wordpress.suggested_plugins')))],
-            'themes' => ['array'],
-            'themes.*' => ['string', Rule::in(array_keys(config('wordpress.suggested_themes')))],
             'extraPlugins' => ['nullable', 'string', 'max:500'],
         ], [
             'localName.regex' => __('Gebruik alleen letters, cijfers, punt, - en _.'),
@@ -166,7 +159,6 @@ class Create extends Component
                 multisite: $this->localMultisite,
                 premium: $allPremium ? null : array_values($this->premium),
                 plugins: [...$this->plugins, ...$extraPlugins],
-                themes: $this->themes,
             ));
 
             session()->flash('toast', ['title' => __('Lokale site wordt gemaakt'), 'message' => __('Dit duurt een paar minuten de eerste keer.'), 'tone' => 'info']);
@@ -186,7 +178,6 @@ class Create extends Component
             'providers' => SiteProvider::cases(),
             'modes' => SiteMode::remote(),
             'suggestedPlugins' => config('wordpress.suggested_plugins'),
-            'suggestedThemes' => config('wordpress.suggested_themes'),
         ]);
     }
 }

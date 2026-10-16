@@ -33,8 +33,8 @@
                 </div>
                 <div class="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-line px-4 py-3">
                     <span class="grid gap-0.5">
-                        <span class="text-sm font-medium">{{ __('Plugins en thema\'s') }}</span>
-                        <span class="text-[0.8125rem] text-muted">{{ trans_choice(':count gekozen|:count gekozen', count($premium) + count($plugins) + count($themes)) }}@if (trim($extraPlugins) !== ''){{ __(', plus eigen plugins') }}@endif</span>
+                        <span class="text-sm font-medium">{{ __('Plugins') }}</span>
+                        <span class="text-[0.8125rem] text-muted">{{ trans_choice(':count gekozen|:count gekozen', count($premium) + count($plugins)) }}@if (trim($extraPlugins) !== ''){{ __(', plus eigen plugins') }}@endif</span>
                     </span>
                     <x-button size="sm" icon="list" x-on:click="$dispatch('open-modal', 'local-packages')">{{ __('Kiezen') }}</x-button>
                 </div>
@@ -48,7 +48,7 @@
                 <x-button type="submit" variant="primary" icon="plus" wire:loading.attr="disabled">{{ __('Lokale site maken') }}</x-button>
             </div>
 
-            <x-modal name="local-packages" :title="__('Plugins en thema\'s kiezen')" width="max-w-2xl">
+            <x-modal name="local-packages" :title="__('Plugins kiezen')" width="max-w-2xl">
                 <div class="grid gap-5">
                     @if ($this->premiumPackages->isNotEmpty())
                         <fieldset class="grid gap-2">
@@ -66,7 +66,7 @@
                     @endif
 
                     <fieldset class="grid gap-2">
-                        <legend class="mb-2 text-[0.8125rem] font-medium">{{ __('Gratis plugins van wordpress.org') }}</legend>
+                        <legend class="mb-2 text-[0.8125rem] font-medium">{{ __('WPMU DEV-plugins, gratis versie') }}</legend>
                         <div class="grid gap-2 sm:grid-cols-2">
                             @foreach ($suggestedPlugins as $slug => $label)
                                 <label wire:key="plugin-{{ $slug }}" class="flex items-center gap-2.5 text-sm">
@@ -75,24 +75,12 @@
                                 </label>
                             @endforeach
                         </div>
+                        <p class="text-[0.8125rem] text-muted">{{ __('Van wordpress.org, dus zonder inloggen. De Pro-versies installeer je daarna via het WPMU DEV Dashboard, als je daar bent ingelogd.') }}</p>
                     </fieldset>
 
                     <x-field :label="__('Andere plugins van wordpress.org')" for="extra-plugins" error="extraPlugins" :hint="__('De naam uit de link, gescheiden door komma\'s. Bijvoorbeeld wordfence voor wordpress.org/plugins/wordfence.')">
                         <x-input id="extra-plugins" wire:model.blur="extraPlugins" mono placeholder="wordfence, redirection" autocomplete="off" spellcheck="false" />
                     </x-field>
-
-                    <fieldset class="grid gap-2">
-                        <legend class="mb-2 text-[0.8125rem] font-medium">{{ __('Gratis thema\'s van wordpress.org') }}</legend>
-                        <div class="grid gap-2 sm:grid-cols-2">
-                            @foreach ($suggestedThemes as $slug => $label)
-                                <label wire:key="theme-{{ $slug }}" class="flex items-center gap-2.5 text-sm">
-                                    <input type="checkbox" value="{{ $slug }}" wire:model.live="themes" class="size-4 shrink-0 rounded border-line-strong accent-[var(--local)]">
-                                    {{ $label }}
-                                </label>
-                            @endforeach
-                        </div>
-                        <p class="text-[0.8125rem] text-muted">{{ __('Kies je ook een premium-thema zoals Enfold, dan blijft dat het actieve thema.') }}</p>
-                    </fieldset>
                 </div>
                 <x-slot:footer>
                     <x-button variant="primary" x-on:click="open = false">{{ __('Klaar') }}</x-button>

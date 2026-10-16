@@ -712,17 +712,15 @@
     "Meerdere sites met elk een eigen adres in één WordPress. Subsites voeg je daarna toe op de sitepagina. Een multisite kan BD Deck niet live zetten.": "Multiple sites, each with its own address, in one WordPress. Add subsites afterwards on the site page. BD Deck cannot take a multisite live.",
     "Ongeldige keuze uit de premium-map.": "Invalid choice from the premium folder.",
     "Ongeldige naam: :slug. Gebruik de naam uit de wordpress.org-link.": "Invalid name: :slug. Use the name from the wordpress.org link.",
-    "Plugins en thema's": "Plugins and themes",
     ":count gekozen|:count gekozen": ":count selected|:count selected",
     ", plus eigen plugins": ", plus your own plugins",
     "Kiezen": "Choose",
-    "Plugins en thema's kiezen": "Choose plugins and themes",
     "Uit je premium-map": "From your premium folder",
     "Plugin": "Plugin",
-    "Gratis plugins van wordpress.org": "Free plugins from wordpress.org",
     "Andere plugins van wordpress.org": "Other plugins from wordpress.org",
     "De naam uit de link, gescheiden door komma's. Bijvoorbeeld wordfence voor wordpress.org/plugins/wordfence.": "The name from the link, separated by commas. For example wordfence for wordpress.org/plugins/wordfence.",
-    "Gratis thema's van wordpress.org": "Free themes from wordpress.org",
-    "Kies je ook een premium-thema zoals Enfold, dan blijft dat het actieve thema.": "If you also choose a premium theme such as Enfold, that stays the active theme.",
-    "Klaar": "Done"
+    "Klaar": "Done",
+    "Plugins kiezen": "Choose plugins",
+    "WPMU DEV-plugins, gratis versie": "WPMU DEV plugins, free version",
+    "Van wordpress.org, dus zonder inloggen. De Pro-versies installeer je daarna via het WPMU DEV Dashboard, als je daar bent ingelogd.": "From wordpress.org, so no login needed. Install the Pro versions afterwards through the WPMU DEV Dashboard once you are logged in there."
 }

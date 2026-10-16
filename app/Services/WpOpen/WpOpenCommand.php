@@ -253,7 +253,6 @@ final readonly class WpOpenCommand
     /**
      * @param  list<string>|null  $premium  zips uit de premium-map als 'theme:slug' of 'plugin:slug'; null = alles
      * @param  list<string>  $plugins  gratis plugins van wordpress.org
-     * @param  list<string>  $themes  gratis thema's van wordpress.org
      */
     public static function newSite(
         string $name,
@@ -261,7 +260,6 @@ final readonly class WpOpenCommand
         bool $multisite = false,
         ?array $premium = null,
         array $plugins = [],
-        array $themes = [],
     ): self {
         if (! preg_match('/^[A-Za-z0-9._-]+$/', $name)) {
             throw new InvalidArgumentException(__('Gebruik alleen letters, cijfers, punt, - en _.'));
@@ -289,14 +287,12 @@ final readonly class WpOpenCommand
             array_push($arguments, '--premium', $package);
         }
 
-        foreach (['--plugin' => $plugins, '--theme' => $themes] as $option => $slugs) {
-            foreach (array_unique($slugs) as $slug) {
-                if (! preg_match('/^[a-z0-9-]+$/', $slug)) {
-                    throw new InvalidArgumentException(__('Ongeldige naam: :slug. Gebruik de naam uit de wordpress.org-link.', ['slug' => $slug]));
-                }
-
-                array_push($arguments, $option, $slug);
+        foreach (array_unique($plugins) as $slug) {
+            if (! preg_match('/^[a-z0-9-]+$/', $slug)) {
+                throw new InvalidArgumentException(__('Ongeldige naam: :slug. Gebruik de naam uit de wordpress.org-link.', ['slug' => $slug]));
             }
+
+            array_push($arguments, '--plugin', $slug);
         }
 
         return new self(WpOpenAction::NewSite, $arguments);
