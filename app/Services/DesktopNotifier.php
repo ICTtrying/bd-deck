@@ -22,6 +22,14 @@ class DesktopNotifier
         $this->notice($title, trim(($run->site_name ? $run->site_name.' — ' : '').($run->lastMessage() ?? '')));
     }
 
+    public function goLiveIssues(Site $site, int $count): void
+    {
+        $this->notice(
+            __('Go-live-checklist :site', ['site' => $site->name]),
+            trans_choice(':count punt vraagt aandacht|:count punten vragen aandacht', $count),
+        );
+    }
+
     public function siteDown(Site $site, ?string $reason): void
     {
         $this->notice(__(':site is offline', ['site' => $site->name]), $reason ?? $site->liveUrl('/'));

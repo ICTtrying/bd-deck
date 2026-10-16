@@ -7,8 +7,10 @@ use App\Enums\WpOpenAction;
 use App\Models\CommandRun;
 use App\Models\Site;
 use App\Services\DesktopNotifier;
+use App\Services\WpOpen\CommandRunner;
 use App\Services\WpOpen\SiteRegistry;
 use App\Services\WpOpen\WpOpen;
+use App\Services\WpOpen\WpOpenCommand;
 use DateTimeInterface;
 use Illuminate\Contracts\Queue\ShouldBeEncrypted;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -142,6 +144,9 @@ class RunWpOpenCommand implements ShouldBeEncrypted, ShouldQueue
                     WpOpenAction::Test => $registry->recordHealth($site, (array) WpOpen::decode((string) $run->output)),
                     WpOpenAction::Updates => $this->recordUpdates($run, $site, $registry, $notifier),
                     WpOpenAction::Upgrade, WpOpenAction::SafeUpdate => $registry->forgetUpdates($site),
+                    WpOpenAction::GoLive => $this->recordGoLive($run, $site, $registry, $notifier),
+                    // na een verhuizing of nieuw domein meteen nalopen; een melding volgt alleen bij problemen
+                    WpOpenAction::Migrate, WpOpenAction::ChangeDomain => app(CommandRunner::class)->queue(WpOpenCommand::goLive($site), notify: false),
                     default => null,
                 };
             }, report: false);
@@ -165,6 +170,18 @@ class RunWpOpenCommand implements ShouldBeEncrypted, ShouldQueue
 
         if (! $this->notify && $after > $before) {
             $notifier->updatesFound($site, $after);
+        }
+    }
+
+    /**
+     * Een automatische controle (na verhuizen) meldt zich alleen als er iets aandacht vraagt.
+     */
+    private function recordGoLive(CommandRun $run, Site $site, SiteRegistry $registry, DesktopNotifier $notifier): void
+    {
+        $registry->recordGoLive($site, (array) WpOpen::decode((string) $run->output));
+
+        if (! $this->notify && $site->goLiveIssues() > 0) {
+            $notifier->goLiveIssues($site, $site->goLiveIssues());
         }
     }
 }

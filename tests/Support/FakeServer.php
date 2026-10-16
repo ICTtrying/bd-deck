@@ -264,6 +264,93 @@ final class FakeServer
         return collect(glob($this->sites.'/.wpopen-backups/'.$site.'/*', GLOB_ONLYDIR) ?: [])->map(fn (string $path): string => basename($path))->sort()->values()->all();
     }
 
+    /**
+     * Nep-internet voor de go-live-checklist: alleen deze adressen bestaan, al het andere heeft geen DNS.
+     * Daarnaast antwoordt WP-CLI met FAKE_GOLIVE (feiten van live) en FAKE_LOCAL_URLS/FAKE_OLD_URLS (tellingen),
+     * en doet lftp alsof uploaden lukt, zodat ook sites met alleen SFTP getest kunnen worden (FAKE_LIVE_PHP).
+     *
+     * @param  array<string, array{status?: int, body?: string, type?: string, redirect?: string, error?: int, message?: string}>  $pages
+     */
+    public function fakeWeb(array $pages): void
+    {
+        $web = $this->root.'/web';
+        File::ensureDirectoryExists($web);
+        File::ensureDirectoryExists($this->root.'/lftp');
+
+        foreach ($pages as $url => $page) {
+            $key = preg_replace('/[^A-Za-z0-9.-]/', '_', $url);
+            $error = $page['error'] ?? 0;
+            $effective = $page['redirect'] ?? $url;
+
+            file_put_contents("{$web}/{$key}.meta", implode("\n", [
+                $error, $error > 0 ? '000' : ($page['status'] ?? 200), $effective === $url ? 0 : 1, $effective,
+                $page['type'] ?? 'text/html; charset=UTF-8', $page['message'] ?? 'nep-fout',
+            ])."\n");
+            file_put_contents("{$web}/{$key}.body", $page['body'] ?? '');
+        }
+
+        $this->stub('curl', str_replace('__WEB__', $web, <<<'BASH'
+            #!/usr/bin/env bash
+            url=""; out=/dev/null; fmt=""
+            while [ $# -gt 0 ]; do
+              case "$1" in
+                -o) out="$2"; shift 2;;
+                -w) fmt="$2"; shift 2;;
+                -A|-d|--max-time|--max-redirs) shift 2;;
+                http://*|https://*) url="$1"; shift;;
+                *) shift;;
+              esac
+            done
+            echo "curl $url" >> "$FAKE_LOG"
+            case "$url" in
+              *.ddev.site*) printf '%s' "${FAKE_LOCAL_HTTP:-000}"; exit 0;;
+              */wpo-*.php) printf '%s\n-- wpopen-done\n' "${FAKE_LIVE_PHP:-}" > "$out"; printf '200'; exit 0;;
+            esac
+            key=$(printf '%s' "$url" | tr -c 'A-Za-z0-9.-' '_')
+            rc=6; code=000; redirects=0; effective="$url"; type=""; message="Could not resolve host"
+            if [ -f "__WEB__/$key.meta" ]; then
+              { read -r rc; read -r code; read -r redirects; read -r effective; read -r type; read -r message; } < "__WEB__/$key.meta"
+              cat "__WEB__/$key.body" > "$out"
+            fi
+            f="${fmt//%\{http_code\}/$code}"; f="${f//%\{num_redirects\}/$redirects}"
+            f="${f//%\{url_effective\}/$effective}"; f="${f//%\{content_type\}/$type}"
+            printf '%s' "$f"
+            [ "$rc" = 0 ] || { echo "curl: ($rc) $message" >&2; exit "$rc"; }
+            exit 0
+            BASH));
+
+        if (! is_file($this->bin.'/wp-base')) {
+            rename($this->bin.'/wp', $this->bin.'/wp-base');
+        }
+
+        $this->stub('wp', <<<'BASH'
+            #!/usr/bin/env bash
+            case "$*" in
+              *"--dry-run"*"--format=count"*) echo "wp $*" >> "$FAKE_LOG"; case "$*" in *ddev.site*) echo "${FAKE_LOCAL_URLS:-0}";; *) echo "${FAKE_OLD_URLS:-0}";; esac; exit 0;;
+              *wpo-golive*) echo "wp $*" >> "$FAKE_LOG"; printf '%s\n' "${FAKE_GOLIVE:-}"; exit 0;;
+            esac
+            exec "$(dirname "$0")/wp-base" "$@"
+            BASH);
+
+        $this->stub('lftp', str_replace('__UPLOADS__', $this->root.'/lftp', <<<'BASH'
+            #!/usr/bin/env bash
+            [ "${1:-}" = -f ] || exit 0
+            cat "$2" >> "$FAKE_LOG"
+            while IFS= read -r line; do
+              case "$line" in "put -O "*) eval "set -- $line"; cp "$4" "__UPLOADS__/";; esac
+            done < "$2"
+            exit 0
+            BASH));
+    }
+
+    /**
+     * Alles wat via lftp naar een SFTP-site geüpload is, achter elkaar.
+     */
+    public function lftpUploads(): string
+    {
+        return collect(glob($this->root.'/lftp/*') ?: [])->map(fn (string $path): string => (string) file_get_contents($path))->implode("\n");
+    }
+
     public function destroy(): void
     {
         File::deleteDirectory($this->root);

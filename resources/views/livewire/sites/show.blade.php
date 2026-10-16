@@ -283,6 +283,7 @@
                     <livewire:sites.multisite :site="$site" :key="'multisite-'.$site->id" />
                 @endif
 
+                @unless ($site->isLocalOnly())<livewire:sites.go-live :site="$site" :key="'go-live-'.$site->id" />@endunless
                 <x-panel :title="__('Notities')">
                     <x-textarea wire:model.blur="notes" wire:change="saveNotes" rows="4" :placeholder="__('Bijvoorbeeld: klant wil geen automatische plugin-updates.')" />
                 </x-panel>

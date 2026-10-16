@@ -73,4 +73,12 @@ final class SiteRegistry
     {
         $site->update(['updates' => null, 'updates_checked_at' => null]);
     }
+
+    /**
+     * @param  list<array{key: string, status: string, label: string, detail: string}>  $checks
+     */
+    public function recordGoLive(Site $site, array $checks): void
+    {
+        $site->update(['go_live' => $checks, 'go_live_checked_at' => now()]);
+    }
 }

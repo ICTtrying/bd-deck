@@ -222,6 +222,14 @@ final class AppSettings
         return (bool) $this->get('daily_update_check');
     }
 
+    /**
+     * Laatst gebruikte adres voor een testmail vanuit de go-live-checklist.
+     */
+    public function goLiveMailTo(): string
+    {
+        return trim((string) $this->get('go_live_mail_to'));
+    }
+
     private function expand(string $path): string
     {
         return Str::startsWith($path, '~') ? $this->homeDirectory().Str::after($path, '~') : $path;
