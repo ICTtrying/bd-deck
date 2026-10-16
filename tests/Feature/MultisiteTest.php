@@ -2,6 +2,7 @@
 
 use App\Jobs\RunWpOpenCommand;
 use App\Livewire\Sites\Create;
+use App\Livewire\Sites\Migrate;
 use App\Livewire\Sites\Multisite;
 use App\Livewire\Sites\Show;
 use App\Models\Setting;
@@ -98,13 +99,68 @@ describe('wpopen multisite', function (): void {
             ->and($result->errorOutput())->toContain('alleen bij lokale sites');
     });
 
-    it('zet een multisite niet live', function (): void {
-        $this->server->run(['multisite', 'nieuw'])->throw();
+    describe('live zetten', function (): void {
+        beforeEach(function (): void {
+            // lokale git-repo zoals `wpopen new` die achterlaat, en een lege WordPress bij de host
+            $wpContent = $this->project.'/wp-content';
+            mkdir($wpContent.'/themes/eigen', recursive: true);
+            file_put_contents($wpContent.'/themes/eigen/style.css', "/* Theme Name: Eigen */\n");
+            $this->server->git($wpContent, ['init', '-q', '-b', 'main']);
+            $this->server->git($wpContent, ['add', '-A']);
+            $this->server->git($wpContent, ['commit', '-qm', 'Start']);
+            $this->server->git($wpContent, ['checkout', '-q', '-b', 'dev']);
 
-        $result = $this->server->run(['migrate', 'nieuw', 'u@server.example', '--url', 'https://klant.nl', '--yes']);
+            $this->destination = $this->server->root.'/klant/public_html/wp-content';
+            mkdir($this->destination, recursive: true);
+            file_put_contents(dirname($this->destination).'/wp-config.php', "<?php \$table_prefix = 'wp_';\n");
 
-        expect($result->failed())->toBeTrue()
-            ->and($result->errorOutput())->toContain('is een multisite');
+            $this->subsites = ['FAKE_SITE_LIST' => 'blog_id,domain\n1,nieuw.ddev.site\n2,winkel.nieuw.ddev.site\n3,klant2.test\n'];
+            $this->server->run(['multisite', 'nieuw'])->throw();
+        });
+
+        it('zet een multisite live met een eigen adres per subsite', function (): void {
+            $result = $this->server->run([
+                'migrate', 'nieuw', 'u@klant.example.test', '--url', 'https://klant.nl',
+                '--remote', $this->destination, '--map', 'klant2.test=https://klant2.nl', '--yes',
+            ], $this->subsites);
+
+            $calls = $this->server->calls();
+
+            expect($result->successful())->toBeTrue($result->output().$result->errorOutput())
+                ->and($calls)->toContain(
+                    'search-replace winkel.nieuw.ddev.site winkel.klant.nl --all-tables-with-prefix',
+                    'search-replace klant2.test klant2.nl --all-tables-with-prefix',
+                    'search-replace nieuw.ddev.site klant.nl --all-tables-with-prefix',
+                    'config set MULTISITE true --raw --type=constant',
+                    'config set SUBDOMAIN_INSTALL true --raw --type=constant',
+                    'config set COOKIE_DOMAIN false --raw --type=constant',
+                    'config set DOMAIN_CURRENT_SITE klant.nl --type=constant',
+                )
+                // subsites eerst, anders wordt winkel.nieuw.ddev.site al half omgezet naar winkel.klant.nl
+                ->and(strpos($calls, 'search-replace winkel.nieuw.ddev.site'))->toBeLessThan(strpos($calls, 'search-replace nieuw.ddev.site'))
+                ->and($result->output())->toContain('Nog te doen bij de host', 'winkel.klant.nl', 'klant2.nl')
+                ->and($this->server->sitesFile())->toContain("nieuw|u@klant.example.test||{$this->destination}|ssh|");
+        });
+
+        it('vraagt het live-adres van een subsite met een eigen domein', function (): void {
+            $result = $this->server->run([
+                'migrate', 'nieuw', 'u@klant.example.test', '--url', 'https://klant.nl', '--remote', $this->destination, '--yes',
+            ], $this->subsites);
+
+            expect($result->failed())->toBeTrue()
+                ->and($result->errorOutput())->toContain('Geef het live-adres voor klant2.test')
+                ->and($this->server->calls())->not->toContain('db import');
+        });
+
+        it('weigert alleen SFTP', function (): void {
+            $result = $this->server->run([
+                'migrate', 'nieuw', 'u@klant.example.test', '--url', 'https://klant.nl', '--remote', $this->destination, '--mode', 'sftp',
+                '--map', 'klant2.test=klant2.nl', '--yes',
+            ], $this->subsites);
+
+            expect($result->failed())->toBeTrue()
+                ->and($result->errorOutput())->toContain('alleen via SSH');
+        });
     });
 });
 
@@ -174,5 +230,75 @@ describe('multisite-paneel', function (): void {
         Livewire::test(Multisite::class, ['site' => $site])->call('open', 2, true);
 
         Process::assertRan(fn ($process): bool => $process->command === ['setsid', '-f', 'xdg-open', 'https://winkel.proef.ddev.site/wp-admin/']);
+    });
+});
+
+describe('multisite live zetten in de app', function (): void {
+    beforeEach(function (): void {
+        Queue::fake();
+        Process::fake();
+        $this->actingAs(User::factory()->owner()->create());
+
+        $this->site = Site::factory()->multisite([
+            ['id' => 2, 'url' => 'https://winkel.proef.ddev.site'],
+            ['id' => 3, 'url' => 'https://klant2.test'],
+        ])->create(['name' => 'proef']);
+
+        $this->fillServer = fn ($component) => $component
+            ->set('form.user', 'u123')
+            ->set('form.host', 'server.example')
+            ->set('form.provider', 'hostinger')
+            ->set('form.liveUrl', 'https://klant.nl')
+            ->set('confirmText', 'proef');
+    });
+
+    it('toont de knop en een voorstel per subsite', function (): void {
+        Livewire::test(Show::class, ['site' => $this->site])->assertSee(route('sites.migrate', $this->site));
+
+        Livewire::test(Migrate::class, ['site' => $this->site])
+            ->set('form.liveUrl', 'https://klant.nl')
+            ->assertSee('winkel.klant.nl')
+            ->assertDontSee(__('Alleen het domein omzetten'));
+    });
+
+    it('geeft ingevulde adressen door en laat wpopen de rest voorstellen', function (): void {
+        ($this->fillServer)(Livewire::test(Migrate::class, ['site' => $this->site]))
+            ->set('subsiteHosts.3', 'https://Klant2.nl/')
+            ->call('migrate')
+            ->assertHasNoErrors();
+
+        Queue::assertPushed(RunWpOpenCommand::class, fn (RunWpOpenCommand $job): bool => $job->run->arguments === [
+            'migrate', 'proef', 'u123@server.example', '--url', 'https://klant.nl', '--yes', '--provider', 'hostinger', '--map', 'klant2.test=klant2.nl',
+        ]);
+    });
+
+    it('vraagt het adres van een subsite met een eigen domein', function (): void {
+        ($this->fillServer)(Livewire::test(Migrate::class, ['site' => $this->site]))
+            ->call('migrate')
+            ->assertHasErrors('subsiteHosts.3')
+            ->assertHasNoErrors('subsiteHosts.2');
+
+        Queue::assertNothingPushed();
+    });
+
+    it('weigert alleen SFTP en het adres van de hoofdsite', function (): void {
+        ($this->fillServer)(Livewire::test(Migrate::class, ['site' => $this->site]))
+            ->set('subsiteHosts.3', 'klant.nl')
+            ->call('migrate')
+            ->assertHasErrors('subsiteHosts.3')
+            ->set('subsiteHosts.3', 'klant2.nl')
+            ->set('form.discover', false)
+            ->set('form.mode', 'sftp')
+            ->set('form.remotePath', 'public_html/wp-content')
+            ->call('migrate')
+            ->assertHasErrors('form.mode');
+
+        Queue::assertNothingPushed();
+    });
+
+    it('zet bij een live multisite de database niet mee', function (): void {
+        $site = Site::factory()->built()->snapshotState(['multisite' => true])->create();
+
+        Livewire::test(Show::class, ['site' => $site])->assertDontSee(__('Database opnieuw ophalen'));
     });
 });

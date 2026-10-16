@@ -7,6 +7,15 @@
         [__('Gegevens invullen en starten'), __('BD Deck maakt eerst een back-up van de nieuwe server, zet daarna thema, plugins, uploads en database over en past alle adressen aan.')],
         [__('Domein omzetten'), __('Werkte je met een tijdelijk adres? Zet na het omzetten van de DNS het echte domein: bij SSH-sites onderaan deze pagina, bij alleen SFTP door nog een keer te verhuizen met het echte adres.')],
     ];
+
+    if ($site->isMultisite()) {
+        $steps = [
+            [__('Nieuwe WordPress aanmaken, met SSH'), __('Maak bij de host een lege WordPress-site op het echte domein. Een multisite live zetten kan alleen via SSH, want BD Deck zet de wp-config.php met WP-CLI om naar multisite.')],
+            [__('SSH-sleutel plaatsen'), __('Zet je publieke sleutel bij de nieuwe site (zie Aan de slag), of vul hieronder één keer het SSH-wachtwoord in.')],
+            [__('Adressen kiezen en starten'), __('Kies per subsite het live-adres. BD Deck zet bestanden en database over, zet alle adressen om en maakt van de nieuwe WordPress een multisite.')],
+            [__('Domeinen koppelen bij de host'), __('Voeg elk subsite-domein bij de host toe aan dezelfde site (als alias of extra domein, met SSL) en laat de DNS naar de server wijzen. Het logboek geeft na afloop het lijstje.')],
+        ];
+    }
 @endphp
 
 <div class="grid max-w-3xl gap-6">
@@ -86,7 +95,7 @@
             <div class="grid gap-4">
                 <div class="grid gap-4 sm:grid-cols-2">
                     <x-field :label="__('Adres van de nieuwe site')" for="live-url" error="form.liveUrl" :hint="__('Waar de nieuwe installatie nu bereikbaar is. Wijst de DNS nog naar de oude host? Gebruik dan het tijdelijke adres van de nieuwe host.')">
-                        <x-input id="live-url" type="url" wire:model="form.liveUrl" placeholder="https://klant.nl" />
+                        <x-input id="live-url" type="url" wire:model.blur="form.liveUrl" placeholder="https://klant.nl" />
                     </x-field>
                     <x-field :label="__('Hosting')" for="provider" error="form.provider">
                         <x-select id="provider" wire:model="form.provider">
@@ -96,6 +105,23 @@
                         </x-select>
                     </x-field>
                 </div>
+                @if ($site->isMultisite() && $subsiteHosts !== [])
+                    <div class="grid gap-3 rounded-lg border border-line p-3">
+                        <div class="grid gap-0.5">
+                            <p class="text-sm font-medium">{{ __('Adressen van de subsites op live') }}</p>
+                            <p class="text-[0.8125rem] text-muted">{{ __('Leeg laten neemt het voorstel over. Een eigen domein moet je wel invullen.') }}</p>
+                        </div>
+                        @foreach ($this->localSubsiteHosts() as $id => $localHost)
+                            <div wire:key="subsite-host-{{ $id }}" class="grid items-center gap-2 sm:grid-cols-[1fr_auto_1fr]">
+                                <span class="truncate font-mono text-[0.8125rem] text-muted">{{ $localHost }}</span>
+                                <x-icon name="arrow-right" :size="14" class="hidden text-faint sm:block" />
+                                <x-field :label="__('Live-adres voor :host', ['host' => $localHost])" for="subsite-host-{{ $id }}" error="subsiteHosts.{{ $id }}" class="[&>label]:sr-only">
+                                    <x-input id="subsite-host-{{ $id }}" wire:model="subsiteHosts.{{ $id }}" mono autocomplete="off" spellcheck="false" :placeholder="$this->suggestedSubsiteHost($localHost) ?? 'klant2.nl'" />
+                                </x-field>
+                            </div>
+                        @endforeach
+                    </div>
+                @endif
                 @unless ($localOnly)
                     <x-toggle wire:model="pullUploads" :label="__('Eerst alle uploads van de oude server ophalen')" :description="__('Lokaal komen afbeeldingen normaal via de oude server binnen; voor een verhuizing moeten ze echt mee.')" />
                     <x-toggle wire:model="keepOld" :label="__('Oude server bewaren als aparte site')" :description="__('Komt in de lijst als :name-oud, zodat je er nog bij kunt.', ['name' => $site->name])" />
@@ -118,7 +144,7 @@
         </div>
     </form>
 
-    @if (! $localOnly && $site->mode->hasShell())
+    @if (! $localOnly && $site->mode->hasShell() && ! $site->isMultisite())
         <x-panel :title="__('Alleen het domein omzetten')" :description="__('De site staat al op de juiste server, maar nog op een tijdelijk adres. Na het omzetten van de DNS zet je hier alle adressen in de live database om. Er wordt eerst een back-up gemaakt.')">
             <form wire:submit="changeDomain" class="flex flex-wrap items-end gap-3">
                 <x-field :label="__('Nieuw domein')" for="new-domain" error="newDomain" class="min-w-64 flex-1">

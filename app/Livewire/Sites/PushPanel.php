@@ -113,7 +113,7 @@ class PushPanel extends Component
             $this->queueCommand($runner, WpOpenCommand::push(
                 $this->site,
                 message: $this->hasUncommittedChanges ? (trim($this->message) ?: $this->suggestedMessage()) : null,
-                database: $this->database,
+                database: $this->database && ! $this->site->isMultisite(),
                 uploads: $this->uploads,
                 force: $this->force,
                 flushCache: $this->flushCache,

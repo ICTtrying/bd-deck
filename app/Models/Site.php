@@ -183,6 +183,11 @@ class Site extends Model
         return (bool) $this->data('multisite', false);
     }
 
+    public function localHost(): string
+    {
+        return (string) parse_url($this->localUrl(), PHP_URL_HOST);
+    }
+
     /**
      * @return list<array{id: int, url: string}>
      */

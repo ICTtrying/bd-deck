@@ -86,9 +86,7 @@
 
         <x-slot:actions>
             @if ($site->isLocalOnly())
-                @unless ($site->isMultisite())
-                    <x-button size="sm" variant="live" icon="rocket" :href="route('sites.migrate', $site)" wire:navigate :disabled="(bool) $active">{{ __('Live zetten') }}</x-button>
-                @endunless
+                <x-button size="sm" variant="live" icon="rocket" :href="route('sites.migrate', $site)" wire:navigate :disabled="(bool) $active">{{ __('Live zetten') }}</x-button>
             @elseif ($site->isBuilt())
                 <div x-data="{ open: false }" class="relative">
                     <x-button size="sm" icon="arrow-left" x-on:click="open = ! open" :disabled="(bool) $active">{{ __('Ophalen') }}</x-button>
@@ -97,10 +95,12 @@
                             <x-icon name="code" class="mt-0.5 text-local-ink" />
                             <span><span class="block text-sm font-medium">{{ __('Code') }}</span><span class="block text-[0.8125rem] text-muted">{{ $site->isLaravel() ? __('Projectcode van live naar main en dev.') : __('Thema en plugins van live naar main en dev.') }}</span></span>
                         </button>
-                        <button type="button" class="flex w-full items-start gap-2.5 rounded-lg px-2.5 py-2 text-left hover:bg-raised" wire:click="confirm('pull-database')" x-on:click="open = false">
-                            <x-icon name="database" class="mt-0.5 text-local-ink" />
-                            <span><span class="block text-sm font-medium">{{ __('Database') }}</span><span class="block text-[0.8125rem] text-muted">{{ __('Verse kopie van live, lokale db wordt eerst bewaard.') }}</span></span>
-                        </button>
+                        @unless ($site->isMultisite())
+                            <button type="button" class="flex w-full items-start gap-2.5 rounded-lg px-2.5 py-2 text-left hover:bg-raised" wire:click="confirm('pull-database')" x-on:click="open = false">
+                                <x-icon name="database" class="mt-0.5 text-local-ink" />
+                                <span><span class="block text-sm font-medium">{{ __('Database') }}</span><span class="block text-[0.8125rem] text-muted">{{ __('Verse kopie van live, lokale db wordt eerst bewaard.') }}</span></span>
+                            </button>
+                        @endunless
                         <button type="button" class="flex w-full items-start gap-2.5 rounded-lg px-2.5 py-2 text-left hover:bg-raised" wire:click="confirm('pull-uploads')" x-on:click="open = false">
                             <x-icon name="download" class="mt-0.5 text-local-ink" />
                             <span><span class="block text-sm font-medium">{{ __('Uploads') }}</span><span class="block text-[0.8125rem] text-muted">{{ __('Alle afbeeldingen en bestanden echt lokaal, bv. voor een verhuizing.') }}</span></span>
@@ -344,7 +344,7 @@
                                 ['action' => 'pull-database', 'icon' => 'database', 'label' => __('Database opnieuw ophalen'), 'text' => __('Verse database van live, lokaal eerst bewaard.'), 'live' => true],
                                 ['action' => 'reset', 'icon' => 'rotate-ccw', 'label' => __('Terugzetten naar main'), 'text' => __('Weg met lokale experimenten; werk blijft in een backup-branch.'), 'live' => false],
                                 ['action' => 'rebuild', 'icon' => 'hammer', 'label' => __('Opnieuw migreren'), 'text' => __('Alles lokaal opnieuw opbouwen vanaf live.'), 'live' => true],
-                            ])->reject(fn (array $repair): bool => $repair['live'] && $site->isLocalOnly());
+                            ])->reject(fn (array $repair): bool => $repair['live'] && ($site->isLocalOnly() || $site->isMultisite()));
                         @endphp
                         @foreach ($repairs as $repair)
                             <li class="flex items-center gap-3 px-5 py-3">

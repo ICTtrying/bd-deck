@@ -10,6 +10,7 @@ use App\Livewire\Forms\SiteForm;
 use App\Models\Site;
 use App\Services\WpOpen\CommandRunner;
 use App\Services\WpOpen\WpOpenCommand;
+use Illuminate\Support\Str;
 use Illuminate\View\View;
 use Livewire\Component;
 
@@ -35,6 +36,14 @@ class Migrate extends Component
 
     public string $newDomain = '';
 
+    /**
+     * Multisite: live-adres per subsite-id (lokale adressen bevatten punten, en die leest Livewire als sleutelpad).
+     * Leeg = de naam vóór het lokale adres plus het live-domein.
+     *
+     * @var array<int, string>
+     */
+    public array $subsiteHosts = [];
+
     public function mount(Site $site): void
     {
         $this->site = $site;
@@ -44,6 +53,10 @@ class Migrate extends Component
             $this->redirectRoute('sites.show', $site, navigate: true);
 
             return;
+        }
+
+        foreach ($site->subsites() as $subsite) {
+            $this->subsiteHosts[$subsite['id']] = '';
         }
 
         // het formulier is voor de nieuwe server; alleen de naam hoort bij de bestaande site
@@ -60,6 +73,10 @@ class Migrate extends Component
             ['form.liveUrl.required' => __('Vul het adres in waarop de nieuwe site bereikbaar is.'), 'form.liveUrl.regex' => __('Gebruik een adres zonder pad, bijvoorbeeld https://klant.nl')],
             ['form.liveUrl' => __('live-adres')],
         );
+
+        if ($this->site->isMultisite() && ! $this->validateSubsiteHosts()) {
+            return;
+        }
 
         if ($this->confirmText !== $this->site->name) {
             $this->addError('confirmText', __('Typ de naam van de site om te bevestigen.'));
@@ -84,6 +101,7 @@ class Migrate extends Component
                 provider: SiteProvider::from($this->form->provider),
                 keepOld: $this->keepOld,
                 pullUploads: $this->pullUploads,
+                subsiteHosts: $this->normalizedSubsiteHosts(),
             );
 
             // het wachtwoord gaat via de omgeving naar ssh-copy-id, nooit als argument
@@ -92,6 +110,76 @@ class Migrate extends Component
 
             $this->redirectRoute('activity.show', $run, navigate: true);
         });
+    }
+
+    /**
+     * Het voorstel voor een subsite zonder ingevuld adres: winkel.<lokaal> → winkel.<live-domein>.
+     */
+    public function suggestedSubsiteHost(string $localHost): ?string
+    {
+        $suffix = '.'.$this->site->localHost();
+        $liveHost = (string) parse_url($this->form->liveUrl, PHP_URL_HOST);
+
+        if (! str_ends_with($localHost, $suffix) || $liveHost === '') {
+            return null;
+        }
+
+        return Str::beforeLast($localHost, $suffix).'.'.Str::lower($liveHost);
+    }
+
+    /**
+     * @return array<int, string> subsite-id → lokaal adres
+     */
+    public function localSubsiteHosts(): array
+    {
+        return collect($this->site->subsites())
+            ->mapWithKeys(fn (array $subsite): array => [$subsite['id'] => (string) parse_url($subsite['url'], PHP_URL_HOST)])
+            ->all();
+    }
+
+    /**
+     * @return array<string, string> lokaal adres → ingevuld live-adres
+     */
+    private function normalizedSubsiteHosts(): array
+    {
+        $local = $this->localSubsiteHosts();
+
+        return collect($this->subsiteHosts)
+            ->filter(fn (string $host, int $id): bool => isset($local[$id]))
+            ->mapWithKeys(fn (string $host, int $id): array => [$local[$id] => Str::of($host)->trim()->lower()->after('://')->before('/')->toString()])
+            ->filter()
+            ->all();
+    }
+
+    private function validateSubsiteHosts(): bool
+    {
+        if (! $this->form->discover && $this->form->mode === SiteMode::Sftp->value) {
+            $this->addError('form.mode', __('Een multisite live zetten kan alleen via SSH.'));
+
+            return false;
+        }
+
+        $hosts = $this->normalizedSubsiteHosts();
+        $hostPattern = '/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/';
+        $valid = true;
+
+        foreach ($this->localSubsiteHosts() as $id => $localHost) {
+            $liveHost = $hosts[$localHost] ?? $this->suggestedSubsiteHost($localHost);
+
+            $error = match (true) {
+                $liveHost === null => __('Vul het live-adres in, bijvoorbeeld klant2.nl.'),
+                ! preg_match($hostPattern, $liveHost) => __('Gebruik een adres zonder pad, bijvoorbeeld klant2.nl.'),
+                $liveHost === Str::lower((string) parse_url($this->form->liveUrl, PHP_URL_HOST)) => __('Dit is het adres van de hoofdsite.'),
+                default => null,
+            };
+
+            if ($error !== null) {
+                $this->addError('subsiteHosts.'.$id, $error);
+                $valid = false;
+            }
+        }
+
+        return $valid;
     }
 
     public function changeDomain(CommandRunner $runner): void

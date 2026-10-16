@@ -84,6 +84,8 @@
                 <x-toggle wire:model="uploads" :label="__('Nieuwe uploads meesturen')" :description="__('Alleen bestanden die op live nog niet bestaan. Live-uploads worden nooit overschreven.')" />
                 @if ($site->isLaravel())
                     <p class="py-1 text-[0.8125rem] text-faint">{{ __('Laravel: de database blijft op live staan; structuurwijzigingen gaan via migraties.') }}</p>
+                @elseif ($site->isMultisite())
+                    <p class="py-1 text-[0.8125rem] text-faint">{{ __('Multisite: de database blijft op live staan, anders kloppen de adressen van de subsites niet meer.') }}</p>
                 @elseif ($site->mode->hasShell())
                     <x-toggle wire:model.live="database" :label="__('Ook de database')" :description="__('Overschrijft de live database met je lokale. Live wordt eerst bewaard, live-plugins blijven aan en de lokale dev-gebruiker komt nooit op live.')" />
                 @else

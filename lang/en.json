@@ -726,5 +726,20 @@
     "Elke nieuwe lokale site krijgt voortaan deze plugins.": "Every new local site will get these plugins from now on.",
     "Opslaan voor elke nieuwe site": "Save for every new site",
     "Alleen voor deze site": "Just for this site",
-    "Pro-plugins download je als zip in de WPMU DEV Hub en zet je in Instellingen bij de zips; dan staan ze hier.": "Download Pro plugins as a zip from the WPMU DEV Hub and add them to the zips in Settings; they will then appear here."
+    "Pro-plugins download je als zip in de WPMU DEV Hub en zet je in Instellingen bij de zips; dan staan ze hier.": "Download Pro plugins as a zip from the WPMU DEV Hub and add them to the zips in Settings; they will then appear here.",
+    "Multisite: de database blijft op live staan, anders kloppen de adressen van de subsites niet meer.": "Multisite: the database stays on live; otherwise the subsite addresses would break.",
+    "Ongeldig live-adres voor :host.": "Invalid live address for :host.",
+    "Een multisite live zetten kan alleen via SSH.": "A multisite can only go live over SSH.",
+    "Vul het live-adres in, bijvoorbeeld klant2.nl.": "Enter the live address, for example client2.com.",
+    "Gebruik een adres zonder pad, bijvoorbeeld klant2.nl.": "Use an address without a path, for example client2.com.",
+    "Dit is het adres van de hoofdsite.": "This is the main site's address.",
+    "Nieuwe WordPress aanmaken, met SSH": "Create a new WordPress, with SSH",
+    "Maak bij de host een lege WordPress-site op het echte domein. Een multisite live zetten kan alleen via SSH, want BD Deck zet de wp-config.php met WP-CLI om naar multisite.": "Create an empty WordPress site on the real domain at your host. A multisite can only go live over SSH, because BD Deck converts wp-config.php to multisite with WP-CLI.",
+    "Adressen kiezen en starten": "Choose addresses and start",
+    "Kies per subsite het live-adres. BD Deck zet bestanden en database over, zet alle adressen om en maakt van de nieuwe WordPress een multisite.": "Choose the live address for each subsite. BD Deck transfers files and database, converts all addresses and turns the new WordPress into a multisite.",
+    "Domeinen koppelen bij de host": "Connect domains at your host",
+    "Voeg elk subsite-domein bij de host toe aan dezelfde site (als alias of extra domein, met SSL) en laat de DNS naar de server wijzen. Het logboek geeft na afloop het lijstje.": "Add each subsite domain to the same site at your host (as an alias or extra domain, with SSL) and point the DNS to the server. The activity log lists them afterwards.",
+    "Adressen van de subsites op live": "Subsite addresses on live",
+    "Leeg laten neemt het voorstel over. Een eigen domein moet je wel invullen.": "Leave empty to use the suggestion. A custom domain must be filled in.",
+    "Live-adres voor :host": "Live address for :host"
 }

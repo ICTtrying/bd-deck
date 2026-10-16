@@ -300,6 +300,8 @@ final readonly class WpOpenCommand
 
     /**
      * Lokale site in één keer naar een nieuwe WordPress-installatie: bestanden, uploads en database.
+     *
+     * @param  array<string, string>  $subsiteHosts  multisite: lokaal adres → live-adres; leeg = wpopen kiest
      */
     public static function migrate(
         Site $site,
@@ -311,6 +313,7 @@ final readonly class WpOpenCommand
         ?SiteProvider $provider = null,
         bool $keepOld = true,
         bool $pullUploads = true,
+        array $subsiteHosts = [],
     ): self {
         if (! preg_match('/^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+$/', $target)) {
             throw new InvalidArgumentException(__('Server moet de vorm gebruiker@host hebben.'));
@@ -340,6 +343,14 @@ final readonly class WpOpenCommand
 
         if (! $pullUploads) {
             $arguments[] = '--no-uploads';
+        }
+
+        foreach (array_filter($subsiteHosts) as $localHost => $liveHost) {
+            if (! preg_match('/^[a-z0-9.-]+$/', (string) $localHost) || ! preg_match('/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/', $liveHost)) {
+                throw new InvalidArgumentException(__('Ongeldig live-adres voor :host.', ['host' => $localHost]));
+            }
+
+            array_push($arguments, '--map', $localHost.'='.$liveHost);
         }
 
         return new self(WpOpenAction::Migrate, $arguments, $site);

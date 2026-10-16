@@ -37,7 +37,9 @@
 #   wpopen restore <naam> <back-up> [--local-db] [--live-db] [--live-files]
 #
 #   wpopen migrate <naam> [ssh-opties] user@host --url https://nieuw [--remote pad] [--mode ssh|sftp]
-#     [--provider p] [--keep-old] [--no-uploads]
+#     [--provider p] [--keep-old] [--no-uploads] [--map lokaal-adres=live-adres]…
+#                                             (--map: live-adres van een subsite bij een multisite; standaard
+#                                             winkel.<naam>.ddev.site → winkel.<live-domein>, alleen via SSH)
 #                                             lokale site in één keer naar een nieuwe (lege) WordPress-installatie
 #   wpopen domain <naam> https://klant.nl      live omzetten naar het definitieve domein (na DNS, alleen SSH)
 #
@@ -57,7 +59,7 @@
 #
 #   Algemeen: --yes slaat bevestigingsvragen over (de app vraagt zelf om bevestiging).
 set -euo pipefail
-WPO_VERSION="2.11.0"
+WPO_VERSION="2.12.0"
 DB="${WPO_DB:-$HOME/.config/wpsites/sites}"; mkdir -p "$(dirname "$DB")"; touch "$DB"
 BASE="${WP_SITES_DIR:-$HOME/wp-sites}"
 BACKUPS="${WPO_BACKUP_DIR:-$BASE/.wpopen-backups}"
@@ -1365,6 +1367,7 @@ cmd_pull() {
   while [ $# -gt 0 ]; do case "$1" in --code) code=1;; --db) db=1;; --uploads) uploads=1;; *) die "Onbekende optie: $1";; esac; shift; done
   cd "$PROJ"; ddev_up >/dev/null
   [ $code = 1 ] && pull_code
+  [ $db = 0 ] || no_multisite_db "database ophalen"
   [ $db = 1 ] && pull_db
   [ $uploads = 1 ] && pull_uploads
   cd "$PROJ"; fix_site
@@ -1390,7 +1393,7 @@ cmd_reset() {   # "refreshen met main": dev gelijk aan de laatste live-staat, hu
 }
 cmd_rebuild() {   # opnieuw migreren vanaf live, voor als er lokaal iets kapot is
   [ $# -ge 1 ] || die "Gebruik: wpopen rebuild <naam>"
-  need ddev git; get "$1"; shift; need_live
+  need ddev git; get "$1"; shift; need_live; no_multisite_db "opnieuw migreren vanaf live"
   confirm "Lokale site $NAME volledig opnieuw opbouwen vanaf live? (eerst wordt een back-up gemaakt)" || die "Afgebroken."
   if [ -d "$PROJ" ]; then
     new_backup rebuild
@@ -1890,13 +1893,13 @@ cmd_migrate() {
   [ $# -ge 2 ] || die "Gebruik: wpopen migrate <naam> [ssh-opties] user@host --url https://… [--remote pad] [--mode ssh|sftp] [--provider p] [--keep-old] [--no-uploads]"
   need git rsync
   get "$1"; need_wordpress; shift
-  is_multisite && die "$NAME is een multisite; die kan BD Deck niet live zetten of verhuizen."
-  local remote="" mode="" prov="" url="" keep=0 uploads=1 rest=() ntarget="" nopts="" nhost probe
+  local remote="" mode="" prov="" url="" keep=0 uploads=1 rest=() ntarget="" nopts="" nhost probe maps=() i
   while [ $# -gt 0 ]; do
     case "$1" in
       --remote) remote="${2:-}"; shift;; --mode) mode="${2:-}"; shift;;
       --provider) prov="${2:-}"; shift;; --url) url="${2:-}"; shift;;
       --keep-old) keep=1;; --no-uploads) uploads=0;;
+      --map) [[ "${2:-}" =~ ^[A-Za-z0-9.-]+=[A-Za-z0-9.:/-]+$ ]] || die "Gebruik --map lokaal-adres=live-adres"; maps+=("$2"); shift;;
       *) rest+=("$1");;
     esac; shift
   done
@@ -1921,6 +1924,11 @@ cmd_migrate() {
   local was_local=0 otarget="$TARGET" oopts="$OPTS" oremote="$REMOTE" omode="$MODE" oprov="$PROVIDER" ourl="$LIVEURL"
   is_local && was_local=1
   cd "$PROJ"; ddev_up >/dev/null
+  if is_multisite; then
+    [ $was_local = 1 ] || die "$NAME is een multisite met een live-server; verhuizen kan BD Deck dan niet."
+    RESTART=0; sync_subsites; ms_plan "$nhost" "${maps[@]+"${maps[@]}"}"
+    [ ${#MS_FROM[@]} -eq 0 ] || note "Subsites op live: $(for i in "${!MS_FROM[@]}"; do printf '%s → %s  ' "${MS_FROM[$i]}" "${MS_TO[$i]}"; done)"
+  fi
   [ $was_local = 0 ] && [ $uploads = 1 ] && pull_uploads
 
   step "Nieuwe server controleren ($ntarget)…"
@@ -1929,6 +1937,7 @@ cmd_migrate() {
     probe=$(ssh -n $nopts -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "$ntarget" true 2>&1 || true)
     if grep -qi "sftp connections only" <<<"$probe"; then mode=sftp; else mode=ssh; fi
   fi
+  if is_multisite && [ "$mode" != ssh ]; then die "Een multisite live zetten kan alleen via SSH: de wp-config.php moet met WP-CLI aangepast worden."; fi
   if [ "$mode" = ssh ]; then
     ensure_key "$ntarget" "$nopts" || die "Inloggen op $ntarget mislukt. Zet je publieke sleutel bij de host, of geef het SSH-wachtwoord op."
   else
@@ -1981,6 +1990,7 @@ mirror -R --no-perms --parallel=4 $MIGRATE_LFTP_EXC '$LWPC' '$REMOTE'" >/dev/nul
   rm -rf "$tmp"
   ok "Database staat op de nieuwe server"
   if [ -n "$dp" ] && [ "$dp" != "$lp" ]; then set_remote_prefix "$lp"; fi
+  if is_multisite; then ms_live "$nhost"; fi
   live_eval "$MIGRATE_FINISH_PHP" || warn "Afronden op live mislukt: verwijder zelf de gebruiker 'dev' en sla de permalinks opnieuw op."
 
   # git: wat nu live staat is de nieuwe main
@@ -2003,7 +2013,13 @@ mirror -R --no-perms --parallel=4 $MIGRATE_LFTP_EXC '$LWPC' '$REMOTE'" >/dev/nul
   cd "$PROJ"; RESTART=0; write_uploads_proxy "$nhost"; [ $RESTART = 1 ] && { ddev_restart >/dev/null 2>&1 || true; }
   flush_live || true
   ok "Verhuisd! $NAME staat op $url  (back-up van de nieuwe server vooraf: $(basename "$BK"))"
-  note "Verandert het domein nog (DNS omzetten)? Daarna: wpopen domain $NAME https://jouwdomein.nl"
+  if is_multisite; then
+    note "Nog te doen bij de host: voeg deze domeinen toe aan deze site (als alias of extra domein, met SSL) en laat de DNS naar de server wijzen:"
+    note "  $nhost (hoofdsite)"
+    for i in "${!MS_TO[@]}"; do note "  ${MS_TO[$i]}"; done
+  else
+    note "Verandert het domein nog (DNS omzetten)? Daarna: wpopen domain $NAME https://jouwdomein.nl"
+  fi
 }
 
 # ───────────── multisite (alleen lokale sites) ─────────────
@@ -2103,9 +2119,61 @@ cmd_multisite() {
   return 0
 }
 
+# live zetten van een multisite: per subsite een live-adres (MS_FROM[i] → MS_TO[i])
+MS_FROM=(); MS_TO=()
+ms_plan() {  # hoofd-host [lokaal=live]… — standaard wordt winkel.<naam>.ddev.site → winkel.<hoofd-host>
+  local nhost="$1" id url from to m; shift
+  MS_FROM=(); MS_TO=()
+  while IFS='|' read -r id url; do
+    from="${url#*//}"; from="${from%%/*}"; [ -n "$from" ] || continue
+    to=""
+    for m in "$@"; do [ "${m%%=*}" = "$from" ] && to="${m#*=}"; done
+    to=$(printf '%s' "$to" | tr 'A-Z' 'a-z'); to="${to#*//}"; to="${to%%/*}"
+    if [ -z "$to" ]; then
+      [[ "$from" == *".$SLUG.ddev.site" ]] || die "Geef het live-adres voor $from op met --map $from=domein.nl"
+      to="${from%".$SLUG.ddev.site"}.$nhost"
+    fi
+    valid_host "$to" || die "Ongeldig live-adres voor $from: $to"
+    [ "$to" != "$nhost" ] || die "$from kan niet hetzelfde live-adres krijgen als de hoofdsite."
+    for m in "${MS_TO[@]+"${MS_TO[@]}"}"; do [ "$m" != "$to" ] || die "$to is aan twee subsites gegeven."; done
+    MS_FROM+=("$from"); MS_TO+=("$to")
+  done < <(cat "$PROJ/.wpopen-subsites" 2>/dev/null)
+  return 0
+}
+ms_live() {  # hoofd-host — na de database-import: adressen omzetten en wp-config op live naar multisite
+  local nhost="$1" i c W=(--all-tables-with-prefix --skip-columns=guid --skip-plugins --skip-themes)
+  step "Subsites omzetten…"
+  # subsites eerst: het lokale hoofdadres zit in hun adres (winkel.<naam>.ddev.site)
+  for i in "${!MS_FROM[@]}"; do
+    live_wp search-replace "${MS_FROM[$i]}" "${MS_TO[$i]}" "${W[@]}" >/dev/null \
+      || die "Adressen omzetten mislukt bij ${MS_FROM[$i]}. Herstel met: wpopen restore $NAME $(basename "$BK") --live-db"
+    ok "${MS_FROM[$i]} → ${MS_TO[$i]}"
+  done
+  # het kale domein in wp_blogs en wp_site; de adressen met // zijn bij de export al omgezet
+  live_wp search-replace "$SLUG.ddev.site" "$nhost" "${W[@]}" >/dev/null \
+    || die "Hoofddomein omzetten mislukt. Herstel met: wpopen restore $NAME $(basename "$BK") --live-db"
+  step "wp-config.php op live naar multisite zetten…"
+  rssh "cp '$ROOT/wp-config.php' '$ROOT/wp-config.php.wpopen-multisite-bak'" || true
+  # een vast WP_HOME van de host zou elke subsite naar de hoofdsite sturen
+  for c in WP_HOME WP_SITEURL; do
+    if live_wp config has "$c" >/dev/null 2>&1; then live_wp config delete "$c" >/dev/null && note "$c uit wp-config.php gehaald (stuurde alles naar één adres)"; fi
+  done
+  for c in "WP_ALLOW_MULTISITE true" "MULTISITE true" "SUBDOMAIN_INSTALL true" "SITE_ID_CURRENT_SITE 1" "BLOG_ID_CURRENT_SITE 1" "COOKIE_DOMAIN false"; do
+    live_wp config set ${c% *} "${c#* }" --raw --type=constant >/dev/null || die "Kon ${c% *} niet in wp-config.php zetten (back-up: wp-config.php.wpopen-multisite-bak)."
+  done
+  live_wp config set DOMAIN_CURRENT_SITE "$nhost" --type=constant >/dev/null && live_wp config set PATH_CURRENT_SITE / --type=constant >/dev/null \
+    || die "Kon het hoofddomein niet in wp-config.php zetten (back-up: wp-config.php.wpopen-multisite-bak)."
+  ok "Live is nu een multisite met hoofddomein $nhost"
+}
+# database heen en weer zetten gaat per site met één adres; bij een multisite breken dan de subsites
+no_multisite_db() {
+  if is_multisite; then die "$NAME is een multisite: $1 kan BD Deck niet, want dan kloppen de adressen van de subsites niet meer. Code live zetten werkt wel."; fi
+  return 0
+}
+
 cmd_domain() {  # live omzetten naar het definitieve domein, bv. van een tijdelijk adres na het verhuizen
   [ $# -ge 2 ] || die "Gebruik: wpopen domain <naam> https://klant.nl"
-  get "$1"; need_wordpress; need_live
+  get "$1"; need_wordpress; need_live; no_multisite_db "domein omzetten"
   local url="$2" nhost old scheme
   [[ "$url" =~ ^(https?)://[A-Za-z0-9.-]+/?$ ]] || die "Geef een volledig adres zonder pad, bijvoorbeeld https://klant.nl"
   scheme="${BASH_REMATCH[1]}"; nhost="${url#*//}"; nhost="${nhost%/}"
@@ -2224,6 +2292,7 @@ cmd_live() {
   [ -n "$site" ] || die "Geen site herkend. Gebruik: wplive <naam>"
   get "$site"; need_live; [ -d "$LWPC/.git" ] || die "$NAME is nog niet lokaal gebouwd."
   [ $db = 1 ] && [ "$MODE" = sftp ] && die "Database pushen kan alleen bij SSH-sites ($NAME heeft alleen SFTP)."
+  [ $db = 0 ] || no_multisite_db "de database live zetten"
   [ $db = 1 ] && is_laravel && die "Bij Laravel gaat de database niet naar live; wijzigingen in de structuur gaan via migraties."
   cd "$LWPC"
   [ "$(git branch --show-current)" = dev ] || die "Je zit niet op dev (maar op '$(git branch --show-current)')."
