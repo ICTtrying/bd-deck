@@ -8,9 +8,13 @@ use App\Livewire\Concerns\FillsConnectionFields;
 use App\Livewire\Concerns\InteractsWithSites;
 use App\Livewire\Forms\SiteForm;
 use App\Services\WpOpen\CommandRunner;
+use App\Services\WpOpen\PremiumLibrary;
 use App\Services\WpOpen\WpOpenCommand;
+use Illuminate\Support\Collection;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Illuminate\View\View;
+use Livewire\Attributes\Computed;
 use Livewire\Attributes\Title;
 use Livewire\Attributes\Url;
 use Livewire\Component;
@@ -22,6 +26,13 @@ class Create extends Component
     use InteractsWithSites;
 
     public SiteForm $form;
+
+    protected PremiumLibrary $library;
+
+    public function boot(PremiumLibrary $library): void
+    {
+        $this->library = $library;
+    }
 
     public string $connection = '';
 
@@ -36,6 +47,60 @@ class Create extends Component
     public string $localTitle = '';
 
     public bool $localMultisite = false;
+
+    /**
+     * Aangevinkte zips uit de premium-map, als 'theme:slug' of 'plugin:slug'; standaard allemaal.
+     *
+     * @var list<string>
+     */
+    public array $premium = [];
+
+    /**
+     * @var list<string>
+     */
+    public array $plugins = [];
+
+    /**
+     * @var list<string>
+     */
+    public array $themes = [];
+
+    /**
+     * Andere wordpress.org-plugins, gescheiden door komma's of spaties.
+     */
+    public string $extraPlugins = '';
+
+    public function mount(): void
+    {
+        $this->premium = $this->premiumPackages()->keys()->all();
+    }
+
+    /**
+     * Per thema of plugin alleen de nieuwste zip, zoals wpopen die ook kiest.
+     *
+     * @return Collection<string, array{file: string, kind: ?string, slug: ?string, size: int, modified: int, active: bool}>
+     */
+    #[Computed]
+    public function premiumPackages(): Collection
+    {
+        return $this->library->items()
+            ->filter(fn (array $item): bool => $item['active'])
+            ->sortBy(['kind', 'slug'])
+            ->keyBy(fn (array $item): string => $item['kind'].':'.$item['slug']);
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function extraPluginSlugs(): array
+    {
+        return Str::of($this->extraPlugins)->lower()->explode(' ')
+            ->flatMap(fn (string $part): array => explode(',', $part))
+            ->map(fn (string $slug): string => trim($slug))
+            ->filter()
+            ->values()
+            ->all();
+    }
 
     public function save(CommandRunner $runner): void
     {
@@ -67,6 +132,13 @@ class Create extends Component
         $this->validate([
             'localName' => ['required', 'string', 'max:60', 'regex:/^[A-Za-z0-9._-]+$/', Rule::unique('sites', 'name')],
             'localTitle' => ['nullable', 'string', 'max:120', 'not_regex:/[|\n\r]/'],
+            'premium' => ['array'],
+            'premium.*' => ['string', Rule::in($this->premiumPackages()->keys())],
+            'plugins' => ['array'],
+            'plugins.*' => ['string', Rule::in(array_keys(config('wordpress.suggested_plugins')))],
+            'themes' => ['array'],
+            'themes.*' => ['string', Rule::in(array_keys(config('wordpress.suggested_themes')))],
+            'extraPlugins' => ['nullable', 'string', 'max:500'],
         ], [
             'localName.regex' => __('Gebruik alleen letters, cijfers, punt, - en _.'),
         ], [
@@ -74,8 +146,28 @@ class Create extends Component
             'localTitle' => __('titel'),
         ]);
 
-        $this->attempt(function () use ($runner): void {
-            $run = $this->queueCommand($runner, WpOpenCommand::newSite($this->localName, $this->localTitle, $this->localMultisite));
+        $extraPlugins = $this->extraPluginSlugs();
+        $invalid = collect($extraPlugins)->reject(fn (string $slug): bool => (bool) preg_match('/^[a-z0-9-]+$/', $slug));
+
+        if ($invalid->isNotEmpty()) {
+            $this->addError('extraPlugins', __('Ongeldige naam: :slug. Gebruik de naam uit de wordpress.org-link.', ['slug' => $invalid->first()]));
+            $this->dispatch('open-modal', name: 'local-packages');
+
+            return;
+        }
+
+        $this->attempt(function () use ($runner, $extraPlugins): void {
+            // alles aangevinkt is het standaardgedrag van wpopen; zo pakt hij ook zips mee die net zijn toegevoegd
+            $allPremium = array_diff($this->premiumPackages()->keys()->all(), $this->premium) === [];
+
+            $run = $this->queueCommand($runner, WpOpenCommand::newSite(
+                name: $this->localName,
+                title: $this->localTitle,
+                multisite: $this->localMultisite,
+                premium: $allPremium ? null : array_values($this->premium),
+                plugins: [...$this->plugins, ...$extraPlugins],
+                themes: $this->themes,
+            ));
 
             session()->flash('toast', ['title' => __('Lokale site wordt gemaakt'), 'message' => __('Dit duurt een paar minuten de eerste keer.'), 'tone' => 'info']);
             $this->redirectRoute('dashboard', navigate: true);
@@ -93,6 +185,8 @@ class Create extends Component
         return view('livewire.sites.create', [
             'providers' => SiteProvider::cases(),
             'modes' => SiteMode::remote(),
+            'suggestedPlugins' => config('wordpress.suggested_plugins'),
+            'suggestedThemes' => config('wordpress.suggested_themes'),
         ]);
     }
 }

@@ -12,8 +12,10 @@
 #   wpopen update <naam> [--name|--target|--opts|--remote|--mode|--provider|--url|--public waarde]
 #   wpopen remove <naam> [--purge]            uit de lijst halen (--purge: ook lokale site weggooien)
 #   wpopen list [--json] | info <naam> [--json]
-#   wpopen new <naam> [--title "Titel"] [--multisite]
-#                                             nieuwe lokale WordPress-site, nog zonder live-server
+#   wpopen new <naam> [--title "Titel"] [--multisite] [--premium theme:enfold|plugin:naam]… [--no-premium]
+#     [--plugin slug]… [--theme slug]…        nieuwe lokale WordPress-site, nog zonder live-server
+#                                             (--premium: alleen deze zips uit de premium-map, standaard alle;
+#                                             --plugin/--theme: gratis van wordpress.org, herhaalbaar)
 #   wpopen multisite <naam> [--add adres] [--remove id]
 #                                             lokale site omzetten naar multisite, subsite toevoegen of weghalen
 #                                             (adres: "winkel" → winkel.<naam>.ddev.site, of een eigen domein zoals klant2.test)
@@ -55,7 +57,7 @@
 #
 #   Algemeen: --yes slaat bevestigingsvragen over (de app vraagt zelf om bevestiging).
 set -euo pipefail
-WPO_VERSION="2.9.0"
+WPO_VERSION="2.10.0"
 DB="${WPO_DB:-$HOME/.config/wpsites/sites}"; mkdir -p "$(dirname "$DB")"; touch "$DB"
 BASE="${WP_SITES_DIR:-$HOME/wp-sites}"
 BACKUPS="${WPO_BACKUP_DIR:-$BASE/.wpopen-backups}"
@@ -1601,17 +1603,27 @@ bootstrap_local() {  # verse WordPress in DDEV, dev/dev als beheerder
   mkdir -p "$PROJ"; cd "$PROJ"
   ddev config --project-type=wordpress --project-name="$SLUG" --docroot=. >/dev/null
   ddev_up
-  [ -f wp-load.php ] || ddev wp core download --locale="${WPO_LOCALE:-nl_NL}" >/dev/null
+  local locale="${WPO_LOCALE:-nl_NL}" language_pack=0
+  if [ ! -f wp-load.php ] && ! ddev wp core download --locale="$locale" >/dev/null; then
+    # het vertaalde pakket faalt geregeld op de md5-controle vlak na een update op wordpress.org; Engels plus taalpakket geeft hetzelfde
+    warn "Pakket in $locale komt niet goed binnen; WordPress in het Engels downloaden en daarna de vertaling installeren."
+    ddev wp core download --force >/dev/null
+    language_pack=1
+  fi
   [ -f wp-config.php ] || ddev wp config create --dbname=db --dbuser=db --dbpass=db --dbhost=db --dbprefix=wp_ --skip-check >/dev/null
   link_live_constants
   ddev wp core is-installed >/dev/null 2>&1 || ddev wp core install --url="$LOCALURL" --title="${TITLE:-$NAME}" \
     --admin_user=dev --admin_password=dev --admin_email=dev@example.test --skip-email >/dev/null
+  if [ $language_pack = 1 ] && [ "$locale" != en_US ]; then
+    ddev wp language core install "$locale" --activate >/dev/null 2>&1 && ok "Taal $locale geïnstalleerd" || warn "Kon taal $locale niet installeren; de site staat in het Engels."
+  fi
   ddev wp rewrite structure '/%postname%/' >/dev/null 2>&1 || true
   RESTART=0; quiet_php; write_local_mu
   [ $RESTART = 1 ] && ddev_restart >/dev/null
   init_git
   # na init_git: anders komt het betaalde thema in de (privé) git-repo van deze site terecht
   install_premium
+  install_free
   touch "$PROJ/.wpopen-ready"
   ok "WordPress staat klaar op $LOCALURL"
 }
@@ -1658,13 +1670,21 @@ for (kind, top), (_, path) in sorted(best.items()):
     print("%s\t%s\t%s" % (kind, top, path))
 PY2
 }
+# keuze bij `wpopen new`: leeg = alles uit de premium-map; PREMIUM_NONE=1 = niets
+PREMIUM_PICK=(); PREMIUM_NONE=0; PREMIUM_THEME=""; FREE_PLUGINS=(); FREE_THEMES=()
+premium_picked() {  # soort slug
+  [ ${#PREMIUM_PICK[@]} -eq 0 ] && return 0
+  local p; for p in "${PREMIUM_PICK[@]}"; do [ "$p" = "$1:$2" ] && return 0; done; return 1
+}
 install_premium() {  # thema's en plugins uit PREMIUM_DIR in deze lokale WordPress zetten en activeren
   local tmp kind slug zip theme="" f
   local -a plugins=()
+  [ "$PREMIUM_NONE" = 0 ] || return 0
   tmp=$(mktemp -d)
   mkdir -p "$LWPC/themes" "$LWPC/plugins"
   while IFS=$'\t' read -r kind slug zip; do
     [ -n "$slug" ] || continue
+    premium_picked "$kind" "$slug" || continue
     if [ "$kind" = theme ]; then
       rm -rf "$LWPC/themes/$slug"; unzip -qo "$zip" -d "$LWPC/themes" || { warn "Kon $(basename "$zip") niet uitpakken"; continue; }
       if [ "$slug" = enfold ] || [ -z "$theme" ]; then theme=$slug; fi
@@ -1682,10 +1702,27 @@ install_premium() {  # thema's en plugins uit PREMIUM_DIR in deze lokale WordPre
     return 0
   fi
   cd "$PROJ"
-  [ -z "$theme" ] || { ddev wp theme activate "$theme" >/dev/null 2>&1 && ok "Thema $theme actief" || warn "Kon thema $theme niet activeren"; }
+  [ -z "$theme" ] || { ddev wp theme activate "$theme" >/dev/null 2>&1 && { PREMIUM_THEME=$theme; ok "Thema $theme actief"; } || warn "Kon thema $theme niet activeren"; }
   for f in "${plugins[@]}"; do
     ddev wp plugin activate "$f" >/dev/null 2>&1 && ok "Plugin $f actief" || warn "Kon plugin $f niet activeren (laat hem uit staan; kijk of hij een licentie of API-sleutel vraagt)"
   done
+}
+# gratis thema's en plugins van wordpress.org; een mislukte installatie houdt de nieuwe site niet tegen
+install_free() {
+  local slug
+  cd "$PROJ"
+  for slug in "${FREE_THEMES[@]+"${FREE_THEMES[@]}"}"; do
+    if ddev wp theme install "$slug" >/dev/null 2>&1; then
+      ok "Thema $slug geïnstalleerd"
+      # een gekozen premium-thema (Enfold) blijft het actieve thema
+      [ -n "$PREMIUM_THEME" ] || { ddev wp theme activate "$slug" >/dev/null 2>&1 && PREMIUM_THEME=$slug && ok "Thema $slug actief"; }
+    else warn "Kon thema $slug niet installeren (bestaat hij op wordpress.org?)"; fi
+  done
+  for slug in "${FREE_PLUGINS[@]+"${FREE_PLUGINS[@]}"}"; do
+    ddev wp plugin install "$slug" --activate >/dev/null 2>&1 && ok "Plugin $slug geïnstalleerd en actief" \
+      || warn "Kon plugin $slug niet installeren (bestaat hij op wordpress.org?)"
+  done
+  return 0
 }
 cmd_premium() {  # Enfold en WPMU DEV-plugins in een bestaande lokale site zetten
   [ $# -ge 1 ] || die "Gebruik: wpopen premium <naam>"
@@ -1695,7 +1732,16 @@ cmd_premium() {  # Enfold en WPMU DEV-plugins in een bestaande lokale site zette
 }
 cmd_new() {
   local name="" TITLE="" multisite=0
-  while [ $# -gt 0 ]; do case "$1" in --title) TITLE="${2:-}"; shift;; --multisite) multisite=1;; -*) die "Onbekende optie: $1";; *) name="$1";; esac; shift; done
+  while [ $# -gt 0 ]; do case "$1" in
+    --title) TITLE="${2:-}"; shift;;
+    --multisite) multisite=1;;
+    --no-premium) PREMIUM_NONE=1;;
+    --premium) [[ "${2:-}" =~ ^(theme|plugin):[A-Za-z0-9._-]+$ ]] || die "Ongeldige premium-keuze: ${2:-} (gebruik theme:naam of plugin:naam)"; PREMIUM_PICK+=("$2"); shift;;
+    --plugin) [[ "${2:-}" =~ ^[a-z0-9-]+$ ]] || die "Ongeldige plugin: ${2:-} (gebruik de naam uit de wordpress.org-link)"; FREE_PLUGINS+=("$2"); shift;;
+    --theme) [[ "${2:-}" =~ ^[a-z0-9-]+$ ]] || die "Ongeldig thema: ${2:-} (gebruik de naam uit de wordpress.org-link)"; FREE_THEMES+=("$2"); shift;;
+    -*) die "Onbekende optie: $1";;
+    *) name="$1";;
+  esac; shift; done
   [ -n "$name" ] || die "Gebruik: wpopen new <naam> [--title \"Titel\"] [--multisite]"
   [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || die "Naam mag alleen letters, cijfers, punt, - en _ bevatten."
   valid_field "$TITLE"
