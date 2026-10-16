@@ -53,11 +53,12 @@
                     @if ($this->premiumPackages->isNotEmpty())
                         <fieldset class="grid gap-2">
                             <legend class="mb-2 text-[0.8125rem] font-medium">{{ __('Uit je premium-map') }}</legend>
+                            <p class="-mt-1 mb-1 text-[0.8125rem] text-muted">{{ __('Pro-plugins download je als zip in de WPMU DEV Hub en zet je in Instellingen bij de zips; dan staan ze hier.') }}</p>
                             <div class="grid gap-2 sm:grid-cols-2">
                                 @foreach ($this->premiumPackages as $key => $package)
                                     <label wire:key="premium-{{ $key }}" class="flex items-center gap-2.5 text-sm">
                                         <input type="checkbox" value="{{ $key }}" wire:model.live="premium" class="size-4 shrink-0 rounded border-line-strong accent-[var(--local)]">
-                                        <span class="min-w-0 truncate">{{ $package['slug'] }}</span>
+                                        <span class="min-w-0 truncate" title="{{ $package['file'] }}">{{ $package['name'] ?? $package['slug'] }}</span>
                                         <x-badge>{{ $package['kind'] === 'theme' ? __('Thema') : __('Plugin') }}</x-badge>
                                     </label>
                                 @endforeach
@@ -83,7 +84,8 @@
                     </x-field>
                 </div>
                 <x-slot:footer>
-                    <x-button variant="primary" x-on:click="open = false">{{ __('Klaar') }}</x-button>
+                    <x-button wire:click="savePackages">{{ __('Opslaan voor elke nieuwe site') }}</x-button>
+                    <x-button variant="primary" x-on:click="open = false">{{ __('Alleen voor deze site') }}</x-button>
                 </x-slot:footer>
             </x-modal>
         </form>

@@ -36,6 +36,7 @@ final class AppSettings
             'uptime_enabled' => true,
             'uptime_interval_minutes' => 5,
             'daily_update_check' => true,
+            'new_site_packages' => null,
         ];
     }
 
@@ -92,6 +93,26 @@ final class AppSettings
         $name = trim($name);
 
         return Str::endsWith($name, $suffix) ? $name : $name.$suffix;
+    }
+
+    /**
+     * Opgeslagen keuze uit "Plugins kiezen"; null = nog nooit opgeslagen.
+     *
+     * @return array{premium: list<string>, plugins: list<string>, extra_plugins: string}|null
+     */
+    public function newSitePackages(): ?array
+    {
+        $saved = $this->get('new_site_packages');
+
+        if (! is_array($saved)) {
+            return null;
+        }
+
+        return [
+            'premium' => array_values(array_filter((array) ($saved['premium'] ?? []), 'is_string')),
+            'plugins' => array_values(array_filter((array) ($saved['plugins'] ?? []), 'is_string')),
+            'extra_plugins' => (string) ($saved['extra_plugins'] ?? ''),
+        ];
     }
 
     public function homeDirectory(): string

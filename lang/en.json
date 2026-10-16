@@ -718,10 +718,13 @@
     "Plugin": "Plugin",
     "Andere plugins van wordpress.org": "Other plugins from wordpress.org",
     "De naam uit de link, gescheiden door komma's. Bijvoorbeeld wordfence voor wordpress.org/plugins/wordfence.": "The name from the link, separated by commas. For example wordfence for wordpress.org/plugins/wordfence.",
-    "Klaar": "Done",
     "Plugins kiezen": "Choose plugins",
     "WPMU DEV-plugins, gratis versie": "WPMU DEV plugins, free version",
     "Van wordpress.org, dus zonder inloggen. De Pro-versies installeer je daarna via het WPMU DEV Dashboard, als je daar bent ingelogd.": "From wordpress.org, so no login needed. Install the Pro versions afterwards through the WPMU DEV Dashboard once you are logged in there.",
     "Adres: :host. De code erachter maakt het adres uniek, anders kan WPMU DEV het al aan iemand anders gekoppeld hebben.": "Address: :host. The code at the end makes the address unique; otherwise WPMU DEV may already have linked it to someone else.",
-    "Er bestaat al een site :name.": "A site :name already exists."
+    "Er bestaat al een site :name.": "A site :name already exists.",
+    "Elke nieuwe lokale site krijgt voortaan deze plugins.": "Every new local site will get these plugins from now on.",
+    "Opslaan voor elke nieuwe site": "Save for every new site",
+    "Alleen voor deze site": "Just for this site",
+    "Pro-plugins download je als zip in de WPMU DEV Hub en zet je in Instellingen bij de zips; dan staan ze hier.": "Download Pro plugins as a zip from the WPMU DEV Hub and add them to the zips in Settings; they will then appear here."
 }

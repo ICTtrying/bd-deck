@@ -5,6 +5,7 @@ use App\Livewire\Sites\Create;
 use App\Models\Setting;
 use App\Models\User;
 use App\Services\AppSettings;
+use App\Services\WpOpen\PremiumLibrary;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Facades\Queue;
@@ -24,7 +25,7 @@ describe('plugins kiezen', function (): void {
         $premium = app(AppSettings::class)->premiumDirectory();
         File::ensureDirectoryExists($premium);
 
-        foreach (['enfold.zip' => ['enfold/style.css' => '/* Enfold */'], 'smush.zip' => ['wp-smush-pro/smush.php' => '<?php']] as $file => $contents) {
+        foreach (['enfold.zip' => ['enfold/style.css' => "/*\nTheme Name: Enfold\n*/"], 'smush.zip' => ['wp-smush-pro/smush.php' => "<?php\n/**\n * Plugin Name: Smush Pro\n */"]] as $file => $contents) {
             $zip = new ZipArchive;
             $zip->open($premium.'/'.$file, ZipArchive::CREATE);
             foreach ($contents as $name => $content) {
@@ -73,6 +74,49 @@ describe('plugins kiezen', function (): void {
             ->call('createLocal');
 
         expect(($this->queued)(['new', 'proef-abcd', '--no-premium']))->toBeTrue();
+    });
+
+    it('toont de naam uit de plugin- en themakop', function (): void {
+        Livewire::test(Create::class)->set('kind', 'lokaal')->assertSee('Smush Pro');
+
+        expect(app(PremiumLibrary::class)->items()->pluck('name', 'slug')->all())
+            ->toMatchArray(['enfold' => 'Enfold', 'wp-smush-pro' => 'Smush Pro']);
+    });
+
+    it('onthoudt de keuze voor elke nieuwe site', function (): void {
+        Livewire::test(Create::class)
+            ->set('premium', ['theme:enfold'])
+            ->set('plugins', ['forminator', 'wp-smushit'])
+            ->set('extraPlugins', 'wordfence')
+            ->call('savePackages')
+            ->assertHasNoErrors()
+            ->assertDispatched('toast');
+
+        Livewire::test(Create::class)
+            ->assertSet('premium', ['theme:enfold'])
+            ->assertSet('plugins', ['forminator', 'wp-smushit'])
+            ->assertSet('extraPlugins', 'wordfence')
+            ->set('localName', 'proef')
+            ->call('createLocal');
+
+        expect(($this->queued)(['new', 'proef-abcd', '--premium', 'theme:enfold', '--plugin', 'forminator', '--plugin', 'wp-smushit', '--plugin', 'wordfence']))->toBeTrue();
+    });
+
+    it('laat opgeslagen zips weg die er niet meer zijn', function (): void {
+        app(AppSettings::class)->update(['new_site_packages' => ['premium' => ['theme:enfold', 'plugin:weg'], 'plugins' => ['bestaat-niet'], 'extra_plugins' => '']]);
+
+        Livewire::test(Create::class)
+            ->assertSet('premium', ['theme:enfold'])
+            ->assertSet('plugins', []);
+    });
+
+    it('slaat geen ongeldige keuze op', function (): void {
+        Livewire::test(Create::class)
+            ->set('extraPlugins', 'word;fence')
+            ->call('savePackages')
+            ->assertHasErrors('extraPlugins');
+
+        expect(app(AppSettings::class)->newSitePackages())->toBeNull();
     });
 
     it('weigert onbekende of ongeldige pakketten', function (string $property, mixed $value): void {

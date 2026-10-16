@@ -23,15 +23,15 @@ final class PremiumLibrary
     /**
      * Nieuwste eerst; per thema of plugin geldt voor wpopen alleen de nieuwste zip.
      *
-     * @return Collection<int, array{file: string, kind: ?string, slug: ?string, size: int, modified: int, active: bool}>
+     * @return Collection<int, array{file: string, kind: ?string, slug: ?string, name: ?string, size: int, modified: int, active: bool}>
      */
     public function items(): Collection
     {
         $items = collect(File::glob($this->directory().'/*.zip'))
             ->map(function (string $path): array {
-                [$kind, $slug] = $this->inspect($path) ?? [null, null];
+                [$kind, $slug, $name] = $this->inspect($path) ?? [null, null, null];
 
-                return ['file' => basename($path), 'kind' => $kind, 'slug' => $slug, 'size' => (int) filesize($path), 'modified' => (int) filemtime($path), 'active' => false];
+                return ['file' => basename($path), 'kind' => $kind, 'slug' => $slug, 'name' => $name, 'size' => (int) filesize($path), 'modified' => (int) filemtime($path), 'active' => false];
             })
             ->sortByDesc('modified')
             ->values();
@@ -83,9 +83,9 @@ final class PremiumLibrary
     }
 
     /**
-     * Thema of plugin, en de mapnaam ervan. Een ThemeForest-pakket met de echte zip erin wordt doorzocht.
+     * Thema of plugin, de mapnaam en de naam uit de kop. Een ThemeForest-pakket met de echte zip erin wordt doorzocht.
      *
-     * @return array{0: string, 1: string}|null
+     * @return array{0: string, 1: string, 2: string}|null
      */
     private function inspect(string $path, int $depth = 0): ?array
     {
@@ -109,15 +109,19 @@ final class PremiumLibrary
             $top = $tops[0];
 
             if (in_array($top.'/style.css', $names, true)) {
+                $title = $this->header((string) $zip->getFromName($top.'/style.css'), 'Theme Name') ?? $top;
                 $zip->close();
 
-                return ['theme', $top];
+                return ['theme', $top, $title];
             }
 
-            if (collect($names)->contains(fn (string $name): bool => str_starts_with($name, $top.'/') && str_ends_with($name, '.php') && substr_count($name, '/') === 1)) {
+            $files = collect($names)->filter(fn (string $name): bool => str_starts_with($name, $top.'/') && str_ends_with($name, '.php') && substr_count($name, '/') === 1);
+
+            if ($files->isNotEmpty()) {
+                $title = $files->map(fn (string $file): ?string => $this->header((string) $zip->getFromName($file), 'Plugin Name'))->filter()->first() ?? $top;
                 $zip->close();
 
-                return ['plugin', $top];
+                return ['plugin', $top, $title];
             }
         }
 
@@ -141,5 +145,15 @@ final class PremiumLibrary
         $zip->close();
 
         return null;
+    }
+
+    /**
+     * WordPress leest de kop alleen uit het begin van het bestand.
+     */
+    private function header(string $contents, string $field): ?string
+    {
+        return preg_match('/^[ \t\/*#@]*'.preg_quote($field, '/').':(.*)$/mi', substr($contents, 0, 8192), $match)
+            ? (trim($match[1]) ?: null)
+            : null;
     }
 }

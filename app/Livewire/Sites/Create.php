@@ -83,13 +83,68 @@ class Create extends Component
 
     public function mount(): void
     {
-        $this->premium = $this->premiumPackages()->keys()->all();
+        $available = $this->premiumPackages()->keys()->all();
+        $saved = $this->settings->newSitePackages();
+
+        // zips die er sinds het opslaan niet meer zijn, of plugins die uit de lijst zijn gehaald, vallen weg
+        $this->premium = $saved === null ? $available : array_values(array_intersect($saved['premium'], $available));
+        $this->plugins = array_values(array_intersect($saved['plugins'] ?? [], array_keys(config('wordpress.suggested_plugins'))));
+        $this->extraPlugins = $saved['extra_plugins'] ?? '';
+    }
+
+    /**
+     * De huidige keuze wordt de standaard voor elke nieuwe lokale site.
+     */
+    public function savePackages(): void
+    {
+        $this->validate($this->packageRules());
+
+        if (! $this->extraPluginsAreValid()) {
+            return;
+        }
+
+        $this->settings->update(['new_site_packages' => [
+            'premium' => array_values($this->premium),
+            'plugins' => array_values($this->plugins),
+            'extra_plugins' => trim($this->extraPlugins),
+        ]]);
+
+        $this->dispatch('close-modal', name: 'local-packages');
+        $this->dispatch('toast', title: __('Opgeslagen'), message: __('Elke nieuwe lokale site krijgt voortaan deze plugins.'), tone: 'success');
+    }
+
+    /**
+     * @return array<string, list<mixed>>
+     */
+    private function packageRules(): array
+    {
+        return [
+            'premium' => ['array'],
+            'premium.*' => ['string', Rule::in($this->premiumPackages()->keys())],
+            'plugins' => ['array'],
+            'plugins.*' => ['string', Rule::in(array_keys(config('wordpress.suggested_plugins')))],
+            'extraPlugins' => ['nullable', 'string', 'max:500'],
+        ];
+    }
+
+    private function extraPluginsAreValid(): bool
+    {
+        $invalid = collect($this->extraPluginSlugs())->reject(fn (string $slug): bool => (bool) preg_match('/^[a-z0-9-]+$/', $slug));
+
+        if ($invalid->isEmpty()) {
+            return true;
+        }
+
+        $this->addError('extraPlugins', __('Ongeldige naam: :slug. Gebruik de naam uit de wordpress.org-link.', ['slug' => $invalid->first()]));
+        $this->dispatch('open-modal', name: 'local-packages');
+
+        return false;
     }
 
     /**
      * Per thema of plugin alleen de nieuwste zip, zoals wpopen die ook kiest.
      *
-     * @return Collection<string, array{file: string, kind: ?string, slug: ?string, size: int, modified: int, active: bool}>
+     * @return Collection<string, array{file: string, kind: ?string, slug: ?string, name: ?string, size: int, modified: int, active: bool}>
      */
     #[Computed]
     public function premiumPackages(): Collection
@@ -143,11 +198,7 @@ class Create extends Component
         $this->validate([
             'localName' => ['required', 'string', 'max:55', 'regex:/^[A-Za-z0-9._-]+$/'],
             'localTitle' => ['nullable', 'string', 'max:120', 'not_regex:/[|\n\r]/'],
-            'premium' => ['array'],
-            'premium.*' => ['string', Rule::in($this->premiumPackages()->keys())],
-            'plugins' => ['array'],
-            'plugins.*' => ['string', Rule::in(array_keys(config('wordpress.suggested_plugins')))],
-            'extraPlugins' => ['nullable', 'string', 'max:500'],
+            ...$this->packageRules(),
         ], [
             'localName.regex' => __('Gebruik alleen letters, cijfers, punt, - en _.'),
         ], [
@@ -163,15 +214,11 @@ class Create extends Component
             return;
         }
 
-        $extraPlugins = $this->extraPluginSlugs();
-        $invalid = collect($extraPlugins)->reject(fn (string $slug): bool => (bool) preg_match('/^[a-z0-9-]+$/', $slug));
-
-        if ($invalid->isNotEmpty()) {
-            $this->addError('extraPlugins', __('Ongeldige naam: :slug. Gebruik de naam uit de wordpress.org-link.', ['slug' => $invalid->first()]));
-            $this->dispatch('open-modal', name: 'local-packages');
-
+        if (! $this->extraPluginsAreValid()) {
             return;
         }
+
+        $extraPlugins = $this->extraPluginSlugs();
 
         $this->attempt(function () use ($runner, $extraPlugins, $name): void {
             // alles aangevinkt is het standaardgedrag van wpopen; zo pakt hij ook zips mee die net zijn toegevoegd
