@@ -25,6 +25,7 @@ use Illuminate\Support\Carbon;
     'name', 'is_favorite', 'notes', 'live_login_user', 'snapshot', 'health', 'health_checked_at',
     'updates', 'updates_checked_at', 'last_activity_at', 'synced_at',
     'uptime_enabled', 'uptime_status', 'uptime_failures', 'uptime_status_since', 'uptime_checked_at',
+    'go_live', 'go_live_checked_at',
 ])]
 class Site extends Model
 {
@@ -49,6 +50,8 @@ class Site extends Model
             'uptime_failures' => 'integer',
             'uptime_status_since' => 'datetime',
             'uptime_checked_at' => 'datetime',
+            'go_live' => 'array',
+            'go_live_checked_at' => 'datetime',
         ];
     }
 
@@ -348,5 +351,36 @@ class Site extends Model
         $id = (string) $this->data('last_backup');
 
         return preg_match('/^\d{8}-\d{6}/', $id) === 1 ? Carbon::createFromFormat('Ymd-His', substr($id, 0, 15)) ?: null : null;
+    }
+
+    /**
+     * Uitkomst van de laatste go-live-checklist; leeg zolang die nog niet gedraaid heeft.
+     *
+     * @return list<array{key: string, status: string, label: string, detail: string}>
+     */
+    public function goLiveChecks(): array
+    {
+        return array_values(array_filter($this->go_live ?? [], fn (mixed $check): bool => is_array($check) && isset($check['key'], $check['status'])));
+    }
+
+    /**
+     * Punten die aandacht vragen: mislukt of een waarschuwing. Overgeslagen onderdelen tellen niet mee.
+     */
+    public function goLiveIssues(): int
+    {
+        return collect($this->goLiveChecks())->whereIn('status', ['fail', 'warn'])->count();
+    }
+
+    /**
+     * Onderdelen die op deze site van toepassing zijn, voor "4 van 6 in orde".
+     */
+    public function goLiveApplicable(): int
+    {
+        return collect($this->goLiveChecks())->where('status', '!=', 'skip')->count();
+    }
+
+    public function goLivePassed(): int
+    {
+        return collect($this->goLiveChecks())->where('status', 'ok')->count();
     }
 }

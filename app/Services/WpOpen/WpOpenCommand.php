@@ -369,6 +369,42 @@ final readonly class WpOpenCommand
         return new self(WpOpenAction::ChangeDomain, ['domain', $site->name, rtrim($liveUrl, '/'), '--yes'], $site);
     }
 
+    /**
+     * Go-live-checklist na verhuizen of domein omzetten; met $mailTo wordt er echt een testmail verstuurd,
+     * met $fix wordt eerst dat onderdeel op live rechtgezet en daarna alles opnieuw gecontroleerd.
+     */
+    public static function goLive(Site $site, ?string $mailTo = null, ?string $fix = null): self
+    {
+        if ($site->isLocalOnly()) {
+            throw new InvalidArgumentException(__('Deze site staat nog niet live.'));
+        }
+
+        $arguments = ['golive', $site->name, '--json'];
+
+        if ($mailTo !== null && $mailTo !== '') {
+            // het adres gaat letterlijk naar PHP op live: alleen gewone tekens
+            if ($site->isLaravel() || filter_var($mailTo, FILTER_VALIDATE_EMAIL) === false || ! preg_match('/^[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$/', $mailTo)) {
+                throw new InvalidArgumentException(__('Vul een geldig e-mailadres in.'));
+            }
+
+            array_push($arguments, '--mail-to', $mailTo);
+        }
+
+        if ($fix !== null) {
+            if (! in_array($fix, ['search', 'debug', 'local-urls'], true) || $site->isLaravel()) {
+                throw new InvalidArgumentException(__('Onbekende actie.'));
+            }
+
+            if ($fix !== 'search' && ! $site->mode->hasShell()) {
+                throw new InvalidArgumentException(__('Dit kan alleen bij SSH-sites.'));
+            }
+
+            array_push($arguments, '--fix', $fix);
+        }
+
+        return new self(WpOpenAction::GoLive, $arguments, $site);
+    }
+
     public static function convertToMultisite(Site $site): self
     {
         return new self(WpOpenAction::Multisite, ['multisite', $site->name], $site);

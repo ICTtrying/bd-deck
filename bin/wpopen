@@ -408,14 +408,14 @@ print(json.dumps((sites[0] if sites else None) if only else sites, ensure_ascii=
 PY
 }
 
-# regels "sleutel|status|label|detail" (status: ok, fail, skip) → leesbare tekst of JSON
+# regels "sleutel|status|label|detail" (status: ok, warn, fail, skip) → leesbare tekst of JSON
 checks_out() {
   if [ "${1:-0}" = 1 ]; then
     python3 -c 'import sys, json; print(json.dumps([dict(zip(["key", "status", "label", "detail"], (l.rstrip("\n").split("|", 3) + ["", "", "", ""])[:4])) for l in sys.stdin if l.strip()], ensure_ascii=False))'
   else
     local k s l d i
     while IFS='|' read -r k s l d; do
-      case "$s" in ok) i="✓";; fail) i="✗";; *) i="·";; esac
+      case "$s" in ok) i="✓";; warn) i="!";; fail) i="✗";; *) i="·";; esac
       echo "$i $l${d:+ — $d}"
     done
   fi
@@ -2215,7 +2215,300 @@ cmd_domain() {  # live omzetten naar het definitieve domein, bv. van een tijdeli
 }
 
 # ───────────── go-live-checklist ─────────────
-cmd_golive() { die "Nog niet beschikbaar."; }
+# Na verhuizen of domein omzetten: staat alles goed voor bezoekers, zoekmachines en mail?
+# Eén eval op live levert de WordPress-kant (ook bij alleen SFTP), de rest gaat via HTTP.
+GOLIVE_PHP=$(cat <<'PHP'
+// wpo-golive
+echo 'siteurl=' . get_option('siteurl') . "\n";
+echo 'blog_public=' . (int) get_option('blog_public') . "\n";
+echo 'wp_debug=' . ((defined('WP_DEBUG') && WP_DEBUG) ? 1 : 0) . "\n";
+echo 'debug_display=' . ((!defined('WP_DEBUG_DISPLAY') || WP_DEBUG_DISPLAY) ? 1 : 0) . "\n";
+$active = (array) get_option('active_plugins', array());
+if (is_multisite()) { $active = array_merge($active, array_keys((array) get_site_option('active_sitewide_plugins', array()))); }
+$known = array(
+  'wp-mail-smtp' => 'WP Mail SMTP', 'wp-mail-smtp-pro' => 'WP Mail SMTP Pro', 'fluent-smtp' => 'FluentSMTP',
+  'post-smtp' => 'Post SMTP', 'postman-smtp' => 'Postman SMTP', 'easy-wp-smtp' => 'Easy WP SMTP',
+  'mailin' => 'Brevo', 'sendinblue' => 'Brevo', 'brevo' => 'Brevo', 'mailgun' => 'Mailgun',
+  'sendgrid-email-delivery-simplified' => 'SendGrid', 'wp-ses' => 'WP Offload SES', 'wp-offload-ses' => 'WP Offload SES',
+  'wp-offload-ses-lite' => 'WP Offload SES', 'smtp-mailer' => 'SMTP Mailer', 'gmail-smtp' => 'Gmail SMTP',
+  'wp-smtp' => 'WP SMTP', 'suremails' => 'SureMail', 'site-mailer' => 'Site Mailer',
+  'mailjet-for-wordpress' => 'Mailjet', 'postmark-approved-wordpress-plugin' => 'Postmark', 'sparkpost' => 'SparkPost',
+);
+$mail = '';
+foreach ($active as $p) {
+  $d = dirname($p);
+  if (isset($known[$d])) { $mail = $known[$d]; break; }
+  // Branda (WPMU DEV): SMTP is een losse module binnen de plugin
+  if (in_array($d, array('ultimate-branding', 'branda-white-labeling'), true)
+    && false !== stripos(serialize(array(get_option('ultimatebranding_activated_modules'), get_site_option('ultimatebranding_activated_modules'))), 'smtp')) {
+    $mail = 'Branda SMTP'; break;
+  }
+}
+echo 'mail_plugin=' . $mail . "\n";
+PHP
+)
+# alleen SFTP (geen WP-CLI): voorkomens van .ddev.site in alle teksttabellen tellen
+GOLIVE_COUNT_PHP=$(cat <<'PHP'
+global $wpdb; $n = 0;
+foreach ((array) $wpdb->get_col($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($wpdb->base_prefix) . '%')) as $t) {
+  foreach ((array) $wpdb->get_results("SHOW COLUMNS FROM `$t`") as $c) {
+    if ('guid' === $c->Field || !preg_match('/char|text/i', $c->Type)) { continue; }
+    $f = '`' . str_replace('`', '', $c->Field) . '`';
+    $n += (int) $wpdb->get_var("SELECT SUM((LENGTH($f) - LENGTH(REPLACE($f, 'ddev.site', ''))) / 9) FROM `$t` WHERE $f LIKE '%ddev.site%'");
+  }
+}
+echo 'local_urls=' . $n . "\n";
+PHP
+)
+GOLIVE_MAIL_PHP=$(cat <<'PHP'
+// wpo-golive-mail
+$err = '';
+add_action('wp_mail_failed', function ($e) use (&$err) { $err = $e->get_error_message(); });
+$ok = wp_mail('__MAILTO__', 'Testmail van BD Deck: ' . wp_specialchars_decode(get_bloginfo('name'), ENT_QUOTES),
+  "Deze testmail is verstuurd door de go-live-checklist van BD Deck vanaf " . home_url('/') . ".\n\nKomt hij aan, dan kan deze site mail versturen.");
+echo 'mail=' . ($ok ? 'ok' : 'fail') . "\n";
+if (!$ok) { echo 'mail_error=' . trim(preg_replace('/\s+/', ' ', str_replace('|', '/', (string) $err))) . "\n"; }
+PHP
+)
+
+gl_fact() { sed -n "s/^$1=//p" "$GL_DIR/facts" 2>/dev/null | tail -1 | tr -d '\r'; }
+gl_host_of() { local h="${1#*//}"; h="${h%%/*}"; h="${h%%:*}"; printf '%s' "$h" | tr 'A-Z' 'a-z'; }
+gl_count_in() { local n; n=$(grep -o -F -- "$1" "$2" 2>/dev/null | wc -l) || true; echo "${n//[^0-9]/}"; }
+# curl volgt doorverwijzingen; zet GL_RC, GL_CODE, GL_REDIRECTS, GL_URL (eindadres), GL_TYPE en GL_ERR
+gl_fetch() {  # url [bodybestand]
+  local out
+  GL_RC=0
+  out=$(curl -sS -L --max-redirs 5 --max-time 20 -A 'Mozilla/5.0 (BD Deck go-live-checklist)' -o "${2:-/dev/null}" \
+    -w '%{http_code} %{num_redirects} %{url_effective} %{content_type}' "$1" 2>"$GL_DIR/err") || GL_RC=$?
+  GL_CODE="" GL_REDIRECTS=0 GL_URL="" GL_TYPE=""
+  read -r GL_CODE GL_REDIRECTS GL_URL GL_TYPE <<<"$out" || true
+  GL_ERR=$(head -1 "$GL_DIR/err" 2>/dev/null | sed 's/^curl: ([0-9]*) //' | tr '|' '/' | cut -c1-160)
+}
+gl_ssl_error() { case "$1" in 35|51|53|58|59|60|77|80|82|83|90|91) return 0;; esac; return 1; }
+gl_robots_blocks() {  # robots.txt → gelukt als alle zoekmachines overal geweerd worden
+  awk '{ l = tolower($0); sub(/#.*/, "", l); gsub(/\r/, "", l) }
+    l ~ /^[ \t]*user-agent[ \t]*:/ { v = l; sub(/^[^:]*:[ \t]*/, "", v); sub(/[ \t]+$/, "", v); if (!ua) star = 0; ua = 1; if (v == "*") star = 1; next }
+    l ~ /^[ \t]*disallow[ \t]*:[ \t]*\/[ \t]*$/ { ua = 0; if (star) b = 1; next }
+    l ~ /^[ \t]*[a-z-]+[ \t]*:/ { ua = 0 }
+    END { exit !b }' "$1"
+}
+gl_old_host() {  # vorige host na domein omzetten (of van de bewaarde oude server na verhuizen)
+  local d f="" o
+  d=("$BACKUPS/$SLUG"/*-domain)
+  [ -f "${d[-1]}/meta" ] && f=$(sed -n 's/^from=//p' "${d[-1]}/meta" | tail -1)
+  if [ -z "$f" ]; then o=$(awk -F'|' -v n="$NAME-oud" '$1==n{print $7; exit}' "$DB"); f=$(gl_host_of "$o"); fi
+  if [ -n "$f" ] && [ "$f" != "${GL_HOST:-$LIVEHOST}" ] && valid_host "$f"; then echo "$f"; fi
+  return 0
+}
+gl_db_count() {  # zoekterm → aantal keer in de live database (alleen SSH, via WP-CLI)
+  local n
+  n=$(live_wp search-replace "$1" wpo-golive.invalid --dry-run --all-tables --skip-columns=guid --skip-plugins --skip-themes --format=count 2>/dev/null | tr -d '\r' | tail -1) || true
+  [[ "$n" =~ ^[0-9]+$ ]] && echo "$n" || echo "?"
+}
+
+# feiten van live verzamelen; zet GL_HOST (hoofdadres) en GL_LIVE_ERR
+gl_collect() {  # [mail-adres]
+  local php env
+  GL_LIVE_ERR=""
+  if is_laravel; then
+    env=$(live_env_file || true)
+    printf '%s\n' "$env" > "$GL_DIR/env"
+    [ -n "$env" ] || GL_LIVE_ERR="kon de .env op live niet lezen"
+    GL_HOST=$(gl_host_of "$(sed -n 's/^APP_URL=//p' "$GL_DIR/env" | head -1 | tr -d "\"' \r")")
+  else
+    php="$GOLIVE_PHP"
+    [ "$MODE" = sftp ] && php+=$'\n'"$GOLIVE_COUNT_PHP"
+    [ -n "${1:-}" ] && php+=$'\n'"${GOLIVE_MAIL_PHP//__MAILTO__/$1}"
+    live_eval "$php" > "$GL_DIR/facts" 2>"$GL_DIR/facts-err" \
+      || GL_LIVE_ERR=$(grep -v '^\s*$' "$GL_DIR/facts-err" | head -1 | sed 's/^✗ //' | tr '|' '/' | cut -c1-160)
+    [ -n "$(gl_fact siteurl)" ] || GL_LIVE_ERR="${GL_LIVE_ERR:-WordPress op live gaf geen antwoord}"
+    GL_HOST=$(gl_host_of "$(gl_fact siteurl)")
+  fi
+  GL_HOST="${GL_HOST:-$LIVEHOST}"
+  if gl_has_domain; then
+    gl_fetch "https://$GL_HOST/" "$GL_DIR/home"
+    GL_HOME_RC=$GL_RC GL_HOME_ERR=$GL_ERR
+  fi
+}
+gl_has_domain() { [ -n "$GL_HOST" ] && ! [[ "$GL_HOST" =~ ^[0-9.]+$ ]]; }
+
+gl_check_search() {
+  local l="Zichtbaar voor zoekmachines" bp robots=""
+  if is_laravel; then echo "search|skip|$l|niet van toepassing (Laravel)"; return 0; fi
+  if gl_has_domain; then
+    gl_fetch "https://$GL_HOST/robots.txt" "$GL_DIR/robots"
+    if [ "$GL_CODE" = 200 ] && gl_robots_blocks "$GL_DIR/robots"; then robots=1; fi
+  fi
+  bp=$(gl_fact blog_public)
+  if [ -n "$GL_LIVE_ERR" ]; then echo "search|fail|$l|niet te controleren: $GL_LIVE_ERR"
+  elif [ "$bp" = 0 ]; then echo "search|fail|$l|'Zoekmachines ontmoedigen' staat aan (Instellingen → Lezen)${robots:+, en robots.txt weert alle zoekmachines}"
+  elif [ -n "$robots" ]; then echo "search|fail|$l|robots.txt weert alle zoekmachines (Disallow: /). Pas robots.txt aan in de hoofdmap of in je SEO-plugin"
+  else echo "search|ok|$l|zoekmachines mogen de site indexeren"; fi
+}
+gl_check_debug() {
+  local l="Debugmodus uit" dbg public="" v e
+  if is_laravel; then
+    v=$(sed -n 's/^APP_DEBUG=//p' "$GL_DIR/env" | head -1 | tr -d "\"' \r" | tr 'A-Z' 'a-z')
+    e=$(sed -n 's/^APP_ENV=//p' "$GL_DIR/env" | head -1 | tr -d "\"' \r")
+    if [ -n "$GL_LIVE_ERR" ]; then echo "debug|fail|$l|niet te controleren: $GL_LIVE_ERR"
+    elif [ "$v" = true ] || [ "$v" = 1 ]; then echo "debug|fail|$l|APP_DEBUG staat aan in de .env op live: bij een fout zien bezoekers code en instellingen. Zet APP_DEBUG=false"
+    elif [ "$e" != production ]; then echo "debug|warn|$l|APP_ENV is '${e:-leeg}' in plaats van production. Zet APP_ENV=production in de .env op live"
+    else echo "debug|ok|$l|APP_DEBUG=false en APP_ENV=production"; fi
+    return 0
+  fi
+  if gl_has_domain; then
+    gl_fetch "https://$GL_HOST/wp-content/debug.log"
+    if [ "$GL_CODE" = 200 ] && [[ "$GL_TYPE" != text/html* ]]; then public=1; fi
+  fi
+  dbg=$(gl_fact wp_debug)
+  if [ -n "$GL_LIVE_ERR" ]; then echo "debug|fail|$l|niet te controleren: $GL_LIVE_ERR"
+  elif [ "$dbg" = 1 ]; then
+    echo "debug|fail|$l|WP_DEBUG staat aan op live$([ "$(gl_fact debug_display)" = 1 ] && echo ': bezoekers kunnen foutmeldingen zien')${public:+. Ook is /wp-content/debug.log voor iedereen te downloaden}"
+  elif [ -n "$public" ]; then echo "debug|fail|$l|WP_DEBUG staat uit, maar /wp-content/debug.log is voor iedereen te downloaden. Verwijder dat bestand op live"
+  else echo "debug|ok|$l|WP_DEBUG staat uit"; fi
+}
+gl_check_mail() {  # [mail-adres]
+  local l="Mail versturen" to="${1:-}" plugin res err
+  if is_laravel; then echo "mail|skip|$l|niet van toepassing (Laravel)"; return 0; fi
+  plugin=$(gl_fact mail_plugin); res=$(gl_fact mail); err=$(gl_fact mail_error)
+  if [ -n "$GL_LIVE_ERR" ]; then echo "mail|fail|$l|niet te controleren: $GL_LIVE_ERR"
+  elif [ -n "$to" ] && [ "$res" = ok ] && [ -n "$plugin" ]; then echo "mail|ok|$l|testmail verstuurd naar $to via $plugin. Kijk of hij aankomt (ook in de spam)"
+  elif [ -n "$to" ] && [ "$res" = ok ]; then echo "mail|warn|$l|testmail verstuurd naar $to, maar zonder SMTP-plugin: zulke mail belandt vaak in de spam. Installeer bijvoorbeeld WP Mail SMTP of FluentSMTP"
+  elif [ -n "$to" ]; then echo "mail|fail|$l|testmail naar $to mislukt${plugin:+ via $plugin}: ${err:-WordPress gaf geen foutmelding}"
+  elif [ -n "$plugin" ]; then echo "mail|warn|$l|$plugin is actief. Stuur een testmail om te zien of mail echt aankomt"
+  else echo "mail|fail|$l|geen SMTP-plugin actief: mail van formulieren komt vaak in de spam of helemaal niet aan. Installeer bijvoorbeeld WP Mail SMTP of FluentSMTP"; fi
+}
+gl_check_local_urls() {
+  local l="Geen lokale adressen" db html=0 old odb=0 ohtml=0 found=()
+  if is_laravel; then echo "local-urls|skip|$l|niet van toepassing (Laravel)"; return 0; fi
+  if [ -n "$GL_LIVE_ERR" ]; then echo "local-urls|fail|$l|niet te controleren: $GL_LIVE_ERR"; return 0; fi
+  old=$(gl_old_host)
+  if [ "$MODE" = sftp ]; then db=$(gl_fact local_urls); [[ "$db" =~ ^[0-9]+$ ]] || db="?"
+  else
+    db=$(gl_db_count ddev.site)
+    if [ -n "$old" ]; then
+      local a b; a=$(gl_db_count "//$old"); b=$(gl_db_count "\\/\\/$old")
+      [[ "$a$b" =~ ^[0-9]+$ ]] && odb=$((a + b))
+    fi
+  fi
+  if [ -f "$GL_DIR/home" ]; then
+    html=$(gl_count_in ddev.site "$GL_DIR/home")
+    [ -n "$old" ] && ohtml=$(gl_count_in "//$old" "$GL_DIR/home")
+  fi
+  [ "$db" != "?" ] && [ "$db" -gt 0 ] && found+=("${db}× een lokaal adres (.ddev.site) in de database")
+  [ "${html:-0}" -gt 0 ] && found+=("${html}× .ddev.site in de homepage")
+  [ "$odb" -gt 0 ] && found+=("${odb}× het oude adres $old in de database")
+  [ "${ohtml:-0}" -gt 0 ] && found+=("${ohtml}× het oude adres $old in de homepage")
+  if [ ${#found[@]} -gt 0 ]; then
+    local IFS=';'; echo "local-urls|fail|$l|$(sed 's/;/; /g' <<<"${found[*]}")"
+  elif [ "$db" = "?" ]; then echo "local-urls|warn|$l|de database kon niet doorzocht worden; de homepage bevat geen lokale adressen"
+  else echo "local-urls|ok|$l|geen .ddev.site-adressen${old:+ of $old} in de database en op de homepage"; fi
+}
+gl_check_https() {
+  local l="HTTPS werkt"
+  if ! gl_has_domain; then echo "https|skip|$l|geen domein bekend: vul het live-adres in bij de gegevens van de site"; return 0; fi
+  if [ "$GL_HOME_RC" = 6 ]; then echo "https|fail|$l|$GL_HOST heeft (nog) geen DNS-record"; return 0; fi
+  if gl_ssl_error "$GL_HOME_RC"; then echo "https|fail|$l|geen geldig certificaat voor $GL_HOST: $GL_HOME_ERR. Zet SSL aan bij je hosting"; return 0; fi
+  if [ "$GL_HOME_RC" != 0 ]; then echo "https|fail|$l|https://$GL_HOST niet bereikbaar: $GL_HOME_ERR"; return 0; fi
+  if ! is_laravel && [[ "$(gl_fact siteurl)" == http://* ]]; then echo "https|fail|$l|het certificaat werkt, maar WordPress gebruikt nog http:// (Instellingen → Algemeen)"; return 0; fi
+  gl_fetch "http://$GL_HOST/"
+  if [[ "$GL_URL" == https://* ]]; then echo "https|ok|$l|geldig certificaat, en http:// stuurt door naar https://"
+  else echo "https|warn|$l|het certificaat werkt, maar http://$GL_HOST stuurt niet door naar https://. Zet 'HTTPS forceren' aan bij je hosting"; fi
+}
+gl_check_www() {
+  local l="www en zonder www" v final
+  if ! gl_has_domain; then echo "www|skip|$l|geen domein bekend"; return 0; fi
+  case "$GL_HOST" in *.tempurl.host|*.wpmudev.host|*.hostingersite.com|*.ddev.site) echo "www|skip|$l|tijdelijk adres"; return 0;; esac
+  if [[ "$GL_HOST" == www.* ]]; then v="${GL_HOST#www.}"; else v="www.$GL_HOST"; fi
+  gl_fetch "https://$v/"
+  if [ "$GL_RC" = 6 ]; then echo "www|warn|$l|$v heeft geen DNS-record. Voeg er een toe en stel een doorverwijzing in naar $GL_HOST, dan komen bezoekers die $v typen ook op de site"; return 0; fi
+  if gl_ssl_error "$GL_RC"; then
+    gl_fetch "http://$v/"
+    if [ "$GL_RC" = 0 ] && [ "$(gl_host_of "$GL_URL")" = "$GL_HOST" ]; then
+      echo "www|warn|$l|$v stuurt door naar $GL_HOST, maar het certificaat dekt $v niet: via https krijgen bezoekers een waarschuwing. Vraag je hosting om SSL voor $v"
+    else echo "www|fail|$l|$v heeft geen geldig certificaat en stuurt niet door naar $GL_HOST. Stel bij je hosting een doorverwijzing in van $v naar $GL_HOST"; fi
+    return 0
+  fi
+  if [ "$GL_RC" != 0 ]; then echo "www|warn|$l|$v niet bereikbaar: $GL_ERR"; return 0; fi
+  final=$(gl_host_of "$GL_URL")
+  if [ "$final" = "$GL_HOST" ] && [ "${GL_REDIRECTS:-0}" -gt 0 ]; then echo "www|ok|$l|$v stuurt door naar $GL_HOST"
+  elif [ "${GL_REDIRECTS:-0}" -eq 0 ]; then echo "www|fail|$l|$v toont de site zonder door te sturen (HTTP $GL_CODE), dus zoekmachines zien twee kopieën. Stel bij je hosting een doorverwijzing in van $v naar $GL_HOST"
+  else echo "www|fail|$l|$v stuurt door naar $final in plaats van $GL_HOST"; fi
+}
+gl_check_sitemap() {
+  local l="Sitemap" p paths=(/wp-sitemap.xml /sitemap_index.xml /sitemap.xml)
+  if ! gl_has_domain; then echo "sitemap|skip|$l|geen domein bekend"; return 0; fi
+  is_laravel && paths=(/sitemap.xml /sitemap_index.xml)
+  for p in "${paths[@]}"; do
+    gl_fetch "https://$GL_HOST$p" "$GL_DIR/sitemap"
+    if [ "$GL_CODE" = 200 ] && grep -qE '<(urlset|sitemapindex)' "$GL_DIR/sitemap" 2>/dev/null; then
+      echo "sitemap|ok|$l|gevonden: $GL_URL"; return 0
+    fi
+  done
+  if is_laravel; then echo "sitemap|warn|$l|geen sitemap op /sitemap.xml. Handig voor Google, bijvoorbeeld met spatie/laravel-sitemap"
+  else echo "sitemap|fail|$l|geen sitemap gevonden. Zet de sitemap aan in je SEO-plugin$([ "$(gl_fact blog_public)" = 0 ] && echo "; zolang 'zoekmachines ontmoedigen' aan staat, zet WordPress hem zelf uit")"; fi
+}
+
+gl_fix() {  # onderdeel
+  is_laravel && die "Repareren vanuit de checklist kan alleen bij WordPress-sites."
+  local old
+  case "$1" in
+    search)
+      step "Zoekmachines toelaten op live…"
+      live_eval "update_option('blog_public', '1'); echo \"ok\\n\";" >/dev/null || die "Aanzetten mislukt. Zet het zelf uit in WP-admin: Instellingen → Lezen."
+      flush_live >/dev/null || true
+      ok "Zoekmachines mogen de site weer indexeren";;
+    debug)
+      [ "$MODE" = ssh ] || die "WP_DEBUG uitzetten kan alleen bij SSH-sites. Zet hem zelf op false in wp-config.php."
+      step "WP_DEBUG uitzetten op live…"
+      live_wp config set WP_DEBUG false --raw --type=constant >/dev/null || die "WP_DEBUG uitzetten mislukt. Zet hem zelf op false in wp-config.php."
+      ok "WP_DEBUG staat uit";;
+    local-urls)
+      [ "$MODE" = ssh ] || die "Adressen omzetten kan alleen bij SSH-sites. Verhuis opnieuw om de database te vervangen."
+      valid_host "$LIVEHOST" || die "Geen live-domein bekend: vul het live-adres in bij de gegevens van de site."
+      old=$(GL_HOST="$LIVEHOST" gl_old_host)
+      new_backup go-live; meta fix local-urls
+      backup_live_db || die "Kon eerst geen back-up van de live database maken; niets veranderd."
+      step "Lokale adressen omzetten naar $LIVEHOST…"
+      live_wp search-replace "//$SLUG.ddev.site" "//$LIVEHOST" --all-tables --skip-columns=guid >/dev/null
+      live_wp search-replace "\\/\\/$SLUG.ddev.site" "\\/\\/$LIVEHOST" --all-tables --skip-columns=guid >/dev/null
+      if [ -n "$old" ]; then
+        step "Oude adressen omzetten: $old → $LIVEHOST…"
+        live_wp search-replace "//$old" "//$LIVEHOST" --all-tables --skip-columns=guid >/dev/null
+        live_wp search-replace "\\/\\/$old" "\\/\\/$LIVEHOST" --all-tables --skip-columns=guid >/dev/null
+      fi
+      flush_live || true
+      ok "Adressen omgezet (back-up: $(basename "$BK"))";;
+  esac
+}
+
+cmd_golive() {
+  [ $# -ge 1 ] || die "Gebruik: wpopen golive <naam> [--json] [--mail-to adres] [--fix search|debug|local-urls]"
+  get "$1"; need_live; shift
+  local json=0 to="" fix=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --json) json=1;;
+      --mail-to) to="${2:-}"; shift;;
+      --fix) fix="${2:-}"; shift;;
+      *) die "Onbekende optie: $1";;
+    esac; shift
+  done
+  # het adres komt letterlijk in PHP terecht: alleen gewone tekens
+  [ -z "$to" ] || [[ "$to" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$ ]] || die "Ongeldig e-mailadres: $to"
+  case "$fix" in ""|search|debug|local-urls) ;; *) die "Onbekend onderdeel '$fix'. Kies search, debug of local-urls.";; esac
+  is_laravel && [ -n "$to" ] && die "Een testmail sturen kan alleen bij WordPress-sites."
+  [ -z "$fix" ] || gl_fix "$fix"
+
+  GL_DIR=$(mktemp -d)
+  [ "$json" = 1 ] || step "Go-live-checklist voor $NAME…"
+  gl_collect "$to"
+  {
+    gl_check_search; gl_check_debug; gl_check_mail "$to"; gl_check_local_urls
+    gl_check_https; gl_check_www; gl_check_sitemap
+  } | checks_out "$json"
+  rm -rf "$GL_DIR"
+}
 
 # ───────────── live zetten ─────────────
 deploy_base() {  # laatst bekende live-staat
