@@ -52,7 +52,12 @@ describe('wpopen multisite', function (): void {
         $site = json_decode($this->server->run(['info', 'nieuw', '--json'])->output(), true);
 
         expect($result->successful())->toBeTrue($result->errorOutput())
-            ->and($this->server->calls())->toContain("wpmu_create_blog('winkel.nieuw.ddev.site', '/'", 'ddev restart')
+            ->and($this->server->calls())->toContain(
+                "wpmu_create_blog('winkel.nieuw.ddev.site', '/'",
+                'ddev wp theme activate enfold --url=winkel.nieuw.ddev.site',
+                'ddev wp plugin activate forminator wpmudev-updates --url=winkel.nieuw.ddev.site',
+                'ddev restart',
+            )
             ->and(file_get_contents($this->project.'/.ddev/config.wpopen-multisite.yaml'))->toContain("additional_fqdns:\n  - winkel.nieuw.ddev.site\n  - klant2.test\n")
             ->and($site['subsites'])->toBe([
                 ['id' => 2, 'url' => 'https://winkel.nieuw.ddev.site'],

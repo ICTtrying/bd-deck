@@ -57,7 +57,7 @@
 #
 #   Algemeen: --yes slaat bevestigingsvragen over (de app vraagt zelf om bevestiging).
 set -euo pipefail
-WPO_VERSION="2.10.0"
+WPO_VERSION="2.11.0"
 DB="${WPO_DB:-$HOME/.config/wpsites/sites}"; mkdir -p "$(dirname "$DB")"; touch "$DB"
 BASE="${WP_SITES_DIR:-$HOME/wp-sites}"
 BACKUPS="${WPO_BACKUP_DIR:-$BASE/.wpopen-backups}"
@@ -2049,7 +2049,8 @@ PHP
   grep -q 'wpopen-multisite' "$f" || die "Kon wp-config.php niet aanpassen voor multisite."
 }
 cmd_multisite() {
-  local name="" add="" remove="" host id
+  local name="" add="" remove="" host id theme
+  local -a plugins=()
   while [ $# -gt 0 ]; do case "$1" in --add) add="${2:-}"; shift;; --remove) remove="${2:-}"; shift;; -*) die "Onbekende optie: $1";; *) name="$1";; esac; shift; done
   [ -n "$name" ] || die "Gebruik: wpopen multisite <naam> [--add adres] [--remove id]"
   need ddev; get "$name"; need_wordpress
@@ -2079,6 +2080,16 @@ cmd_multisite() {
       --skip-plugins --skip-themes 2>&1 | tr -d '\r' | tail -1 || true)
     [[ "$id" =~ ^[0-9]+$ ]] || die "Subsite maken mislukt${id:+: ${id#fout: }}"
     ok "Subsite $id staat op https://$host"
+    # WordPress geeft een nieuwe subsite het standaardthema en geen plugins; neem die van de hoofdsite over
+    theme=$(ddev wp option get stylesheet --url="$SLUG.ddev.site" --skip-plugins --skip-themes 2>/dev/null | tr -d '\r' | tail -1 || true)
+    if [[ "$theme" =~ ^[A-Za-z0-9._-]+$ ]]; then
+      ddev wp theme activate "$theme" --url="$host" >/dev/null 2>&1 && ok "Thema $theme actief op $host" || warn "Kon thema $theme niet op $host zetten"
+    fi
+    mapfile -t plugins < <(ddev wp plugin list --status=active --field=name --url="$SLUG.ddev.site" --skip-themes 2>/dev/null | tr -d '\r' | grep -E '^[A-Za-z0-9._-]+$' || true)
+    if [ ${#plugins[@]} -gt 0 ]; then
+      ddev wp plugin activate "${plugins[@]}" --url="$host" >/dev/null 2>&1 && ok "Plugins van de hoofdsite actief op $host: ${plugins[*]}" \
+        || warn "Niet alle plugins van de hoofdsite konden aan op $host"
+    fi
   fi
   if [ -n "$remove" ]; then
     [[ "$remove" =~ ^[0-9]+$ ]] && [ "$remove" != 1 ] || die "Ongeldige subsite: $remove (de hoofdsite kan niet weg)."

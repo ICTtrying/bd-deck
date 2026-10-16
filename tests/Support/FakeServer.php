@@ -96,6 +96,8 @@ final class FakeServer
               *"multisite-convert"*) echo "define( 'MULTISITE', true );" >> wp-config.php;;
               *"site list"*) printf '%b' "${FAKE_SITE_LIST:-blog_id,domain\n1,nieuw.ddev.site\n}";;
               *wpmu_create_blog*) echo "${FAKE_NEW_BLOG_ID:-2}";;
+              *"option get stylesheet"*) echo "enfold";;
+              *"plugin list --status=active"*) printf 'forminator\nwpmudev-updates\n';;
               *"search-replace"*)
                 for a in "$@"; do case "$a" in --export=*) printf 'DROP TABLE IF EXISTS `lokaal_options`;\nINSERT INTO `lokaal_options` VALUES (1,\x27siteurl\x27,\x27https://nieuw.example.test\x27);\n' > "${a#--export=}";; esac; done;;
               # pakketbeheer: de test bepaalt via de omgeving wat er "verandert" of mislukt
