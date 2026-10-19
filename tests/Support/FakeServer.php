@@ -269,9 +269,183 @@ final class FakeServer
         File::deleteDirectory($this->root);
     }
 
+    /**
+     * Voor `wpopen safe-update`: lokaal bijwerken, pagina's opvragen en PHP-fouten in `ddev logs`, plus SFTP via lftp.
+     * De bestaande nep-ddev, -wp en -curl blijven het vangnet; deze laag handelt alleen af wat updates nodig hebben.
+     * Een bestand met FATAL in een plugin of thema laat pagina's een 500 geven (lokaal ook met een PHP-fout in de log);
+     * KAPOT_OP_LIVE doet dat alleen op live.
+     *
+     * @param  array{core?: list<array<string, mixed>>, plugins?: list<array<string, mixed>>, themes?: list<array<string, mixed>>}  $updates
+     */
+    public function fakeWordPressUpdates(array $updates): void
+    {
+        $this->setAvailableUpdates($updates);
+        File::ensureDirectoryExists($this->sites.'/demo');
+        file_put_contents($this->sites.'/demo/wp-config.php', "<?php\n\$table_prefix = 'wp_';\n");
+
+        foreach (['ddev', 'wp', 'curl'] as $name) {
+            if (! is_file($this->bin.'/'.$name.'-base')) {
+                rename($this->bin.'/'.$name, $this->bin.'/'.$name.'-base');
+            }
+        }
+
+        $this->stub('ddev', <<<'BASH'
+            #!/usr/bin/env bash
+            root='__ROOT__'
+            proj=$PWD
+            while [ "$proj" != / ] && [ ! -f "$proj/.wpopen-ready" ]; do proj=$(dirname "$proj"); done
+            wpc="$proj/wp-content"
+            case "$*" in
+              logs*) cat "$root/web.log" 2>/dev/null; exit 0;;
+              *"option get siteurl"*) echo "https://$(basename "$proj").ddev.site"; exit 0;;
+              *'"wpo-" . "ok"'*) echo "wpo-ok"; exit 0;;
+              *"post list"*) echo "https://$(basename "$proj").ddev.site/over-ons/"; exit 0;;
+              *"plugin list --fields=name,version"*)
+                echo "name,version"
+                for d in "$wpc"/plugins/*/; do echo "$(basename "$d"),$(cat "$d"*.php 2>/dev/null | sed -nE 's/.*Version: *([0-9.]+).*/\1/p' | sed -n 1p)"; done
+                exit 0;;
+              *"theme list --fields=name,version"*)
+                echo "name,version"
+                for d in "$wpc"/themes/*/; do echo "$(basename "$d"),$(sed -nE 's/.*Version: *([0-9.]+).*/\1/p' "$d/style.css" 2>/dev/null | sed -n 1p)"; done
+                exit 0;;
+              *"core update-db"*) echo "ddev $*" >> "$FAKE_LOG"; exit 0;;
+              *"core update"*)
+                echo "ddev $*" >> "$FAKE_LOG"
+                for a in "$@"; do case "$a" in --version=*) echo "${a#--version=}" > "$proj/.fake-core";; esac; done
+                exit 0;;
+              *"core version"*) cat "$proj/.fake-core" 2>/dev/null || echo "6.8.1"; exit 0;;
+              "wp plugin update "*|"wp theme update "*)
+                echo "ddev $*" >> "$FAKE_LOG"
+                package="$root/packages/$2s/$4"
+                [ -d "$package" ] || { echo "Error: geen update voor $4" >&2; exit 1; }
+                rm -rf "$wpc/$2s/$4"; cp -a "$package" "$wpc/$2s/$4"
+                # iemand past live aan terwijl de update loopt
+                if [ -n "${FAKE_LIVE_CHANGE:-}" ]; then echo "<?php // hotfix" > "$root/server/public_html/wp-content/$FAKE_LIVE_CHANGE"; fi
+                echo "Success: Updated 1 of 1 $2s."; exit 0;;
+              export-db*)
+                for a in "$@"; do case "$a" in --file=*) echo "lokale database" | gzip > "${a#--file=}";; esac; done
+                exit 0;;
+              import-db*) echo "ddev $*" >> "$FAKE_LOG"; cat > /dev/null; exit 0;;
+            esac
+            exec "$(dirname "$0")/ddev-base" "$@"
+            BASH);
+
+        $this->stub('wp', <<<'BASH'
+            #!/usr/bin/env bash
+            root='__ROOT__'
+            case "$*" in
+              *wp_update_plugins*) echo "wp eval (updates)" >> "$FAKE_LOG"; cat "$root/updates.json"; echo; exit 0;;
+              *"core update-db"*) echo "wp $*" >> "$FAKE_LOG"; exit 0;;
+              *"core update"*)
+                echo "wp $*" >> "$FAKE_LOG"
+                for a in "$@"; do case "$a" in --version=*) echo "${a#--version=}" > "$root/server/core-version";; esac; done
+                exit 0;;
+              *"core version"*) cat "$root/server/core-version" 2>/dev/null || echo "6.8.1"; exit 0;;
+            esac
+            exec "$(dirname "$0")/wp-base" "$@"
+            BASH);
+
+        // nooit echt netwerk: lokale en live pagina's worden beantwoord vanuit de bestanden van de site
+        $this->stub('curl', <<<'BASH'
+            #!/usr/bin/env bash
+            root='__ROOT__'
+            url=""; out=""; post=0
+            while [ $# -gt 0 ]; do
+              case "$1" in
+                -o) out="$2"; shift;;
+                -d) post=1; shift;;
+                -w|-b|-c|--max-time|--max-redirs) shift;;
+                http*) url="$1";;
+              esac
+              shift
+            done
+            echo "curl $url" >> "$FAKE_LOG"
+            if [[ "$url" == *.ddev.site* ]]; then
+              host="${url#*//}"; host="${host%%/*}"; dir="$root/home/wp-sites/${host%.ddev.site}/wp-content"; markers=(-e FATAL)
+            else
+              dir="$root/server/public_html/wp-content"; markers=(-e FATAL -e KAPOT_OP_LIVE)
+            fi
+            # tijdelijk PHP-bestand van live_php (sites met alleen SFTP)
+            if [ $post = 1 ]; then
+              name="${url##*/}"
+              { if grep -qs wp_update_plugins "$root/server/public_html/$name"; then cat "$root/updates.json"; echo; else echo "✓ Cache geleegd (0 transients)"; fi
+                echo "-- wpopen-done"; } > "${out:-/dev/stdout}"
+              printf 200; exit 0
+            fi
+            broken=$(grep -rlsF "${markers[@]}" "$dir/plugins" "$dir/themes" | sed -n 1p)
+            if [ -n "$broken" ]; then
+              if [[ "$url" == *.ddev.site* ]]; then
+                echo "$(date -u +%Y-%m-%dT%H:%M:%S.%NZ) [pool www] child 12 said into stderr: \"PHP Fatal error:  Uncaught Error: Call to undefined function nieuw() in /var/www/html/wp-content/${broken#$dir/}:3\"" >> "$root/web.log"
+              fi
+              printf 500; exit 0
+            fi
+            if [[ "$url" == *.ddev.site* ]] && grep -rqsF WARNING "$dir/plugins" "$dir/themes"; then
+              echo "$(date -u +%Y-%m-%dT%H:%M:%S.%NZ) PHP Warning:  Undefined variable \$x in /var/www/html/wp-content/plugins/x.php on line 4" >> "$root/web.log"
+            fi
+            printf 200
+            BASH);
+
+        $this->stub('lftp', <<<'BASH'
+            #!/usr/bin/env bash
+            [ "$1" = -f ] || exit 1
+            lcd=$PWD; rc=0
+            while IFS= read -r line; do
+              [ -n "$line" ] || continue
+              eval "set -- $line"
+              cmd=$1; shift
+              case "$cmd" in set|open) continue;; esac
+              echo "lftp $cmd $*" >> "$FAKE_LOG"
+              case "$cmd" in
+                lcd) lcd="$1";;
+                mkdir) mkdir -p "${!#}";;
+                put) f="$3"; [[ "$f" = /* ]] || f="$lcd/$f"; mkdir -p "$2"; cp "$f" "$2/" || rc=1;;
+                get) mkdir -p "$2"; cp "$3" "$2/" 2>/dev/null || rc=1;;
+                rm) rm -f "${!#}";;
+                cat) cat "$1" 2>/dev/null || rc=1;;
+                cls) ls -1 "${!#}" || rc=1;;
+                mirror)
+                  paths=()
+                  while [ $# -gt 0 ]; do case "$1" in -x) shift;; -*) ;; *) paths+=("$1");; esac; shift; done
+                  mkdir -p "${paths[1]}"; cp -a "${paths[0]}/." "${paths[1]}/" 2>/dev/null || rc=1;;
+              esac
+            done < "$2"
+            exit $rc
+            BASH);
+    }
+
+    /**
+     * @param  array{core?: list<array<string, mixed>>, plugins?: list<array<string, mixed>>, themes?: list<array<string, mixed>>}  $updates
+     */
+    public function setAvailableUpdates(array $updates): void
+    {
+        file_put_contents($this->root.'/updates.json', json_encode(['core' => [], 'plugins' => [], 'themes' => [], ...$updates]));
+    }
+
+    /**
+     * Nieuwe versie van een plugin of thema, zoals wordpress.org hem zou leveren.
+     *
+     * @param  'plugins'|'themes'  $kind
+     * @param  array<string, string>  $files
+     */
+    public function addPackage(string $kind, string $slug, array $files): void
+    {
+        foreach ($files as $path => $contents) {
+            File::ensureDirectoryExists(dirname($this->root."/packages/{$kind}/{$slug}/{$path}"));
+            file_put_contents($this->root."/packages/{$kind}/{$slug}/{$path}", $contents);
+        }
+    }
+
+    /**
+     * De site heeft alleen SFTP: alles gaat via lftp en tijdelijke PHP-bestanden.
+     */
+    public function useSftp(): void
+    {
+        file_put_contents($this->home.'/.config/wpsites/sites', str_replace('|ssh|', '|sftp|', $this->sitesFile()));
+    }
+
     private function stub(string $name, string $script): void
     {
-        file_put_contents($this->bin.'/'.$name, $script."\n");
+        file_put_contents($this->bin.'/'.$name, str_replace('__ROOT__', $this->root, $script)."\n");
         chmod($this->bin.'/'.$name, 0755);
     }
 }

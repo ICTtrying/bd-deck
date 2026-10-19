@@ -133,4 +133,18 @@ class CommandRun extends Model
 
         return $line === null ? null : trim($line);
     }
+
+    /**
+     * Update die bij "veilig bijwerken" de fout gaf ('core', 'plugin:slug' of 'theme:slug'), zodat je zonder kunt herhalen.
+     */
+    public function culprit(): ?string
+    {
+        if ($this->action !== WpOpenAction::SafeUpdate) {
+            return null;
+        }
+
+        $item = Str::of($this->output ?? '')->match('/^WPO_CULPRIT=(core|(?:plugin|theme):[A-Za-z0-9._-]+)$/m')->toString();
+
+        return $item !== '' ? $item : null;
+    }
 }

@@ -148,6 +148,45 @@ final readonly class WpOpenCommand
     }
 
     /**
+     * WordPress: live ophalen, lokaal bijwerken, pagina's controleren en pas daarna live zetten met back-up.
+     * Zonder $only gaan alle beschikbare updates mee; met $live = false wordt alleen lokaal getest.
+     *
+     * @param  list<string>  $only  'core', 'plugin:slug' of 'theme:slug'
+     */
+    public static function safeUpdate(Site $site, array $only = [], bool $live = true, bool $force = false): self
+    {
+        if ($site->isLaravel()) {
+            throw new InvalidArgumentException(__('Veilig bijwerken kan alleen bij WordPress-sites; gebruik bij Laravel Pakketten bijwerken.'));
+        }
+
+        if ($site->isLocalOnly()) {
+            throw new InvalidArgumentException(__('Deze site heeft nog geen live-server.'));
+        }
+
+        $arguments = ['safe-update', $site->name];
+
+        foreach (array_unique($only) as $item) {
+            if (! preg_match('/^(core|(plugin|theme):[A-Za-z0-9._-]+)$/', $item)) {
+                throw new InvalidArgumentException(__('Ongeldige update: :item', ['item' => $item]));
+            }
+
+            array_push($arguments, '--only', $item);
+        }
+
+        if (! $live) {
+            $arguments[] = '--no-live';
+        }
+
+        if ($force) {
+            $arguments[] = '--force';
+        }
+
+        $arguments[] = '--yes';
+
+        return new self(WpOpenAction::SafeUpdate, $arguments, $site);
+    }
+
+    /**
      * Laravel: back-up, Composer- en npm-pakketten bijwerken en committen op dev; met $live ook meteen live zetten.
      * Met $major gaan ook nieuwe hoofdversies mee (bv. Laravel 12 naar 13), anders blijft alles binnen composer.json en package.json.
      * Met $packages ('composer:naam' of 'npm:naam') worden alleen die pakketten bijgewerkt, ook bij een hoofdversie.
