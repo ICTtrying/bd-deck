@@ -652,7 +652,7 @@ describe('Laravel', function (): void {
         $this->server->run(['fix', 'shop'])->throw();
         $env = file_get_contents($site['local'].'/.env');
 
-        expect($env)->toContain("APP_URL=https://shop.ddev.site\n", "DB_HOST=db\n", "DB_PASSWORD=db\n", "APP_ENV=local\n", 'MAIL_MAILER=log', "STRIPE_SECRET=\n")
+        expect($env)->toContain("APP_URL=https://shop.ddev.site\n", "DB_HOST=db\n", "DB_PASSWORD=db\n", "APP_ENV=local\n", "MAIL_MAILER=smtp\n", "MAIL_HOST=127.0.0.1\n", "MAIL_PORT=1025\n", "STRIPE_SECRET=\n")
             ->not->toContain('sk_live_123')
             ->not->toContain('geheim wachtwoord')
             ->and(fileperms($site['local'].'/.env') & 0777)->toBe(0600);

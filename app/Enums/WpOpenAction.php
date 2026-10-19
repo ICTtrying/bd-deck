@@ -95,7 +95,7 @@ enum WpOpenAction: string
             self::Updates, self::Upgrade => 'refresh',
             self::SafeUpdate => 'shield',
             self::GoLive => 'flag',
-            self::Share => 'external',
+            self::Share => 'share',
             self::CacheLocal, self::CacheLive => 'zap',
             self::WpCli, self::Artisan => 'terminal',
             self::AddSite, self::Import, self::NewSite, self::ImportSites => 'plus',
