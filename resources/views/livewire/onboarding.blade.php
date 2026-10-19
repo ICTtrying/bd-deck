@@ -112,10 +112,12 @@
                 <div class="grid gap-0.5">
                     <h2 class="text-[0.9375rem] font-semibold">{{ __('Je eerste site') }}</h2>
                     <p class="text-[0.8125rem] text-muted">{{ __('Koppel een bestaande site, of begin lokaal en zet hem later met één knop live. Werkt *.ddev.site niet op jouw netwerk? Dan vraagt BD Deck één keer per site je computerwachtwoord om de naam lokaal te registreren.') }}</p>
+                    <p class="text-[0.8125rem] text-muted">{{ __('Werkt een collega al met BD Deck? Laat diegene de sitelijst exporteren (Sites → Meer) en importeer dat bestand hier, dan hoef je niet alles opnieuw in te voeren.') }}</p>
                 </div>
                 <div class="flex flex-wrap gap-2">
                     <x-button variant="primary" icon="plus" :href="route('sites.create')" wire:navigate>{{ __('Bestaande site koppelen') }}</x-button>
                     <x-button icon="laptop" :href="route('sites.create', ['soort' => 'lokaal'])" wire:navigate>{{ __('Nieuwe lokale site') }}</x-button>
+                    <x-button icon="upload" x-on:click="$dispatch('start-site-import')">{{ __('Sitelijst van een collega importeren') }}</x-button>
                     @if ($this->siteCount > 0)
                         <x-button variant="ghost" :href="route('dashboard')" wire:navigate iconRight="chevron-right">{{ __('Naar je sites') }}</x-button>
                     @endif
@@ -123,4 +125,6 @@
             </div>
         </div>
     </x-panel>
+
+    <livewire:site-list-transfer />
 </div>

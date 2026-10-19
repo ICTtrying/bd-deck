@@ -444,6 +444,36 @@ final readonly class WpOpenCommand
         return new self(WpOpenAction::Import, ['import']);
     }
 
+    /**
+     * Sitelijst van een collega; $only zijn de sites die de gebruiker in de voorvertoning heeft aangevinkt.
+     *
+     * @param  list<string>  $only
+     */
+    public static function importSites(string $path, array $only, bool $update = false): self
+    {
+        if (! str_starts_with($path, '/') || str_contains($path, "\0")) {
+            throw new InvalidArgumentException(__('Ongeldig bestand.'));
+        }
+
+        if ($only === []) {
+            throw new InvalidArgumentException(__('Kies minstens één site om te importeren.'));
+        }
+
+        foreach ($only as $name) {
+            if (! preg_match('/^[A-Za-z0-9._-]+$/', $name)) {
+                throw new InvalidArgumentException(__('Ongeldige sitenaam: :name', ['name' => $name]));
+            }
+        }
+
+        $arguments = ['import-sites', $path, ...collect($only)->flatMap(fn (string $name): array => ['--only', $name])->all()];
+
+        if ($update) {
+            $arguments[] = '--update';
+        }
+
+        return new self(WpOpenAction::ImportSites, [...$arguments, '--json']);
+    }
+
     public static function setup(): self
     {
         return new self(WpOpenAction::Setup, ['setup']);
