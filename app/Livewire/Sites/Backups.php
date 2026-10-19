@@ -2,13 +2,20 @@
 
 namespace App\Livewire\Sites;
 
+use App\Enums\OffsiteStatus;
+use App\Exceptions\OffsiteException;
+use App\Jobs\RestoreOffsiteBackup;
 use App\Livewire\Concerns\InteractsWithSites;
+use App\Models\OffsiteBackup;
 use App\Models\Site;
 use App\Services\AppSettings;
 use App\Services\DesktopLauncher;
+use App\Services\Offsite\OffsiteRestorer;
+use App\Services\Offsite\OffsiteSync;
 use App\Services\WpOpen\CommandRunner;
 use App\Services\WpOpen\WpOpen;
 use App\Services\WpOpen\WpOpenCommand;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\File;
 use Illuminate\View\View;
 use Livewire\Attributes\Computed;
@@ -144,7 +151,93 @@ class Backups extends Component
     #[On('sites-changed')]
     public function refreshBackups(): void
     {
-        unset($this->backups);
+        unset($this->backups, $this->cloudBackups);
+    }
+
+    public function offsiteEnabled(): bool
+    {
+        return app(AppSettings::class)->offsite()->enabled;
+    }
+
+    /**
+     * @return Collection<string, OffsiteBackup>
+     */
+    #[Computed]
+    public function cloudBackups(): Collection
+    {
+        return OffsiteBackup::query()->forSite((string) $this->site->data('slug'))->newestFirst()->get()->keyBy('backup_id');
+    }
+
+    /**
+     * Back-ups die alleen in de cloud staan, bijvoorbeeld op een nieuwe laptop.
+     *
+     * @return Collection<int, OffsiteBackup>
+     */
+    public function cloudOnly(): Collection
+    {
+        $local = collect($this->backups)->pluck('id')->all();
+
+        return $this->cloudBackups->filter(fn (OffsiteBackup $backup): bool => $backup->status === OffsiteStatus::Uploaded && ! in_array($backup->backup_id, $local, true))->values();
+    }
+
+    public function cloudStatus(string $backupId): OffsiteStatus
+    {
+        return $this->cloudBackups->get($backupId)?->status ?? OffsiteStatus::Deleted;
+    }
+
+    /**
+     * @return array{state: string, error: ?string}|null
+     */
+    public function restoreState(OffsiteBackup $backup): ?array
+    {
+        return OffsiteRestorer::state($backup->id);
+    }
+
+    /**
+     * Alleen verversen zolang er iets op de achtergrond loopt.
+     */
+    public function isCloudBusy(): bool
+    {
+        if (! $this->offsiteEnabled()) {
+            return false;
+        }
+
+        return $this->cloudBackups->contains(fn (OffsiteBackup $backup): bool => $backup->status->isBusy() || ($this->restoreState($backup)['state'] ?? null) === 'running');
+    }
+
+    public function fetchFromCloud(int $offsiteBackupId): void
+    {
+        $backup = $this->cloudOnly()->firstWhere('id', $offsiteBackupId);
+
+        if ($backup === null) {
+            return;
+        }
+
+        if (! $backup->isEncryptedWith(app(AppSettings::class)->offsite()->keyId)) {
+            $this->dispatch('toast', title: __('Ander versleutelwachtwoord'), message: __('Deze back-up is versleuteld met een eerder wachtwoord. Zet dat wachtwoord terug in Instellingen om hem terug te halen.'), tone: 'danger');
+
+            return;
+        }
+
+        OffsiteRestorer::markQueued($backup->id);
+        RestoreOffsiteBackup::dispatch($backup->id);
+        $this->refreshBackups();
+
+        $this->dispatch('toast', title: __('Back-up wordt teruggehaald'), message: __('Daarna kun je hem gewoon terugzetten.'), tone: 'success');
+    }
+
+    public function searchCloud(OffsiteSync $sync): void
+    {
+        try {
+            $found = $sync->discover((string) $this->site->data('slug'), $this->site->name);
+        } catch (OffsiteException $exception) {
+            $this->dispatch('toast', title: __('Cloud doorzoeken mislukt'), message: $exception->getMessage(), tone: 'danger');
+
+            return;
+        }
+
+        $this->refreshBackups();
+        $this->dispatch('toast', title: $found > 0 ? trans_choice(':count back-up gevonden in de cloud|:count back-ups gevonden in de cloud', $found) : __('Geen nieuwe back-ups gevonden in de cloud'), tone: 'success');
     }
 
     public function render(): View

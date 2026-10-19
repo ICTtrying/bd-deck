@@ -91,6 +91,8 @@
 
     <livewire:settings.premium-files />
 
+    <livewire:settings.offsite-backups />
+
     <x-panel :title="__('Hoofdwachtwoord wijzigen')" :description="__('Je kluis wordt meteen opnieuw versleuteld; bewaarde gegevens blijven gewoon bruikbaar.')">
         <form wire:submit="changePassword" class="grid gap-4 sm:grid-cols-3">
             <x-field :label="__('Huidig')" for="pw-current" error="currentPassword">

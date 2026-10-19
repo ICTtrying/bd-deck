@@ -1,4 +1,5 @@
-<div class="grid gap-5 lg:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">
+@php $offsite = $this->offsiteEnabled(); @endphp
+<div class="grid gap-5 lg:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]" @if ($this->isCloudBusy()) wire:poll.5s="refreshBackups" @endif>
     <x-panel :title="__('Bewaarde back-ups')" :description="__('Automatisch gemaakt voor elke push, migratie en database-import.')" :padding="false">
         <x-slot:actions>
             <x-button size="sm" variant="ghost" icon="folder" wire:click="openFolder">{{ __('Map openen') }}</x-button>
@@ -20,6 +21,18 @@
                                 {{ collect($backup['parts'])->map(fn ($part) => $this->partLabels()[$part]['label'] ?? $part)->implode(', ') ?: __('Leeg') }}
                                 <span class="text-faint">({{ \Illuminate\Support\Number::fileSize($backup['size'], precision: 1) }})</span>
                             </p>
+                            @if ($offsite)
+                                @php $cloudStatus = $this->cloudStatus($backup['id']); @endphp
+                                <p class="mt-1 flex flex-wrap items-center gap-2">
+                                    <x-badge :tone="$cloudStatus->tone()" :dot="$cloudStatus->isBusy()">
+                                        <x-icon :name="$cloudStatus === \App\Enums\OffsiteStatus::Uploaded ? 'cloud' : ($cloudStatus === \App\Enums\OffsiteStatus::Failed ? 'alert' : 'laptop')" :size="12" />
+                                        {{ $cloudStatus->label() }}
+                                    </x-badge>
+                                    @if ($cloudStatus === \App\Enums\OffsiteStatus::Failed)
+                                        <span class="text-xs text-danger">{{ $this->cloudBackups->get($backup['id'])?->error }}</span>
+                                    @endif
+                                </p>
+                            @endif
                         </div>
                         @if (collect($backup['parts'])->contains(fn ($part) => $this->partLabels()[$part]['restore'] ?? null))
                             <x-button size="sm" icon="rotate-ccw" wire:click="startRestore('{{ $backup['id'] }}')">{{ __('Terugzetten') }}</x-button>
@@ -39,6 +52,45 @@
             <x-button variant="primary" icon="archive" wire:click="create" class="mt-1 justify-self-start">{{ __('Back-up maken') }}</x-button>
         </div>
     </x-panel>
+
+    @if ($offsite)
+        <x-panel :title="__('In de cloud')" :description="__('Back-ups die niet (meer) op deze laptop staan. Haal er een terug om hem daarna terug te zetten.')" :padding="false">
+            <x-slot:actions>
+                <x-button size="sm" variant="ghost" icon="search" wire:click="searchCloud">{{ __('Cloud doorzoeken') }}</x-button>
+            </x-slot:actions>
+
+            @if ($this->cloudOnly()->isEmpty())
+                <p class="px-5 py-4 text-sm text-muted">{{ __('Alles uit de cloud staat ook op deze laptop. Nieuwe laptop? Klik op Cloud doorzoeken.') }}</p>
+            @else
+                @php $currentKeyId = app(\App\Services\AppSettings::class)->offsite()->keyId; @endphp
+                <ul class="divide-y divide-line">
+                    @foreach ($this->cloudOnly() as $cloudBackup)
+                        @php $restoreState = $this->restoreState($cloudBackup); @endphp
+                        <li class="flex flex-wrap items-center gap-3 px-5 py-3" wire:key="cloud-{{ $cloudBackup->id }}">
+                            <x-icon name="cloud" class="text-faint" />
+                            <div class="min-w-0 flex-1">
+                                <p class="text-sm font-medium">{{ $this->kindLabels()[$cloudBackup->kind] ?? ($cloudBackup->kind ?: $cloudBackup->backup_id) }} <span class="font-normal text-muted">{{ $cloudBackup->backup_created_at?->isoFormat('D MMM YYYY, HH:mm') }}</span></p>
+                                <p class="text-[0.8125rem] text-muted">
+                                    {{ \Illuminate\Support\Number::fileSize((int) $cloudBackup->size, precision: 1) }}
+                                    @if (! $cloudBackup->isEncryptedWith($currentKeyId))
+                                        · <span class="text-warning">{{ __('Versleuteld met een eerder wachtwoord') }}</span>
+                                    @endif
+                                </p>
+                                @if (($restoreState['state'] ?? null) === 'failed')
+                                    <p class="text-xs text-danger">{{ $restoreState['error'] }}</p>
+                                @endif
+                            </div>
+                            @if (($restoreState['state'] ?? null) === 'running')
+                                <x-badge tone="info" dot>{{ __('Wordt teruggehaald') }}</x-badge>
+                            @else
+                                <x-button size="sm" icon="download" wire:click="fetchFromCloud({{ $cloudBackup->id }})" :disabled="! $cloudBackup->isEncryptedWith($currentKeyId)">{{ __('Terughalen') }}</x-button>
+                            @endif
+                        </li>
+                    @endforeach
+                </ul>
+            @endif
+        </x-panel>
+    @endif
 
     <x-modal name="restore" :title="__('Back-up terugzetten')">
         @php $touchesLive = array_intersect($restoreParts, ['live-db', 'live-files']) !== []; @endphp

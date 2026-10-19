@@ -37,7 +37,7 @@ class AppServiceProvider extends ServiceProvider
         Model::preventLazyLoading(! $this->app->isProduction());
 
         // korte acties staan op een eigen wachtrij; zonder 'quick' zouden test en updates blijven hangen
-        DevCommands::artisan('queue:listen --queue=default,quick --tries=1 --timeout=0', 'queue');
+        DevCommands::artisan('queue:listen --queue=default,quick,offsite --tries=1 --timeout=0', 'queue');
         DevCommands::artisan('schedule:work', 'schedule');
 
         View::composer(['layouts::app', 'layouts::guest', 'layouts.app', 'layouts.guest'], LayoutComposer::class);
