@@ -82,3 +82,19 @@ it('slaat een actie over die al geannuleerd is', function (): void {
     expect($run->fresh()->status)->toBe(RunStatus::Cancelled);
     Process::assertNothingRan();
 });
+
+it('vergeet de updates alleen als veilig bijwerken ook live heeft gezet', function (bool $live, bool $forgotten): void {
+    $site = Site::factory()->built()->create(['name' => 'klant', 'updates' => ['core' => [], 'plugins' => [['name' => 'akismet']], 'themes' => []], 'updates_checked_at' => now()]);
+
+    Process::fake([
+        '*info*' => Process::result(json_encode($site->snapshot)),
+        '*' => Process::result("✓ Klaar\n"),
+    ]);
+
+    app(CommandRunner::class)->queue(WpOpenCommand::safeUpdate($site, live: $live));
+
+    expect($site->refresh()->updates === null)->toBe($forgotten);
+})->with([
+    'live gezet' => [true, true],
+    'alleen lokaal getest' => [false, false],
+]);

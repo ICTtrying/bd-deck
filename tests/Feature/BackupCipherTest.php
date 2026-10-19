@@ -14,7 +14,8 @@ it('versleutelt en ontsleutelt, ook precies op en rond de blokgrens', function (
     $encrypted = $this->cipher->encryptString($plain, 'een goed wachtwoord');
 
     expect($encrypted)->toStartWith(BackupCipher::MAGIC)
-        ->and($size === 0 || ! str_contains($encrypted, substr($plain, 0, 64)))->toBeTrue()
+        // korte data komt bij toeval ook in willekeurige bytes voor; pas vanaf 16 bytes zegt dit iets
+        ->and($size < 16 || ! str_contains($encrypted, substr($plain, 0, 64)))->toBeTrue()
         ->and($this->cipher->decryptString($encrypted, 'een goed wachtwoord'))->toBe($plain);
 })->with([0, 1, 1024 * 1024 - 1, 1024 * 1024, 1024 * 1024 + 1, 2 * 1024 * 1024 + 5]);
 

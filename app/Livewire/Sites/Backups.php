@@ -73,6 +73,10 @@ class Backups extends Component
             'pre-restore' => __('Voor terugzetten'),
             'remove' => __('Voor verwijderen'),
             'upgrade' => __('Voor pakketten bijwerken'),
+            'safe-update' => __('Voor veilig bijwerken'),
+            'migrate' => __('Voor verhuizen'),
+            'domain' => __('Voor domein omzetten'),
+            'go-live' => __('Voor lokale adressen omzetten'),
         ];
     }
 

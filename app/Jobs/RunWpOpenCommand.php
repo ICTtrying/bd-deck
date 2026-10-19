@@ -143,7 +143,9 @@ class RunWpOpenCommand implements ShouldBeEncrypted, ShouldQueue
                 match ($run->action) {
                     WpOpenAction::Test => $registry->recordHealth($site, (array) WpOpen::decode((string) $run->output)),
                     WpOpenAction::Updates => $this->recordUpdates($run, $site, $registry, $notifier),
-                    WpOpenAction::Upgrade, WpOpenAction::SafeUpdate => $registry->forgetUpdates($site),
+                    WpOpenAction::Upgrade => $registry->forgetUpdates($site),
+                    // alleen lokaal getest: live heeft de updates dan nog steeds
+                    WpOpenAction::SafeUpdate => in_array('--no-live', $run->arguments, true) ? null : $registry->forgetUpdates($site),
                     WpOpenAction::GoLive => $this->recordGoLive($run, $site, $registry, $notifier),
                     // na een verhuizing of nieuw domein meteen nalopen; een melding volgt alleen bij problemen
                     WpOpenAction::Migrate, WpOpenAction::ChangeDomain => app(CommandRunner::class)->queue(WpOpenCommand::goLive($site), notify: false),
