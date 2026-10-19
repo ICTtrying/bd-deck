@@ -264,6 +264,28 @@ final class FakeServer
         return collect(glob($this->sites.'/.wpopen-backups/'.$site.'/*', GLOB_ONLYDIR) ?: [])->map(fn (string $path): string => basename($path))->sort()->values()->all();
     }
 
+    /**
+     * Sitelijst zoals `wpopen export-sites` die maakt; ontbrekende velden krijgen een standaardwaarde.
+     *
+     * @param  list<array<string, mixed>>  $sites
+     * @param  array<string, mixed>  $document  overschrijft de kop, bv. format of version
+     */
+    public function siteListFile(array $sites, array $document = []): string
+    {
+        $path = $this->root.'/sitelijst-'.bin2hex(random_bytes(3)).'.json';
+        $defaults = ['target' => 'wesley@klant.test', 'ssh_options' => '', 'remote' => '/home/wesley/public_html/wp-content', 'mode' => 'ssh', 'provider' => 'other', 'live_url' => null, 'type' => 'wordpress', 'public_dir' => null];
+
+        file_put_contents($path, json_encode([
+            'format' => 'bd-deck-sites',
+            'version' => 1,
+            'exported_at' => '2026-10-16T12:00:00Z',
+            'sites' => array_map(fn (array $site): array => [...$defaults, ...$site], $sites),
+            ...$document,
+        ]));
+
+        return $path;
+    }
+
     public function destroy(): void
     {
         File::deleteDirectory($this->root);

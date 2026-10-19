@@ -6,9 +6,12 @@
 #   wpopen version                            versie van dit script
 #
 #   wpopen import                             zoekt zelf SSH/SFTP-verbindingen en voegt alle WordPress-sites toe
-#   wpopen export-sites [--notes-from bestand] sitelijst als JSON, zonder persoonlijke paden (om te delen)
+#   wpopen export-sites                       sitelijst als JSON om te delen (zonder lokale sites en persoonlijke
+#                                             paden zoals -i ~/.ssh/sleutel)
 #   wpopen import-sites <bestand> [--only naam]… [--update] [--json]
-#                                             sitelijst van een collega inlezen
+#                                             sitelijst van een collega inlezen, zonder met de server te verbinden
+#                                             (--only: alleen deze sites; --update: verbindingsgegevens van bestaande
+#                                             sites bijwerken, de lokale map blijft zoals hij is)
 #   wpopen add <naam> ssh -p 65002 u@host     1 site toevoegen (zoekt zelf WordPress of Laravel)
 #   wpopen add sftp://u@host[:poort]          idem, naam uit de host
 #     [--remote pad] [--mode ssh|sftp] [--provider wpmudev|hostinger|other] [--url https://…]
@@ -667,8 +670,231 @@ cmd_remove() {
   ok "$NAME uit de sitelijst gehaald"
 }
 # ───────────── sitelijst delen ─────────────
-cmd_export_sites() { die "Nog niet beschikbaar."; }
-cmd_import_sites() { die "Nog niet beschikbaar."; }
+# exportbestand: {"format":"bd-deck-sites","version":1,"exported_at":…,"sites":[{name,target,ssh_options,remote,mode,provider,live_url,type,public_dir}]}
+# lokale sites gaan niet mee (geen server), persoonlijke paden in de SSH-opties (-i, IdentityFile=…) ook niet
+sitelist_py() {  # export | import <bestand> [naam…] | summary
+  DBF="$DB" python3 - "$@" <<'PY'
+import datetime, json, os, re, sys
+
+mode, args = sys.argv[1], sys.argv[2:]
+
+# zelfde vorm als WpOpenCommand::splitOptions in de app
+OPTS = re.compile(r'^(-[A-Za-z]( +[^\s|;&`$<>]+)?)( +-[A-Za-z]( +[^\s|;&`$<>]+)?)*$')
+FILE_FLAGS = ("-i", "-F", "-E", "-S")
+FILE_KEYS = re.compile(r'(?i)^(identityfile|certificatefile|userknownhostsfile|globalknownhostsfile|controlpath|identityagent|pkcs11provider|securitykeyprovider|xauthlocation|revokedhostkeys)=')
+
+def die(msg):
+    print("✗ " + msg, file=sys.stderr)
+    sys.exit(1)
+
+def pairs(opts):
+    out = []
+    for tok in (opts or "").split():
+        if len(tok) > 1 and tok[0] == "-" and tok[1].isalpha() or not out:
+            out.append([tok])
+        else:
+            out[-1].append(tok)
+    return out
+
+def personal(pair):
+    flag, value = pair[0], " ".join(pair[1:])
+    if flag[:2] in FILE_FLAGS:
+        return True
+    value = value or flag[2:]
+    if flag[:2] == "-o" and FILE_KEYS.match(value):
+        return True
+    # vangnet: alles wat naar een bestand op deze computer wijst
+    return value.startswith(("/", "~")) or "/home/" in value
+
+def shared_opts(opts):
+    return " ".join(" ".join(p) for p in pairs(opts) if not personal(p))
+
+def own_opts(opts):
+    return " ".join(" ".join(p) for p in pairs(opts) if personal(p))
+
+def read_db():
+    sites = {}
+    for line in open(os.environ["DBF"], errors="ignore"):
+        f = line.rstrip("\n").split("|")
+        if f and f[0]:
+            sites[f[0]] = (f + [""] * 9)[:9]
+    return sites
+
+if mode == "export":
+    sites, local, stripped = [], 0, []
+    for name, (n, target, opts, remote, kind_mode, provider, liveurl, kind, pubdir) in read_db().items():
+        if not target:
+            local += 1
+            continue
+        shared = shared_opts(opts)
+        if shared != " ".join(opts.split()):
+            stripped.append(name)
+        sites.append({
+            "name": name, "target": target, "ssh_options": shared, "remote": remote,
+            "mode": kind_mode or "ssh", "provider": provider or "other", "live_url": liveurl or None,
+            "type": kind or "wordpress", "public_dir": pubdir or None,
+        })
+    if local:
+        print("· %d lokale site(s) zonder server niet meegenomen" % local, file=sys.stderr)
+    if stripped:
+        print("· persoonlijke SSH-opties weggelaten bij: " + ", ".join(stripped), file=sys.stderr)
+    print(json.dumps({
+        "format": "bd-deck-sites", "version": 1,
+        "exported_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "sites": sites,
+    }, ensure_ascii=False))
+    sys.exit(0)
+
+if mode == "summary":
+    out = {"added": [], "updated": [], "skipped": [], "invalid": []}
+    # stdin is hier het script zelf, dus de uitkomsten komen via de omgeving
+    for line in os.environ.get("RESULTS", "").splitlines():
+        status, _, rest = line.partition("\t")
+        name, _, reason = rest.partition("\t")
+        if status == "invalid":
+            out["invalid"].append({"name": name, "reason": reason})
+        elif status in ("added", "updated", "skipped"):
+            out[status].append(name)
+            if os.environ.get("JSON") != "1":
+                print({"added": "✓ toegevoegd: ", "updated": "✓ bijgewerkt: ", "skipped": "= overgeslagen: "}[status] + name + (" (" + reason + ")" if reason else ""))
+    if os.environ.get("JSON") == "1":
+        print(json.dumps(out, ensure_ascii=False))
+    else:
+        for item in out["invalid"]:
+            print("✗ ongeldig: %s (%s)" % (item["name"] or "?", item["reason"]))
+        if out["added"]:
+            print("· Test de verbinding met: wpopen test <naam>")
+    sys.exit(0)
+
+# import: alleen controleren en een plan maken; de shell schrijft de sitelijst (db_write)
+path, only = args[0], set(args[1:])
+update = os.environ.get("UPDATE") == "1"
+try:
+    if os.path.getsize(path) > 5 * 1024 * 1024:
+        die("Het bestand is te groot voor een sitelijst.")
+    data = json.load(open(path, encoding="utf-8"))
+except (OSError, UnicodeDecodeError, ValueError):
+    die("Dit is geen geldig JSON-bestand.")
+if not isinstance(data, dict) or data.get("format") != "bd-deck-sites":
+    die("Dit is geen sitelijst van BD Deck.")
+if data.get("version") != 1 or isinstance(data.get("version"), bool):
+    die("Deze sitelijst komt uit een nieuwere versie van BD Deck; werk BD Deck eerst bij.")
+if not isinstance(data.get("sites"), list):
+    die("De sitelijst bevat geen sites.")
+
+def problem(site):
+    if not isinstance(site, dict):
+        return "geen geldige site"
+    fields = {}
+    for key in ("name", "target", "ssh_options", "remote", "mode", "provider", "live_url", "type", "public_dir"):
+        value = site.get(key)
+        if value is None:
+            value = ""
+        if not isinstance(value, str):
+            return "veld %s moet tekst zijn" % key
+        if "|" in value or re.search(r"[\x00-\x1f\x7f]", value):
+            return "'|' en enters zijn niet toegestaan (veld %s)" % key
+        fields[key] = value
+    if not re.match(r"^[A-Za-z0-9._-]{1,60}$", fields["name"]):
+        return "naam mag alleen letters, cijfers, punt, - en _ bevatten"
+    if not re.match(r"^[A-Za-z0-9._-]{1,64}@[A-Za-z0-9.-]{1,253}$", fields["target"]):
+        return "server moet de vorm gebruiker@host hebben"
+    if fields["ssh_options"] and (len(fields["ssh_options"]) > 200 or not OPTS.match(fields["ssh_options"])):
+        return "SSH-opties hebben een ongeldig formaat"
+    if any(personal(p) for p in pairs(fields["ssh_options"])):
+        return "SSH-opties bevatten een persoonlijk pad (zoals -i)"
+    if not fields["remote"] or len(fields["remote"]) > 500:
+        return "pad op de server ontbreekt of is te lang"
+    if fields["mode"] not in ("ssh", "sftp"):
+        return "modus moet ssh of sftp zijn"
+    if fields["provider"] not in ("wpmudev", "hostinger", "other"):
+        return "provider moet wpmudev, hostinger of other zijn"
+    if fields["live_url"] and (len(fields["live_url"]) > 255 or not re.match(r"^https?://[A-Za-z0-9.-]+(/[^|\s]*)?$", fields["live_url"])):
+        return "ongeldig live-adres"
+    fields["type"] = fields["type"] or "wordpress"
+    if fields["type"] not in ("wordpress", "laravel"):
+        return "type moet wordpress of laravel zijn"
+    if fields["public_dir"] and (fields["type"] != "laravel" or len(fields["public_dir"]) > 500):
+        return "een losse public-map kan alleen bij Laravel-sites"
+    site.clear(); site.update(fields)
+    return None
+
+def label(site):
+    name = site.get("name") if isinstance(site, dict) else None
+    return re.sub(r"[\t\n\r]", " ", name)[:60] if isinstance(name, str) else ""
+
+existing, seen, plan = read_db(), set(), []
+for site in data["sites"]:
+    name = label(site)
+    if only and name not in only:
+        continue
+    reason = problem(site)
+    if reason is None and site["name"] in seen:
+        reason = "staat dubbel in het bestand"
+    if reason:
+        plan.append(("invalid", name, reason))
+        continue
+    seen.add(site["name"])
+    s = site
+    line = [s["name"], s["target"], s["ssh_options"], s["remote"], s["mode"], s["provider"], s["live_url"], s["type"]] + ([s["public_dir"]] if s["public_dir"] else [])
+    if s["name"] not in existing:
+        plan.append(("add", s["name"], "|".join(line)))
+        continue
+    old = existing[s["name"]]
+    if not old[1]:
+        plan.append(("skip", s["name"], "lokale site met dezelfde naam"))
+        continue
+    if (old[7] or "wordpress") != s["type"]:
+        plan.append(("skip", s["name"], "bestaande site is van een ander type"))
+        continue
+    mine = own_opts(old[2])
+    if [old[1], shared_opts(old[2]), old[3], old[4] or "ssh", old[5] or "other", old[6], old[8]] == [s["target"], s["ssh_options"], s["remote"], s["mode"], s["provider"], s["live_url"], s["public_dir"]]:
+        plan.append(("skip", s["name"], "zelfde gegevens"))
+    elif not update:
+        plan.append(("skip", s["name"], "staat er al, andere gegevens (gebruik --update)"))
+    else:
+        # eigen sleutelpaden blijven staan; het type en dus de lokale map veranderen nooit
+        line[2] = " ".join(x for x in (s["ssh_options"], mine) if x)
+        line[7] = old[7] or "wordpress"
+        plan.append(("update", s["name"], "|".join(line)))
+for name in sorted(only - seen - {p[1] for p in plan}):
+    plan.append(("invalid", name, "staat niet in het bestand"))
+for item in plan:
+    print("\t".join(item))
+PY
+}
+cmd_export_sites() {
+  need python3
+  [ $# -eq 0 ] || die "Gebruik: wpopen export-sites"
+  sitelist_py export
+}
+cmd_import_sites() {
+  need python3
+  local file="" json=0 update=0 only=() plan kind name payload results=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --only) [ $# -ge 2 ] || die "Naam ontbreekt na --only"; only+=("$2"); shift;;
+      --update) update=1;; --json) json=1;;
+      -*) die "Onbekende optie: $1";;
+      *) [ -z "$file" ] || die "Geef één bestand op."; file="$1";;
+    esac; shift
+  done
+  [ -n "$file" ] || die "Gebruik: wpopen import-sites <bestand> [--only naam]… [--update] [--json]"
+  [ -f "$file" ] || die "Bestand niet gevonden: $file"
+  plan=$(UPDATE=$update sitelist_py import "$file" "${only[@]+"${only[@]}"}") || exit 1
+  while IFS=$'\t' read -r kind name payload; do
+    case "$kind" in
+      add)
+        # tussen plan en schrijven kan een andere aanroep dezelfde naam hebben toegevoegd
+        if db_has "$name"; then results+=("skipped"$'\t'"$name"$'\t'"staat er al"); continue; fi
+        db_write "$name" "$payload"; results+=("added"$'\t'"$name");;
+      update) db_write "$name" "$payload"; results+=("updated"$'\t'"$name");;
+      skip) results+=("skipped"$'\t'"$name"$'\t'"$payload");;
+      invalid) results+=("invalid"$'\t'"$name"$'\t'"$payload");;
+    esac
+  done <<<"$plan"
+  RESULTS=$(printf '%s\n' "${results[@]+"${results[@]}"}") JSON=$json sitelist_py summary
+}
 
 cmd_import() {
   need python3

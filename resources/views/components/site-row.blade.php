@@ -23,9 +23,10 @@
     $opening = "\$dispatch('toast', { title: '".__('Wordt geopend…')."', tone: 'info' })";
 @endphp
 
-<li {{ $attributes->merge(['class' => 'group flex flex-wrap items-center gap-x-4 gap-y-2.5 px-4 py-3 transition-colors hover:bg-raised/50 xl:grid xl:grid-cols-[minmax(0,1fr)_auto_11.5rem]']) }}>
+<li {{ $attributes->merge(['class' => 'group flex flex-wrap items-center gap-x-4 gap-y-2.5 px-4 py-3 transition-colors hover:bg-raised/50 xl:grid xl:grid-cols-[minmax(0,1fr)_auto_11.5rem]']) }} x-bind:class="$wire.selected.map(Number).includes({{ $site->id }}) && 'bg-local-soft/40'">
     {{-- wie --}}
     <div class="flex min-w-0 flex-[1_1_100%] items-center gap-2 xl:flex-[1_1_16rem]">
+        <input type="checkbox" value="{{ $site->id }}" wire:model.live="selected" class="size-4 shrink-0 rounded border-line-strong accent-[var(--local)]" aria-label="{{ __(':site selecteren', ['site' => $site->name]) }}">
         <button type="button" wire:click="toggleFavorite({{ $site->id }})" @class([
             'grid size-7 shrink-0 place-items-center rounded-md transition-colors hover:bg-raised',
             'text-warning' => $site->is_favorite,
