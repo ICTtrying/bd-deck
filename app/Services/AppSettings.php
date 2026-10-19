@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Enums\TerminalApp;
 use App\Enums\ThemePreference;
 use App\Models\Setting;
+use App\Services\Offsite\OffsiteConfig;
 use Illuminate\Support\Str;
 
 final class AppSettings
@@ -138,6 +139,22 @@ final class AppSettings
     public function backupsDirectory(): string
     {
         return $this->sitesDirectory().'/.wpopen-backups';
+    }
+
+    public function offsite(): OffsiteConfig
+    {
+        return OffsiteConfig::fromArray((array) ($this->get('offsite_backups') ?? []));
+    }
+
+    /**
+     * Voegt samen met wat er al staat: zo blijven opgeslagen geheimen en de sync-status van de wachtrij bewaard.
+     *
+     * @param  array<string, mixed>  $values
+     */
+    public function updateOffsite(array $values): void
+    {
+        $this->values = null;
+        $this->update(['offsite_backups' => array_replace((array) ($this->get('offsite_backups') ?? []), $values)]);
     }
 
     public function scriptPath(): string

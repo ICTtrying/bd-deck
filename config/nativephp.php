@@ -186,6 +186,13 @@ return [
             'timeout' => 600,
             'sleep' => 1,
         ],
+        // uploads en terughalen van cloud-back-ups: lang, maar weinig geheugen want alles gaat als stream
+        'offsite' => [
+            'queues' => ['offsite'],
+            'memory_limit' => 128,
+            'timeout' => 21600,
+            'sleep' => 3,
+        ],
     ],
 
     /**

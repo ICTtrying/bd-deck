@@ -54,4 +54,9 @@ class DesktopNotifier
         // een melding mag een afgeronde actie nooit alsnog laten mislukken
         rescue(fn () => Notification::new()->title($title)->message($message)->show(), report: false);
     }
+
+    public function offsiteBackupFailed(int $count, string $reason): void
+    {
+        $this->notice(trans_choice(':count back-up kon niet naar de cloud|:count back-ups konden niet naar de cloud', $count), $reason);
+    }
 }
