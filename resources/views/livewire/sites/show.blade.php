@@ -134,6 +134,9 @@
         <div class="flex flex-wrap items-center gap-3 rounded-xl border border-danger/30 bg-danger-soft px-4 py-3">
             <x-icon name="alert" class="text-danger" />
             <p class="min-w-0 flex-1 text-sm"><span class="font-medium">{{ __(':action is mislukt.', ['action' => $this->lastRun->label]) }}</span> <span class="text-muted">{{ $this->lastRun->lastMessage() }}</span></p>
+            @if ($culprit = $this->lastRun->culprit())
+                <x-button size="sm" icon="refresh" x-on:click="$dispatch('open-safe-update', { without: @js($culprit) })">{{ __('Opnieuw zonder :name', ['name' => $culprit === 'core' ? 'WordPress' : \Illuminate\Support\Str::after($culprit, ':')]) }}</x-button>
+            @endif
             <x-button size="sm" :href="route('activity.show', $this->lastRun)" wire:navigate>{{ __('Log bekijken') }}</x-button>
         </div>
     @elseif ($this->recentDeploy)
@@ -228,7 +231,13 @@
                 <x-panel :title="$site->isLocalOnly() ? __('Updates') : __('Updates op live')" :description="$site->updates_checked_at ? __('Gecontroleerd :time', ['time' => $site->updates_checked_at->diffForHumans()]) : __('Nog niet gecontroleerd')">
                     <x-slot:actions>
                         <x-button size="sm" icon="refresh" wire:click="run('updates')">{{ __('Controleren') }}</x-button>
+                        @if (! $site->isLocalOnly() && $site->updatesCount() > 0)
+                            <x-button size="sm" variant="primary" icon="shield" x-on:click="$dispatch('open-safe-update')" :disabled="! $site->isBuilt() || (bool) $active" :title="$site->isBuilt() ? null : __('Bouw de site eerst lokaal; de updates worden lokaal getest voordat ze live gaan.')">{{ __('Veilig bijwerken') }}</x-button>
+                        @endif
                     </x-slot:actions>
+                    @if (! $site->isLocalOnly() && ! $site->isBuilt() && $site->updatesCount() > 0)
+                        <p class="mb-3 text-[0.8125rem] text-muted">{{ __('Bouw de site eerst lokaal; de updates worden lokaal getest voordat ze live gaan.') }}</p>
+                    @endif
                     @if ($site->updates === null)
                         <p class="text-muted">{{ __('Bekijk welke plugins, thema\'s en WordPress-versies een update hebben.') }}</p>
                     @elseif ($site->updatesCount() === 0)
@@ -398,6 +407,7 @@
     @endif
 
     <livewire:sites.push-panel :site="$site" :key="'push-'.$site->id" />
+    <livewire:sites.safe-update-panel :site="$site" :key="'safe-update-'.$site->id" />
     <livewire:sites.delete-dialog />
     <livewire:sites.share-panel :site="$site" :key="'share-'.$site->id" />
 

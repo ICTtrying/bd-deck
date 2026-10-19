@@ -3062,7 +3062,417 @@ cmd_live() {
 }
 
 # ───────────── updates veilig doorvoeren ─────────────
-cmd_safe_update() { die "Nog niet beschikbaar."; }
+# Plugins en thema's van derden en WordPress zelf staan niet in git, dus een gewone push neemt updates niet mee.
+# Daarom: verse kopie van live, lokaal bijwerken en testen, en pas daarna de gewijzigde bestanden naar live, met
+# dezelfde back-up als een push (live-files + new-files), zodat `wpopen restore … --live-files` alles terugdraait.
+su_dir() { case "$1" in plugin:*) echo "plugins/${1#plugin:}";; theme:*) echo "themes/${1#theme:}";; esac; }
+su_label() { case "$1" in core) echo "WordPress";; plugin:*) echo "plugin ${1#plugin:}";; theme:*) echo "thema ${1#theme:}";; esac; }
+su_ok_code() { [[ "$1" =~ ^[23][0-9][0-9]$ ]]; }
+su_version_of() { awk -v i="$2" '$1==i{print $2; exit}' "$1"; }
+su_fatal() { grep -E '^PHP (Fatal error|Parse error|Recoverable fatal error)' | sort -u || true; }
+
+su_available() {  # json van UPDATES_PHP → "item oude-versie nieuwe-versie" per regel
+  OUT="$1" python3 -c '
+import json, os
+d = json.loads(os.environ["OUT"])
+for c in d.get("core", [])[:1]:
+    print("core - %s" % (c.get("version") or "-"))
+for kind, key in (("plugin", "plugins"), ("theme", "themes")):
+    for p in d.get(key, []):
+        print("%s:%s %s %s" % (kind, p.get("name") or "-", p.get("version") or "-", p.get("update_version") or "-"))'
+}
+su_live_core() {  # WordPress-versie op live (leeg als onbekend)
+  if [ "$MODE" = sftp ]; then lf "cat '$ROOT/wp-includes/version.php'" 2>/dev/null | sed -nE "s/^.wp_version = '([^']+)'.*/\1/p" | sed -n 1p || true
+  else live_wp core version 2>/dev/null | tr -d '\r' | tail -1 || true; fi
+}
+su_local_core() { (cd "$PROJ" && ddev wp core version --skip-plugins --skip-themes 2>/dev/null) | tr -d '\r' | tail -1 || true; }
+su_versions() {  # → "item versie" per regel van de lokale site
+  local W="--skip-plugins --skip-themes"
+  # shellcheck disable=SC2086
+  { (cd "$PROJ" && ddev wp plugin list --fields=name,version --format=csv $W 2>/dev/null) | tr -d '\r' | awk -F, 'NR>1{print "plugin:" $1 " " ($2=="" ? "-" : $2)}' || true
+    (cd "$PROJ" && ddev wp theme list --fields=name,version --format=csv $W 2>/dev/null) | tr -d '\r' | awk -F, 'NR>1{print "theme:" $1 " " ($2=="" ? "-" : $2)}' || true
+    echo "core $(su_local_core)"; }
+}
+su_fetch_live_dir() {  # map (t.o.v. wp-content) doelmap — exacte kopie, ook zonder bestanden die lokaal nog rondslingeren
+  rm -rf "$2"; mkdir -p "$2"
+  if [ "$MODE" = sftp ]; then lf "mirror '$REMOTE/$1' '$2'" >/dev/null
+  else rsync -az --delete -e "$SSHE" "$TARGET:$REMOTE/$1/" "$2/"; fi
+}
+
+# ── pagina's controleren: HTTP-status en (lokaal) PHP-fouten ──
+su_pages() {  # → paden: home, de nieuwste pagina's en berichten, de inlogpagina
+  local u
+  { echo "/"
+    (cd "$PROJ" && ddev wp post list --post_type=page,post --post_status=publish --orderby=date --order=DESC --posts_per_page=3 --field=url 2>/dev/null) | tr -d '\r' | while IFS= read -r u; do
+      if [[ "$u" =~ ^https?://[^/]+(/[A-Za-z0-9._~%/?=\&+-]*)?$ ]]; then echo "${BASH_REMATCH[1]:-/}"; fi
+    done || true
+    echo "/wp-login.php"; } | awk '!seen[$0]++'
+}
+su_http() { local c; c=$(curl -sk -o /dev/null -L --max-redirs 5 --max-time 30 -w '%{http_code}' "$1" 2>/dev/null) || true; echo "${c:-000}"; }
+su_admin_http() {  # wp-admin echt laden, ingelogd via een eenmalige link van de lokale mu-plugin
+  local tok jar code
+  tok=$(rand 24); jar=$(mktemp)
+  ( umask 077; printf '%s %s\n' "$(printf %s "$tok" | sha256sum | cut -d' ' -f1)" "$(( $(date +%s) + 120 ))" > "$LWPC/.wpopen-login" )
+  code=$(curl -sk -o /dev/null -L --max-redirs 5 --max-time 60 -b "$jar" -c "$jar" -w '%{http_code}' "$LOCALURL/?wpopen-login=$tok" 2>/dev/null) || true
+  rm -f "$jar" "$LWPC/.wpopen-login"
+  echo "${code:-000}"
+}
+# quiet_php houdt PHP-meldingen uit de pagina; de webcontainer schrijft ze naar `ddev logs`. Alleen regels van na het begin tellen.
+su_php_errors() {  # sinds (UTC) → PHP-meldingen, zonder regelnummers (die verschuiven tussen versies) en ontdubbeld
+  sleep 1
+  (cd "$PROJ" && ddev logs -t --tail 5000 2>/dev/null) | tr -d '\r' | awk -v s="$1" '$1 >= s' \
+    | grep -oE 'PHP (Fatal error|Parse error|Recoverable fatal error|Warning|Deprecated|Notice): .*' \
+    | sed -E 's/"+ *$//; s/( on line |:)[0-9]+$//' | sort -u || true
+}
+su_check() {  # local|live uitvoer → "pad code" per regel; lokaal ook de PHP-meldingen in uitvoer.php
+  local where="$1" out="$2" p c url since
+  since=$(date -u +%Y-%m-%dT%H:%M:%S.%N)
+  : > "$out"
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    if [ "$where" = local ]; then url="$LOCALURL$p"
+    else   # live: om de paginacache heen
+      url="https://$LIVEHOST$p"; if [[ "$p" == *\?* ]]; then url+="&wpo-check=$(rand 4)"; else url+="?wpo-check=$(rand 4)"; fi
+    fi
+    echo "$p $(su_http "$url")" >> "$out"
+  done < "$SU_PAGES"
+  if [ "$where" = local ]; then
+    echo "/wp-admin/ $(su_admin_http)" >> "$out"
+    su_php_errors "$since" > "$out.php"
+  fi
+  while read -r p c; do
+    if su_ok_code "$c"; then echo "  ✓ $p ($c)"; else echo "  ✗ $p (${c/#000/geen antwoord})"; fi
+  done < "$out"
+}
+su_broken() {  # voor na → pagina's die eerst werkten en nu niet
+  awk 'NR==FNR{b[$1]=$2; next} ($1 in b) && b[$1] ~ /^[23][0-9][0-9]$/ && $2 !~ /^[23][0-9][0-9]$/ {print $1 " (HTTP " b[$1] " → " $2 ")"}' "$1" "$2"
+}
+su_known_problems() {  # nulmeting → wat er al mis was telt later niet mee, maar je moet het wel weten
+  local bad fatals
+  bad=$(awk '$2 !~ /^[23][0-9][0-9]$/ {print $1 " (" $2 ")"}' "$1")
+  fatals=$(su_fatal < "$1.php")
+  if [ -n "$bad" ]; then note "Werkte vóór de update al niet (telt niet mee):"; sed 's/^/    /' <<<"$bad"; fi
+  if [ -n "$fatals" ]; then note "PHP-fouten die er al waren (tellen niet mee):"; cut -c1-300 <<<"$fatals" | sed 's/^/    /'; fi
+  return 0
+}
+su_culprit() {  # nieuwe foutmeldingen → bijgewerkt onderdeel dat de fout gaf (leeg als dat niet duidelijk is)
+  local hit item i
+  hit=$(grep -oE 'wp-content/(plugins|themes)/[A-Za-z0-9._-]+' <<<"$1" | sed -n 1p || true)
+  if [ -n "$hit" ]; then
+    item="${hit#wp-content/}"; item="${item/plugins\//plugin:}"; item="${item/themes\//theme:}"
+    for i in "${SU_UPDATED[@]}"; do if [ "$i" = "$item" ]; then echo "$item"; return 0; fi; done
+  fi
+  if [ ${#SU_UPDATED[@]} -eq 1 ]; then echo "${SU_UPDATED[0]}"; return 0; fi
+  # fout in een plugin die zelf niet bijgewerkt is: dan ligt het vrijwel altijd aan de nieuwe WordPress
+  if [ -n "$hit" ]; then for i in "${SU_UPDATED[@]}"; do if [ "$i" = core ]; then echo core; return 0; fi; done; fi
+  return 0
+}
+
+# ── terugzetten ──
+su_rollback_local() {
+  local d
+  step "Lokaal terugzetten naar de staat van live…"
+  cd "$PROJ"
+  for d in "${SU_DIRS[@]}"; do
+    rm -rf "${LWPC:?}/$d"; mkdir -p "$(dirname "$LWPC/$d")"; cp -a "$BK/before/$d" "$LWPC/$d"
+  done
+  if [ -n "$SU_CORE_FROM" ] && [ "$(su_local_core)" != "$SU_CORE_FROM" ]; then
+    ddev wp core update --version="$SU_CORE_FROM" --force >/dev/null 2>&1 || warn "Lokale WordPress kon niet terug naar $SU_CORE_FROM"
+  fi
+  if [ -f "$BK/local-db.sql.gz" ]; then
+    ddev import-db --file="$BK/local-db.sql.gz" >/dev/null 2>&1 && fix_site || warn "Lokale database terugzetten mislukt; zelf doen: wpopen restore $NAME $(basename "$BK") --local-db"
+  fi
+  ok "Lokaal teruggezet"
+}
+su_rollback_live() {
+  local id; id=$(basename "$BK")
+  local -a parts=()
+  step "Live terugzetten…"
+  if [ "$SU_LIVE_CORE_DONE" = 1 ] && [ -n "$SU_LIVE_CORE" ]; then
+    if live_wp core update --version="$SU_LIVE_CORE" --force >/dev/null 2>&1; then ok "WordPress op live terug naar $SU_LIVE_CORE"
+    else warn "WordPress op live kon niet terug naar $SU_LIVE_CORE"; fi
+  fi
+  if [ -d "$BK/live-files" ]; then parts+=(--live-files); fi
+  if [ "$SU_LIVE_CORE_DONE" = 1 ] && [ -f "$BK/live-db.sql.gz" ]; then parts+=(--live-db); fi
+  [ ${#parts[@]} -gt 0 ] || return 0
+  # eigen subshell: restore maakt zelf een back-up aan en mag BK hier niet overschrijven
+  ( WPO_YES=1; cmd_restore "$NAME" "$id" "${parts[@]}" ) || warn "Live terugzetten lukte niet helemaal. Probeer: wpopen restore $NAME $id ${parts[*]}"
+}
+su_fail_live() {  # reden — live en lokaal terug, dan stoppen
+  su_rollback_live; su_rollback_local
+  die "$1; alles is teruggezet (de vorige live-versies staan in back-up $(basename "$BK"))."
+}
+
+su_file_lists() {  # → $BK/put (nieuw of gewijzigd), $BK/remove (alleen in de oude versie), $BK/files (allebei)
+  local d f
+  : > "$BK/put"; : > "$BK/remove"
+  for d in "${SU_DIRS[@]}"; do
+    (cd "$LWPC" && find "$d" -type f) | sort | while IFS= read -r f; do
+      if [ ! -f "$BK/before/$f" ] || ! cmp -s "$BK/before/$f" "$LWPC/$f"; then echo "$f"; fi
+    done >> "$BK/put"
+    (cd "$BK/before" && find "$d" -type f) | sort | while IFS= read -r f; do
+      if [ ! -e "$LWPC/$f" ]; then echo "$f"; fi
+    done >> "$BK/remove"
+  done
+  sort -u "$BK/put" "$BK/remove" > "$BK/files"
+}
+su_drift() {  # zijn de live-bestanden die we vervangen nog gelijk aan wat we aan het begin van live haalden?
+  local f drift=()
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    if [ -f "$BK/before/$f" ]; then
+      if [ -f "$BK/live-files/$f" ]; then cmp -s "$BK/before/$f" "$BK/live-files/$f" || drift+=("$f")
+      else drift+=("$f (op live verwijderd)"); fi
+    elif [ -f "$BK/live-files/$f" ]; then drift+=("$f (op live toegevoegd)"); fi
+  done < "$BK/files"
+  [ ${#drift[@]} -eq 0 ] && return 0
+  warn "Deze bestanden zijn op live gewijzigd terwijl de updates liepen:"
+  printf '    %s\n' "${drift[@]}" >&2
+  return 1
+}
+su_tracked_dirs() {  # bijgewerkte mappen die git bijhoudt (actief thema, eigen plugins)
+  local d
+  for d in "${SU_DIRS[@]}"; do
+    if [ -n "$(git -C "$LWPC" ls-tree --name-only main -- "$d")" ]; then echo "$d"; fi
+  done
+}
+su_record_git() {  # live: zoals pull_code — commit op main, tag deployed, main in dev
+  local -a dirs=()
+  local idx tree commit msg
+  mapfile -t dirs < <(su_tracked_dirs)
+  [ ${#dirs[@]} -gt 0 ] || return 0
+  cd "$LWPC"
+  msg="Updates: $(paste -sd ',' "$BK/updated" | sed 's/,/, /g')"
+  # main bijwerken via een losse index: werkt ongeacht welke branch uitgecheckt is
+  idx=$(mktemp -u)
+  GIT_INDEX_FILE="$idx" git read-tree main
+  GIT_INDEX_FILE="$idx" git add -A -- "${dirs[@]}"
+  tree=$(GIT_INDEX_FILE="$idx" git write-tree); rm -f "$idx"
+  if [ "$tree" != "$(git rev-parse 'main^{tree}')" ]; then
+    commit=$(gitc commit-tree "$tree" -p main -m "$msg")
+    git update-ref refs/heads/main "$commit"
+    git tag -f deployed main >/dev/null
+  fi
+  # de nieuwe versie komt via de merge in dev; eerst de ongecommitte kopie weg, anders weigert git de merge
+  git checkout -q HEAD -- "${dirs[@]}" 2>/dev/null || true
+  git clean -fdq -- "${dirs[@]}"
+  if gitc merge -q --no-edit main >/dev/null 2>&1; then ok "Vastgelegd op main en dev: $msg"
+  else
+    git merge --abort 2>/dev/null || true
+    git checkout -q main -- "${dirs[@]}"
+    warn "Vastgelegd op main; dev botst met de update. Voeg main zelf samen met dev (bv. in VS Code)."
+  fi
+}
+su_record_git_dev() {  # alleen lokaal: commit op dev, zodat een volgende run of push niet over openstaand werk struikelt
+  local -a dirs=()
+  mapfile -t dirs < <(su_tracked_dirs)
+  [ ${#dirs[@]} -gt 0 ] || return 0
+  cd "$LWPC"
+  git add -A -- "${dirs[@]}"
+  if ! git diff --cached --quiet; then
+    gitc commit -qm "Updates (lokaal getest): $(paste -sd ',' "$BK/updated" | sed 's/,/, /g')"
+    note "Gecommit op dev: ${dirs[*]} (gaat mee met de volgende 'Naar live')"
+  fi
+}
+
+cmd_safe_update() {
+  [ $# -ge 1 ] || die "Gebruik: wpopen safe-update <naam> [--only plugin:slug|theme:slug|core]… [--no-live] [--force]"
+  get "$1"; shift
+  if is_laravel; then die "$NAME is een Laravel-site. Werk de pakketten bij met: wpopen upgrade $NAME"; fi
+  need_live; built
+  need ddev git curl python3
+  if [ "$MODE" = sftp ]; then need lftp; else need rsync; fi
+  local live=1 force=0 total=6 item d json avail out old new broken fatals warns culprit livecheck=1 ms=""
+  local -a only=() keep=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --only) item="${2:-}"; shift
+        [[ "$item" =~ ^(core|(plugin|theme):[A-Za-z0-9._-]+)$ ]] || die "Ongeldige update: '$item' (gebruik plugin:slug, theme:slug of core)."
+        only+=("$item");;
+      --no-live) live=0;; --force) force=1;;
+      *) die "Onbekende optie: $1";;
+    esac; shift
+  done
+  [ -d "$LWPC/.git" ] || die "$NAME heeft nog geen git-repo in wp-content. Draai eerst: wpopen build $NAME"
+  [ -z "$(git -C "$LWPC" status --porcelain)" ] || die "Er staan nog niet-gecommitte wijzigingen in $NAME. Zet die eerst live (of commit ze), dan blijven de updates een losse stap."
+  [ $live = 1 ] || total=4
+  if is_multisite; then ms="--network"; fi
+  local -a SU_ITEMS=() SU_UPDATED=() SU_DIRS=()
+  local SU_PAGES SU_CORE_FROM="" SU_CORE_TO="" SU_LIVE_CORE="" SU_LIVE_CORE_DONE=0
+
+  step "Stap 1/$total: Updates op live bekijken en live ophalen…"
+  cd "$PROJ"; ddev_up >/dev/null
+  json=$(live_eval "$UPDATES_PHP" | grep '^{' | tail -1) || true
+  [ -n "$json" ] || die "Kon de updates op live niet ophalen. Er is niets veranderd."
+  avail=$(su_available "$json") || die "Kon de lijst met updates niet lezen. Er is niets veranderd."
+  if [ ${#only[@]} -eq 0 ]; then mapfile -t only < <(awk 'NF {print $1}' <<<"$avail"); fi
+  for item in "${only[@]}"; do
+    [ -n "$item" ] || continue
+    if [[ " ${SU_ITEMS[*]} " == *" $item "* ]]; then continue; fi
+    if ! awk -v i="$item" '$1==i{f=1} END{exit !f}' <<<"$avail"; then note "$(su_label "$item"): geen update meer op live, overgeslagen"; continue; fi
+    if [ "$item" = core ] && [ "$MODE" = sftp ]; then
+      note "WordPress zelf overgeslagen: bij een site met alleen SFTP kan dat op live niet zonder WP-CLI. Werk WordPress bij via wp-admin of de hosting."
+      continue
+    fi
+    SU_ITEMS+=("$item")
+  done
+  if [ ${#SU_ITEMS[@]} -eq 0 ]; then ok "Niets bij te werken."; return 0; fi
+
+  pull_code
+  if [ -n "$ms" ]; then note "Multisite: de database wordt niet van live opgehaald (anders kloppen de adressen van de subsites niet meer); de test draait op de lokale database."
+  else pull_db; fi
+  cd "$PROJ"
+  for item in "${SU_ITEMS[@]}"; do
+    if [ "$item" != core ]; then
+      d=$(su_dir "$item")
+      if [ ! -d "$LWPC/$d" ]; then note "$(su_label "$item"): map $d niet gevonden, overgeslagen"; continue; fi
+      if [ -n "$(git -C "$LWPC" ls-tree --name-only main -- "$d")" ] && ! git -C "$LWPC" diff --quiet main dev -- "$d"; then
+        note "$(su_label "$item"): op dev staan wijzigingen die nog niet live zijn. Zet die eerst live; overgeslagen."
+        continue
+      fi
+    fi
+    keep+=("$item")
+  done
+  SU_ITEMS=(${keep[@]+"${keep[@]}"})
+  if [ ${#SU_ITEMS[@]} -eq 0 ]; then ok "Niets bij te werken."; return 0; fi
+
+  new_backup safe-update; meta items "${SU_ITEMS[*]}"
+  backup_local
+  # lokaal moet dezelfde WordPress draaien als live, anders test je iets anders dan wat live komt
+  SU_LIVE_CORE=$(su_live_core); SU_CORE_FROM=$(su_local_core)
+  if [ -n "$SU_LIVE_CORE" ] && [ -n "$SU_CORE_FROM" ] && [ "$SU_LIVE_CORE" != "$SU_CORE_FROM" ]; then
+    if ddev wp core update --version="$SU_LIVE_CORE" --force >/dev/null 2>&1; then ok "Lokale WordPress gelijkgezet met live ($SU_CORE_FROM → $SU_LIVE_CORE)"; SU_CORE_FROM="$SU_LIVE_CORE"
+    else note "Lokale WordPress kon niet gelijk met live ($SU_LIVE_CORE); de test draait op $SU_CORE_FROM"; fi
+  fi
+  for item in "${SU_ITEMS[@]}"; do
+    [ "$item" != core ] || continue
+    d=$(su_dir "$item")
+    su_fetch_live_dir "$d" "$BK/before/$d" || die "Kon $d niet van live ophalen. Er is niets veranderd."
+    rm -rf "${LWPC:?}/$d"; cp -a "$BK/before/$d" "$LWPC/$d"
+  done
+  ok "Huidige versies bewaard ($(basename "$BK"))"
+
+  step "Stap 2/$total: Pagina's lokaal controleren (nulmeting)…"
+  SU_PAGES="$BK/pages"; su_pages > "$SU_PAGES"
+  su_check local "$BK/check-before"
+  su_known_problems "$BK/check-before"
+
+  step "Stap 3/$total: Lokaal bijwerken…"
+  cd "$PROJ"
+  su_versions > "$BK/versions-before"
+  for item in "${SU_ITEMS[@]}"; do
+    case "$item" in
+      core)
+        new=$(awk '$1=="core"{print $3}' <<<"$avail")
+        if ! out=$(ddev wp core update --version="$new" 2>&1); then warn "WordPress $new: $(tail -1 <<<"$out")"; continue; fi
+        # shellcheck disable=SC2086
+        ddev wp core update-db $ms >/dev/null 2>&1 || warn "Database-update van WordPress gaf een fout";;
+      plugin:*) if ! out=$(ddev wp plugin update "${item#plugin:}" 2>&1); then warn "$(su_label "$item"): $(tail -1 <<<"$out")"; fi;;
+      theme:*) if ! out=$(ddev wp theme update "${item#theme:}" 2>&1); then warn "$(su_label "$item"): $(tail -1 <<<"$out")"; fi;;
+    esac
+  done
+  su_versions > "$BK/versions-after"
+  : > "$BK/updated"
+  for item in "${SU_ITEMS[@]}"; do
+    old=$(su_version_of "$BK/versions-before" "$item"); new=$(su_version_of "$BK/versions-after" "$item")
+    if [ "$item" = core ]; then
+      [ -n "$new" ] && [ "$new" != "$old" ] || { note "WordPress: lokaal niet bijgewerkt, overgeslagen"; continue; }
+      SU_CORE_TO="$new"
+    else
+      d=$(su_dir "$item")
+      if diff -rq "$BK/before/$d" "$LWPC/$d" >/dev/null 2>&1; then
+        note "$(su_label "$item"): lokaal geen nieuwe versie gekregen (premium-plugin zonder licentie lokaal?), overgeslagen"; continue
+      fi
+      SU_DIRS+=("$d")
+    fi
+    SU_UPDATED+=("$item")
+    ok "$(su_label "$item") ${old:-?} → ${new:-?}"
+    echo "$(su_label "$item") ${old:-?} → ${new:-?}" >> "$BK/updated"
+  done
+  if [ ${#SU_UPDATED[@]} -eq 0 ]; then su_rollback_local; die "Geen van de updates kon lokaal geïnstalleerd worden. Live is niet aangeraakt."; fi
+  meta updated "${SU_UPDATED[*]}"
+
+  step "Stap 4/$total: Pagina's opnieuw controleren…"
+  su_check local "$BK/check-after"
+  broken=$(su_broken "$BK/check-before" "$BK/check-after")
+  fatals=$(comm -13 <(su_fatal < "$BK/check-before.php") <(su_fatal < "$BK/check-after.php"))
+  warns=$(comm -13 <(sort -u "$BK/check-before.php") <(sort -u "$BK/check-after.php") | grep -vE '^PHP (Fatal error|Parse error|Recoverable fatal error)' || true)
+  if [ -n "$warns" ]; then note "Nieuwe PHP-meldingen (geen reden om te stoppen):"; cut -c1-300 <<<"$warns" | sed 's/^/    /'; fi
+  if [ -n "$broken" ] || [ -n "$fatals" ]; then
+    if [ -n "$broken" ]; then warn "Werkte vóór de update wel, nu niet:"; sed 's/^/    /' <<<"$broken" >&2; fi
+    if [ -n "$fatals" ]; then warn "Nieuwe PHP-fouten:"; cut -c1-300 <<<"$fatals" | sed 's/^/    /' >&2; fi
+    culprit=$(su_culprit "$fatals")
+    out=$(sed -n 1p <<<"$broken"); out="${out:-een PHP-fout}"
+    su_rollback_local
+    if [ -n "$culprit" ]; then
+      echo "WPO_CULPRIT=$culprit"
+      die "Na het bijwerken van $(su_label "$culprit") gaat het mis: $out. Alles is lokaal teruggezet; live is niet aangeraakt."
+    fi
+    die "Na het bijwerken gaat het mis: $out. Alles is lokaal teruggezet; live is niet aangeraakt."
+  fi
+  ok "Alle pagina's werken nog"
+
+  if [ $live = 0 ]; then
+    su_record_git_dev
+    echo "Bijgewerkt:"; sed 's/^/  ↑ /' "$BK/updated"
+    ok "Lokaal bijgewerkt en getest; live is niet aangeraakt. Bekijk de site lokaal en zet de updates daarna live met 'Veilig bijwerken'."
+    return 0
+  fi
+
+  step "Stap 5/$total: Back-up van live en bijwerken op live…"
+  su_file_lists
+  meta base "$(git -C "$LWPC" rev-parse -q --verify refs/tags/deployed 2>/dev/null || true)"
+  if [ -s "$BK/files" ]; then
+    backup_live_files "$BK/files"
+    if ! su_drift; then
+      if [ $force = 0 ]; then
+        su_rollback_local
+        die "Live is aangepast buiten wpopen om terwijl de updates liepen. Er is niets live gezet en lokaal is alles teruggezet. Probeer het opnieuw, of zet door met --force."
+      fi
+      warn "--force: live-wijzigingen worden overschreven (ze staan in back-up $(basename "$BK"))."
+    fi
+  fi
+  if [ -z "$LIVEHOST" ] || [[ "$LIVEHOST" =~ ^[0-9.]+$ ]]; then
+    livecheck=0; note "Geen live-domein bekend: de live-pagina's worden niet gecontroleerd."
+  else
+    note "Live-pagina's vóór het bijwerken:"; su_check live "$BK/live-before"
+  fi
+  if [ -n "$SU_CORE_TO" ]; then
+    backup_live_db || { su_rollback_local; die "Kon geen back-up van de live database maken. Live is niet aangeraakt; lokaal is alles teruggezet."; }
+    step "WordPress $SU_CORE_TO op live installeren…"
+    SU_LIVE_CORE_DONE=1
+    live_wp core update --version="$SU_CORE_TO" >/dev/null || su_fail_live "WordPress bijwerken op live mislukte"
+    # shellcheck disable=SC2086
+    live_wp core update-db $ms >/dev/null || su_fail_live "De database-update van WordPress op live mislukte"
+    ok "WordPress $SU_CORE_TO staat live"
+  fi
+  if [ -s "$BK/put" ]; then
+    step "Bestanden uploaden naar $LIVEHOST…"
+    # rsync slaat een bestand met dezelfde grootte en tijd over; deze lijst is al op inhoud vergeleken
+    (cd "$LWPC" && xargs -d '\n' touch -c -- < "$BK/put")
+    by_root put_files "$LWPC" "$BK/put" || su_fail_live "Uploaden mislukt"
+  fi
+  if [ -s "$BK/remove" ]; then by_root rm_files "$LWPC" "$BK/remove"; fi
+  if [ -s "$BK/files" ]; then ok "$(grep -c . "$BK/put" || true) bestand(en) bijgewerkt, $(grep -c . "$BK/remove" || true) weggehaald op live"; fi
+
+  step "Stap 6/$total: Live controleren…"
+  flush_live || true
+  if [ $livecheck = 1 ]; then
+    su_check live "$BK/live-after"
+    broken=$(su_broken "$BK/live-before" "$BK/live-after")
+    if [ -n "$broken" ]; then
+      warn "Werkte op live vóór het bijwerken wel, nu niet:"; sed 's/^/    /' <<<"$broken" >&2
+      su_rollback_live; su_rollback_local
+      die "Live gaf fouten na het bijwerken; alles is teruggezet."
+    fi
+    ok "Live-pagina's werken"
+  fi
+  su_record_git
+  echo "Bijgewerkt:"; sed 's/^/  ↑ /' "$BK/updated"
+  local id; id=$(basename "$BK")
+  if [ -n "$SU_CORE_TO" ]; then note "WordPress terug op live: wpopen wp $NAME --live core update --version=$SU_LIVE_CORE --force (database: restore met --live-db)"; fi
+  ok "Bijgewerkt en live! Back-up: $id  (terugdraaien: wpopen restore $NAME $id --live-files)"
+}
 
 # ───────────── controles en hulpmiddelen ─────────────
 ms_since() { echo $(( ($(date +%s%N) - $1) / 1000000 )); }
