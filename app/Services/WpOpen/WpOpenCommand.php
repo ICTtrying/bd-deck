@@ -16,6 +16,11 @@ use InvalidArgumentException;
 final readonly class WpOpenCommand
 {
     /**
+     * Toegestane duur van een deellink in minuten: 1 uur, 4 uur, een werkdag of 24 uur.
+     */
+    public const array SHARE_DURATIONS = [60, 240, 480, 1440];
+
+    /**
      * @param  list<string>  $arguments
      */
     public function __construct(
@@ -106,6 +111,31 @@ final readonly class WpOpenCommand
     public static function stop(Site $site): self
     {
         return new self(WpOpenAction::Stop, ['stop', $site->name], $site);
+    }
+
+    /**
+     * Lokale site tijdelijk delen via een openbare link (ddev share met cloudflared).
+     */
+    public static function share(Site $site, int $minutes): self
+    {
+        if (! $site->isBuilt()) {
+            throw new InvalidArgumentException(__(':site is nog niet lokaal gebouwd. Kies eerst "Lokaal bouwen".', ['site' => $site->name]));
+        }
+
+        if ($site->isMultisite()) {
+            throw new InvalidArgumentException(__('Een multisite kan niet gedeeld worden: elke subsite heeft een eigen adres.'));
+        }
+
+        if (! in_array($minutes, self::SHARE_DURATIONS, true)) {
+            throw new InvalidArgumentException(__('Kies hoe lang de link moet werken.'));
+        }
+
+        return new self(WpOpenAction::Share, ['share', $site->name, '--minutes', (string) $minutes], $site);
+    }
+
+    public static function shareStop(Site $site): self
+    {
+        return new self(WpOpenAction::Share, ['share', $site->name, '--stop'], $site);
     }
 
     public static function backup(Site $site, bool $local = true, bool $liveDatabase = false, bool $liveFiles = false): self

@@ -26,7 +26,7 @@ trait InteractsWithSites
         $site = Site::query()->findOrFail($siteId);
 
         $this->attempt(function () use ($site, $target, $launcher, $settings, $wpopen, $links): void {
-            if (in_array($target, ['local-site', 'local-admin'], true)) {
+            if (in_array($target, ['local-site', 'local-admin', 'mailpit'], true)) {
                 $this->requireBuilt($site);
 
                 $site->isRunning() ? $launcher->openUrl($links->local($site, $target)) : $this->openAfterStart($site, $target);
@@ -36,6 +36,7 @@ trait InteractsWithSites
 
             match ($target) {
                 'live-site' => $launcher->openUrl($site->liveUrl('/')),
+                'share' => $launcher->openUrl($site->shareUrl() ?? throw new InvalidArgumentException(__(':site wordt niet meer gedeeld.', ['site' => $site->name]))),
                 // Laravel heeft geen vaste beheerpagina: dan gewoon de site
                 'live-admin' => $launcher->openUrl($site->isLaravel() ? $site->liveUrl('/') : ($settings->autoLoginLive()
                     ? $wpopen->loginUrl($site->name, live: true, user: $site->live_login_user)

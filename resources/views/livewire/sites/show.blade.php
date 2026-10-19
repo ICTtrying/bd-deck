@@ -79,6 +79,10 @@
                 <x-quick-action chip :site="$site" target="editor" icon="code" :label="__('Editor')" />
                 <x-quick-action chip :site="$site" target="terminal" icon="terminal" :label="__('Terminal')" />
                 <x-quick-action chip :site="$site" target="folder" icon="folder" :label="__('Map')" />
+                <livewire:sites.mailpit-chip :site="$site" :key="'mailpit-'.$site->id" lazy />
+                @unless ($site->isMultisite())
+                    <livewire:sites.share-chip :site="$site" :key="'share-chip-'.$site->id" />
+                @endunless
             @else
                 <x-button size="sm" variant="primary" icon="hammer" wire:click="run('build')" :disabled="(bool) $active">{{ __('Lokaal bouwen') }}</x-button>
             @endif
@@ -395,6 +399,7 @@
 
     <livewire:sites.push-panel :site="$site" :key="'push-'.$site->id" />
     <livewire:sites.delete-dialog />
+    <livewire:sites.share-panel :site="$site" :key="'share-'.$site->id" />
 
     @php $confirmation = $confirming ? $this->confirmations()[$confirming] : null; @endphp
     <x-modal name="confirm-action" :title="$confirmation['title'] ?? ''" :tone="($confirmation['danger'] ?? false) ? 'danger' : null">

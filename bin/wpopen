@@ -67,8 +67,9 @@
 #   wpopen wp <naam> [--live] <args…>         WP-CLI lokaal of op live
 #   wpopen ssh <naam>                         SSH- (of SFTP-)sessie naar live
 #   wpopen share <naam> [--minutes n] | --stop | --status [--json]
-#                                             lokale site tijdelijk delen via een openbare link (ddev share)
-#   wpopen mailpit <naam> [--json] [--test]   Mailpit van de lokale site: adres, aantal mails, testmail
+#                                             lokale site tijdelijk delen via een openbare link (ddev share met
+#                                             cloudflared, standaard 120 minuten; wp-admin en inloggen niet via de link)
+#   wpopen mailpit <naam> [--json] [--test]   Mailpit van de lokale site: adres, aantal mails (--test: testmail sturen)
 #   wpopen artisan <naam> <args…>             php artisan op live (Laravel-sites)
 #
 #   Algemeen: --yes slaat bevestigingsvragen over (de app vraagt zelf om bevestiging).
@@ -286,6 +287,7 @@ cmd_setup() {
     done
     command -v gh >/dev/null && echo "gh|ok|gh (optioneel)|maakt GitHub-repo's automatisch" || echo "gh|skip|gh (optioneel)|https://cli.github.com"
     [ -f "$KEY.pub" ] && echo "key|ok|SSH-sleutel|$KEY.pub" || echo "key|skip|SSH-sleutel|wordt aangemaakt bij de eerste site"
+    command -v cloudflared >/dev/null && echo "cloudflared|ok|cloudflared (optioneel)|voor deellinks" || echo "cloudflared|skip|cloudflared (optioneel)|wordt vanzelf geïnstalleerd bij de eerste deellink"
   } | checks_out "$json"
   if [ $json = 0 ] && ! command -v ddev >/dev/null; then
     echo; echo "Ontbrekende onderdelen installeren (Ubuntu/Debian/Mint):"
@@ -327,7 +329,8 @@ sites_json() {
   local ddevj=""
   command -v ddev >/dev/null && ddevj=$(ddev list -j 2>/dev/null || true)
   DDEVJ="$ddevj" DBF="$DB" BASE="$BASE" BACKUPS="$BACKUPS" ONLY="${1:-}" python3 - <<'PY'
-import json, os, re, subprocess
+import json, os, re, subprocess, time
+from datetime import datetime, timezone
 dbf, base, backups, only = os.environ["DBF"], os.environ["BASE"], os.environ["BACKUPS"], os.environ.get("ONLY", "")
 try:
     ddev = {p.get("name"): p for p in (json.loads(os.environ.get("DDEVJ") or "{}").get("raw") or [])}
@@ -351,6 +354,21 @@ def git(d, *a):
 
 def num(v):
     return int(v) if v.isdigit() else 0
+
+def share(proj):
+    # alleen een deellink die echt nog loopt: proces leeft en de tijd is niet om
+    st = dict(l.split("=", 1) for l in read(os.path.join(proj, ".wpopen-share")).splitlines() if "=" in l)
+    try:
+        pid, started, expires = int(st.get("pid", "")), int(st.get("started", "")), int(st.get("expires", ""))
+        # een hergebruikt pid van een ander proces telt niet: het moet de tunnel van wpopen zijn
+        if pid <= 1 or b"share" not in open("/proc/%d/cmdline" % pid, "rb").read():
+            return None
+    except (ValueError, OSError):
+        return None
+    if expires <= time.time() or not st.get("url"):
+        return None
+    iso = lambda t: datetime.fromtimestamp(t, timezone.utc).astimezone().isoformat(timespec="seconds")
+    return {"url": st["url"], "started_at": iso(started), "expires_at": iso(expires)}
 
 sites = []
 for line in open(dbf, errors="ignore"):
@@ -383,6 +401,8 @@ for line in open(dbf, errors="ignore"):
         "multisite": kind != "laravel" and bool(re.search(r"define\(\s*['\"]MULTISITE['\"]\s*,\s*true", read(os.path.join(proj, "wp-config.php")))),
         "subsites": [{"id": int(i), "url": u} for i, _, u in (x.partition("|") for x in read(os.path.join(proj, ".wpopen-subsites")).splitlines()) if i.isdigit()],
         "ddev_status": d.get("status") or ("absent" if not os.path.isdir(os.path.join(proj, ".ddev")) else "stopped"),
+        "mailpit_url": d.get("mailpit_https_url") or None,
+        "share": share(proj),
         "git": None, "backups": 0, "last_backup": None,
     }
     if os.path.isdir(os.path.join(wpc, ".git")):
@@ -1317,10 +1337,11 @@ write_uploads_proxy() {  # host [locatie]
   echo "$host" > "$PROJ/.wpopen-livehost"
 }
 
-# kleine lokale mu-plugin: geen admin-e-mailcontrole, geen update-gezeur, eenmalige inloglinks. Staat in .gitignore van wp-content, dus nooit naar live.
+# kleine lokale mu-plugin: geen admin-e-mailcontrole, geen update-gezeur, eenmalige inloglinks, alle mail naar
+# Mailpit en een afgeschermde deellink. Staat in .gitignore van wp-content, dus nooit naar live.
 write_local_mu() {
   mkdir -p "$LWPC/mu-plugins"
-  cat > "$LWPC/mu-plugins/wpopen-local.php" <<'PHP'
+  sed "s/__WPO_LOCAL_HOST__/$SLUG.ddev.site/g" > "$LWPC/mu-plugins/wpopen-local.php" <<'PHP'
 <?php
 /* wpopen: lokale instellingen. Niet deployen. */
 add_filter( 'admin_email_check_interval', '__return_false' );
@@ -1364,6 +1385,122 @@ add_action( 'init', static function (): void {
 	wp_safe_redirect( admin_url() );
 	exit;
 }, 1 );
+// lokaal gaat nooit echte mail de deur uit: PHPMailer altijd naar Mailpit van DDEV, ook als een SMTP-plugin iets anders instelt
+add_action( 'phpmailer_init', static function ( $mailer ): void {
+	$mailer->isSMTP();
+	$mailer->Host        = '127.0.0.1';
+	$mailer->Port        = 1025;
+	$mailer->SMTPAuth    = false;
+	$mailer->SMTPSecure  = '';
+	$mailer->SMTPAutoTLS = false;
+	$mailer->Username    = '';
+	$mailer->Password    = '';
+}, PHP_INT_MAX );
+// mailplugins die via een eigen API versturen slaan PHPMailer over: lokaal niet laden (de database blijft ongemoeid)
+$wpopen_mailers = '#^(wp-mail-smtp|wp-mail-smtp-pro|post-smtp|fluent-smtp|easy-wp-smtp|wp-ses|wp-offload-ses|mailgun|sendgrid-email-delivery-simplified|postmark-approved-wordpress-plugin|smtp-mailer|gmail-smtp|wp-smtp|suremails|gravitysmtp|mailpoet|mailpoet-premium)/#';
+add_filter( 'option_active_plugins', static function ( $plugins ) use ( $wpopen_mailers ) {
+	if ( ! is_array( $plugins ) ) {
+		return $plugins;
+	}
+	return array_values( array_filter( $plugins, static function ( $plugin ) use ( $wpopen_mailers ): bool {
+		return ! preg_match( $wpopen_mailers, (string) $plugin );
+	} ) );
+}, PHP_INT_MAX );
+add_filter( 'site_option_active_sitewide_plugins', static function ( $plugins ) use ( $wpopen_mailers ) {
+	if ( ! is_array( $plugins ) ) {
+		return $plugins;
+	}
+	foreach ( array_keys( $plugins ) as $plugin ) {
+		if ( preg_match( $wpopen_mailers, (string) $plugin ) ) {
+			unset( $plugins[ $plugin ] );
+		}
+	}
+	return $plugins;
+}, PHP_INT_MAX );
+unset( $wpopen_mailers );
+// deellink (`wpopen share`): via de tunnel alleen de website zelf, nooit beheer of inloggen (lokaal is dev/dev beheerder)
+( static function (): void {
+	$host  = preg_replace( '/:\d+$/', '', strtolower( (string) ( $_SERVER['HTTP_HOST'] ?? '' ) ) );
+	$state = array();
+	$file  = dirname( WP_CONTENT_DIR ) . '/.wpopen-share';
+	if ( is_readable( $file ) ) {
+		foreach ( (array) file( $file, FILE_IGNORE_NEW_LINES ) as $line ) {
+			$pair = explode( '=', (string) $line, 2 );
+			if ( 2 === count( $pair ) ) {
+				$state[ $pair[0] ] = $pair[1];
+			}
+		}
+	}
+	$shared = strtolower( (string) parse_url( (string) ( $state['url'] ?? '' ), PHP_URL_HOST ) );
+	$quick  = '.trycloudflare.com' === substr( $host, -18 );
+	// CF-Ray: elk verzoek via Cloudflare, ook als de tunnel de Host-header zou herschrijven
+	if ( '' === $host || ( $host !== $shared && ! $quick && empty( $_SERVER['HTTP_CF_RAY'] ) ) ) {
+		return;
+	}
+	$stop = static function ( int $status, string $message ): void {
+		http_response_code( $status );
+		header( 'Content-Type: text/html; charset=utf-8' );
+		header( 'Cache-Control: no-store' );
+		header( 'X-Robots-Tag: noindex, nofollow' );
+		echo '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>' . $message . '</title>'
+			. '<p style="font:16px/1.5 system-ui,sans-serif;max-width:30rem;margin:20vh auto;padding:0 1rem;text-align:center">' . $message . '</p>';
+		exit;
+	};
+	if ( '' === $shared || time() > (int) ( $state['expires'] ?? 0 ) || ( $quick && $host !== $shared ) ) {
+		$stop( 410, 'Deze deellink is verlopen.' );
+	}
+	$script = (string) ( $_SERVER['SCRIPT_NAME'] ?? '' );
+	$path   = strtolower( rawurldecode( (string) parse_url( (string) ( $_SERVER['REQUEST_URI'] ?? '/' ), PHP_URL_PATH ) ) );
+	$route  = isset( $_GET['rest_route'] ) && is_string( $_GET['rest_route'] ) ? strtolower( ltrim( $_GET['rest_route'], '/' ) ) : '';
+	// formulieren op de site posten naar admin-ajax.php of admin-post.php: die moeten blijven werken
+	$public = in_array( $script, array( '/wp-admin/admin-ajax.php', '/wp-admin/admin-post.php' ), true );
+	if ( ( ! $public && ( false !== strpos( $path, '/wp-admin' ) || ( defined( 'WP_ADMIN' ) && WP_ADMIN ) ) )
+		|| false !== strpos( $path, 'wp-login.php' ) || '/wp-login.php' === $script
+		|| false !== strpos( $path, 'xmlrpc.php' ) || ( defined( 'XMLRPC_REQUEST' ) && XMLRPC_REQUEST )
+		|| isset( $_GET['wpopen-login'] )
+		|| false !== strpos( $path, '/wp/v2/users' ) || 0 === strpos( $route, 'wp/v2/users' ) ) {
+		$stop( 403, 'Beheer is uitgeschakeld via de deellink.' );
+	}
+	// niemand is ingelogd via de tunnel, ook niet via een inlogformulier op de site zelf (bv. WooCommerce)
+	add_filter( 'determine_current_user', '__return_zero', PHP_INT_MAX );
+	add_filter( 'authenticate', static function () {
+		return new WP_Error( 'wpopen_share', 'Inloggen is uitgeschakeld via de deellink.' );
+	}, PHP_INT_MAX );
+	add_action( 'login_init', static function () use ( $stop ): void {
+		$stop( 403, 'Beheer is uitgeschakeld via de deellink.' );
+	} );
+	add_filter( 'xmlrpc_enabled', '__return_false' );
+	add_filter( 'rest_endpoints', static function ( $endpoints ) {
+		foreach ( array_keys( (array) $endpoints ) as $endpoint ) {
+			if ( 0 === strpos( (string) $endpoint, '/wp/v2/users' ) ) {
+				unset( $endpoints[ $endpoint ] );
+			}
+		}
+		return $endpoints;
+	} );
+	// WordPress stuurt anders door naar zijn eigen adres (*.ddev.site), dat de klant niet kan openen
+	$url   = 'https://' . $shared;
+	$local = '__WPO_LOCAL_HOST__';
+	$swap  = static function ( $text ) use ( $local, $shared ) {
+		if ( ! is_string( $text ) || '' === $text ) {
+			return $text;
+		}
+		return str_replace(
+			array( 'https://' . $local, 'http://' . $local, 'https:\/\/' . $local, 'http:\/\/' . $local, '//' . $local, '\/\/' . $local ),
+			array( 'https://' . $shared, 'https://' . $shared, 'https:\/\/' . $shared, 'https:\/\/' . $shared, '//' . $shared, '\/\/' . $shared ),
+			$text
+		);
+	};
+	$_SERVER['HTTPS'] = 'on';
+	header( 'X-Robots-Tag: noindex, nofollow' );
+	foreach ( array( 'option_home', 'option_siteurl' ) as $option ) {
+		add_filter( $option, static function () use ( $url ): string {
+			return $url;
+		}, PHP_INT_MAX );
+	}
+	add_filter( 'wp_redirect', $swap, PHP_INT_MAX );
+	ob_start( $swap );
+} )();
 PHP
 }
 
@@ -1692,16 +1829,19 @@ laravel_db_import() {  # stdin (sql) → live database (alleen SSH)
     *) echo 'terugzetten kan alleen bij mysql/mariadb/pgsql' >&2; exit 1;;
   esac"
 }
+# mail van een lokale Laravel-site gaat via SMTP naar Mailpit in de DDEV-webcontainer, nooit naar de echte mailserver
+LARAVEL_MAIL_ENV="MAIL_MAILER=smtp MAIL_DRIVER=smtp MAIL_HOST=127.0.0.1 MAIL_PORT=1025 MAIL_USERNAME=null MAIL_PASSWORD=null MAIL_ENCRYPTION=null MAIL_SCHEME=null"
 # lokale .env: live als basis (APP_KEY moet gelijk blijven), database/URL/mail naar DDEV, betaal- en mailsleutels leeg
 laravel_env_local() {  # live .env op stdin
   local tmp; tmp=$(mktemp)
-  LOCALURL="$LOCALURL" python3 -c '
+  LOCALURL="$LOCALURL" MAILENV="$LARAVEL_MAIL_ENV" python3 -c '
 import os, re, sys
 src = sys.stdin.read().splitlines()
 keys = [l.split("=", 1)[0] for l in src if re.match(r"^[A-Z0-9_]+=", l)]
 get = lambda k: next((l.split("=", 1)[1].strip().strip("\"\x27") for l in src if l.startswith(k + "=")), "")
 conn = get("DB_CONNECTION") or "mysql"
-over = {"APP_ENV": "local", "APP_DEBUG": "true", "APP_URL": os.environ["LOCALURL"], "MAIL_MAILER": "log", "MAIL_DRIVER": "log"}
+over = {"APP_ENV": "local", "APP_DEBUG": "true", "APP_URL": os.environ["LOCALURL"]}
+over.update(x.split("=", 1) for x in os.environ["MAILENV"].split())
 if conn == "sqlite":
     over["DB_DATABASE"] = "/var/www/html/database/database.sqlite"
 else:
@@ -1719,6 +1859,25 @@ for l in src:
 out += [k + "=" + v for k, v in over.items() if k not in keys]
 print("\n".join(out))' > "$tmp" || { rm -f "$tmp"; return 1; }
   mv "$tmp" "$PROJ/.env"; chmod 600 "$PROJ/.env"
+}
+laravel_mail_local() {  # bestaande lokale .env (ook van vóór Mailpit) alsnog naar Mailpit laten mailen
+  [ -f "$PROJ/.env" ] || return 0
+  local tmp; tmp=$(mktemp)
+  MAILENV="$LARAVEL_MAIL_ENV" python3 - "$PROJ/.env" > "$tmp" <<'PY' || { rm -f "$tmp"; warn "Kon de mailinstellingen in .env niet aanpassen"; return 0; }
+import os, re, sys
+over = dict(x.split("=", 1) for x in os.environ["MAILENV"].split())
+seen, out = set(), []
+for l in open(sys.argv[1], errors="ignore").read().splitlines():
+    m = re.match(r"^([A-Z0-9_]+)=", l)
+    if m and m.group(1) in over:
+        l = m.group(1) + "=" + over[m.group(1)]
+        seen.add(m.group(1))
+    out.append(l)
+out += [k + "=" + v for k, v in over.items() if k not in seen]
+print("\n".join(out))
+PY
+  # cat i.p.v. mv: de rechten (600) van .env blijven zo staan
+  if cmp -s "$tmp" "$PROJ/.env"; then rm -f "$tmp"; else cat "$tmp" > "$PROJ/.env"; rm -f "$tmp"; fi
 }
 laravel_pull_files() {  # lokale-map (standaard het project)
   local dest="${1:-$PROJ}"
@@ -1770,6 +1929,7 @@ laravel_init_git() {
 laravel_fix() {  # idempotent: .env, mappen, afhankelijkheden, storage-link, caches, proxy voor /storage
   cd "$PROJ"; RESTART=0
   [ -f .env ] || { live_env_file | laravel_env_local || warn "Kon geen lokale .env maken"; }
+  laravel_mail_local
   mkdir -p storage/framework/cache/data storage/framework/sessions storage/framework/views storage/logs storage/app/public bootstrap/cache
   [ -f vendor/autoload.php ] || { step "Composer-pakketten installeren…"; ddev composer install --no-interaction --no-progress >/dev/null 2>&1 || warn "composer install mislukt; draai het zelf: ddev composer install"; }
   ddev artisan storage:link >/dev/null 2>&1 || true
@@ -3308,8 +3468,191 @@ cmd_ssh() {
 }
 
 # ───────────── delen en Mailpit ─────────────
-cmd_share() { die "Nog niet beschikbaar."; }
-cmd_mailpit() { die "Nog niet beschikbaar."; }
+# cloudflared maakt snelle tunnels op trycloudflare.com zonder account; ngrok zou een account vereisen
+ensure_cloudflared() {
+  export PATH="$HOME/.local/bin:$PATH"
+  command -v cloudflared >/dev/null && return 0
+  local arch url tmp
+  case "$(uname -m)" in
+    x86_64|amd64) arch=amd64;;
+    aarch64|arm64) arch=arm64;;
+    *) die "Delen kan niet: er is geen cloudflared voor processor $(uname -m).";;
+  esac
+  url="${WPO_CLOUDFLARED_URL:-https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$arch}"
+  need curl
+  step "Eerste keer: cloudflared installeren (maakt de tunnel naar Cloudflare)…"
+  mkdir -p "$HOME/.local/bin"; tmp=$(mktemp "$HOME/.local/bin/.cloudflared.XXXXXX")
+  curl -fsSL --max-time 300 -o "$tmp" "$url" || { rm -f "$tmp"; die "cloudflared downloaden mislukt. Controleer je internetverbinding."; }
+  chmod +x "$tmp"
+  "$tmp" --version 2>/dev/null | grep -qi cloudflared || { rm -f "$tmp"; die "De gedownloade cloudflared werkt niet op deze computer."; }
+  mv "$tmp" "$HOME/.local/bin/cloudflared"
+  ok "cloudflared geïnstalleerd ($("$HOME/.local/bin/cloudflared" --version 2>/dev/null | sed -n 1p))"
+}
+share_get() { [ -f "$PROJ/.wpopen-share" ] || return 0; sed -n "s/^$1=//p" "$PROJ/.wpopen-share" | sed -n 1p; }
+alive() { [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null; }
+descendants() { local c; for c in $(ps -o pid= --ppid "$1" 2>/dev/null); do echo "$c"; descendants "$c"; done; }
+ours() {  # pid — alleen een proces dat wpopen zelf voor delen startte; een oud of fout statusbestand mag nooit iets anders raken
+  [[ "${1:-}" =~ ^[0-9]+$ ]] && [ "$1" -gt 1 ] && [ "$1" != "$$" ] || return 1
+  [ "$(ps -o uid= -p "$1" 2>/dev/null | tr -d ' ')" = "$(id -u)" ] || return 1
+  tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null | grep -q 'share' || return 1
+}
+kill_tree() {  # pid — de procesgroep plus alle afstammelingen (een provider kan een eigen groep hebben)
+  local k kids; ours "${1:-}" || return 0
+  kids=$(descendants "$1")
+  # alleen als groepsleider: anders zou -pid een vreemde groep (in het ergste geval -1: alles) treffen
+  if [ "$(ps -o pgid= -p "$1" 2>/dev/null | tr -d ' ')" = "$1" ]; then kill -TERM -- "-$1" 2>/dev/null || true; fi
+  kill -TERM "$1" 2>/dev/null || true
+  for k in $kids; do [[ "$k" =~ ^[0-9]+$ ]] && [ "$k" -gt 1 ] && kill -TERM "$k" 2>/dev/null || true; done
+}
+share_clear() {  # tunnel en bewaker stoppen, status weg
+  local wd; wd=$(share_get watchdog)
+  kill_tree "$(share_get pid)"
+  # de bewaker roept zelf --stop aan; zichzelf afschieten zou het opruimen halverwege afbreken
+  if [ "$wd" != "$$" ]; then kill_tree "$wd"; fi
+  rm -f "$PROJ/.wpopen-share" "$PROJ/.wpopen-share.log"
+}
+share_active() {  # loopt de deellink nog? zo niet: resten opruimen
+  [ -f "$PROJ/.wpopen-share" ] || return 1
+  local exp; exp=$(share_get expires)
+  if ours "$(share_get pid)" && [ -n "$(share_get url)" ] && [ "${exp:-0}" -gt "$(date +%s)" ]; then return 0; fi
+  share_clear; return 1
+}
+share_until() {  # tijdstempel → "16:30", "morgen 09:30" of "18-10 09:30"
+  local day; day=$(date -d "@$1" +%F)
+  if [ "$day" = "$(date +%F)" ]; then date -d "@$1" +%H:%M
+  elif [ "$day" = "$(date -d tomorrow +%F)" ]; then echo "morgen $(date -d "@$1" +%H:%M)"
+  else date -d "@$1" '+%-d-%-m %H:%M'; fi
+}
+share_status() {  # json(0|1)
+  if ! share_active; then
+    if [ "$1" = 1 ]; then echo null; else note "$NAME wordt nu niet gedeeld."; fi
+    return 0
+  fi
+  local url started exp; url=$(share_get url); started=$(share_get started); exp=$(share_get expires)
+  if [ "$1" = 1 ]; then
+    printf '{"url":"%s","started_at":"%s","expires_at":"%s"}\n' "$url" "$(date -d "@$started" -Iseconds)" "$(date -d "@$exp" -Iseconds)"
+  else
+    ok "$NAME is gedeeld tot $(share_until "$exp")"; echo "URL: $url"
+  fi
+}
+cmd_share() {
+  local name="" minutes=120 action=start json=0
+  while [ $# -gt 0 ]; do case "$1" in
+    --minutes) minutes="${2:-}"; shift;;
+    --stop) action=stop;;
+    --status) action=status;;
+    --json) json=1;;
+    -*) die "Onbekende optie: $1";;
+    *) name="$1";;
+  esac; shift; done
+  [ -n "$name" ] || die "Gebruik: wpopen share <naam> [--minutes n] | --stop | --status [--json]"
+  get "$name"
+  case "$action" in
+    status) share_status "$json"; return;;
+    stop)
+      if [ -f "$PROJ/.wpopen-share" ]; then share_clear; ok "Deellink van $NAME gestopt"; else note "$NAME werd niet gedeeld."; fi
+      return;;
+  esac
+  [[ "$minutes" =~ ^[0-9]+$ ]] && [ "$minutes" -ge 5 ] && [ "$minutes" -le 1440 ] || die "--minutes moet tussen 5 en 1440 liggen."
+  need ddev; built
+  if ! is_laravel && is_multisite; then die "Een multisite kan niet gedeeld worden: elke subsite heeft een eigen adres en dat werkt niet via één link."; fi
+  if share_active; then
+    ok "$NAME is al gedeeld tot $(share_until "$(share_get expires)")"; echo "URL: $(share_get url)"; return 0
+  fi
+  ensure_cloudflared
+  cd "$PROJ"
+  step "Lokale site starten…"; ddev_up >/dev/null
+  # de afscherming (geen beheer via de link) moet er staan vóórdat de tunnel opengaat
+  is_laravel || write_local_mu
+  step "Tunnel openen via Cloudflare (meestal 5 tot 20 seconden)…"
+  local log="$PROJ/.wpopen-share.log" pid url="" i wait="${WPO_SHARE_WAIT:-45}" now exp wd self
+  : > "$log"
+  # eigen sessie en procesgroep: de tunnel blijft draaien als wpopen klaar is en is in één keer te stoppen
+  setsid ddev share --provider=cloudflared </dev/null >"$log" 2>&1 &
+  pid=$!
+  for ((i = 0; i < wait * 2; i++)); do
+    url=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$log" 2>/dev/null | grep -v '^https://api\.' | sed -n 1p || true)
+    [ -n "$url" ] && break
+    alive "$pid" || break
+    sleep 0.5
+  done
+  if [ -z "$url" ]; then
+    kill_tree "$pid"
+    warn "Laatste meldingen van ddev share:"; tail -n 8 "$log" >&2 || true
+    rm -f "$log"
+    die "Kon geen deellink maken. Probeer het over een minuut opnieuw."
+  fi
+  now=$(date +%s); exp=$(( now + minutes * 60 )); self=$(readlink -f "$0")
+  # bewaker kijkt naar de klok (niet naar sleep): na een slaapstand stopt de link alsnog op tijd
+  setsid bash -c 'while [ "$(date +%s)" -lt "$1" ]; do sleep 20; done; exec bash "$2" share "$3" --stop' _ "$exp" "$self" "$NAME" </dev/null >/dev/null 2>&1 &
+  wd=$!
+  printf 'pid=%s\nurl=%s\nstarted=%s\nexpires=%s\nwatchdog=%s\n' "$pid" "$url" "$now" "$exp" "$wd" > "$PROJ/.wpopen-share"
+  ok "Gedeeld tot $(share_until "$exp")"
+  is_laravel || note "Alleen de website zelf: wp-admin en inloggen zijn via deze link uitgeschakeld."
+  note "De link werkt zolang je computer aan staat; soms duurt het een halve minuut voordat hij bereikbaar is."
+  echo "URL: $url"
+}
+
+mailpit_url() {  # adres van de Mailpit-webinterface van deze site
+  local u
+  u=$(cd "$PROJ" 2>/dev/null && ddev describe -j 2>/dev/null | python3 -c 'import json, sys; print(json.load(sys.stdin)["raw"].get("mailpit_https_url") or "")' 2>/dev/null || true)
+  echo "${u:-https://$SLUG.ddev.site:8026}"
+}
+mailpit_test() {  # testmail via de site zelf, zodat je ziet dat formulieren in Mailpit uitkomen
+  local out
+  docker inspect -f '{{.State.Running}}' "ddev-$SLUG-web" 2>/dev/null | grep -q true || { cd "$PROJ"; ddev_up >/dev/null 2>&1; }
+  cd "$PROJ"
+  if is_laravel; then
+    laravel_mail_local
+    ddev artisan config:clear >/dev/null 2>&1 || true
+    cat > "$PROJ/.wpopen-mailtest.php" <<'PHP'
+<?php
+// wpopen: testmail met de mailinstellingen van de app. Wordt direct weer verwijderd.
+require __DIR__ . '/vendor/autoload.php';
+$app = require __DIR__ . '/bootstrap/app.php';
+$app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+if (config('mail.default') !== 'smtp' || ! in_array(config('mail.mailers.smtp.host'), ['127.0.0.1', 'localhost'], true)) {
+    fwrite(STDERR, "Mail gaat niet naar Mailpit; testmail niet verstuurd.\n");
+    exit(1);
+}
+Illuminate\Support\Facades\Mail::raw("Deze testmail is lokaal verstuurd vanuit BD Deck. Hij staat alleen in Mailpit en is nergens anders heen gegaan.", function ($message) {
+    $message->to('test@example.test')->subject('Testmail van BD Deck');
+});
+echo 'wpo-mail-' . 'ok', "\n";
+PHP
+    out=$(ddev exec php /var/www/html/.wpopen-mailtest.php 2>&1 || true)
+    rm -f "$PROJ/.wpopen-mailtest.php"
+  else
+    # eerst de mu-plugin bijwerken: die stuurt alle mail naar Mailpit, ook bij een actieve SMTP-plugin
+    write_local_mu
+    out=$(ddev wp eval 'echo wp_mail( "test@example.test", "Testmail van BD Deck", "Deze testmail is lokaal verstuurd vanuit BD Deck. Hij staat alleen in Mailpit en is nergens anders heen gegaan." ) ? "wpo-mail-" . "ok" : "wpo-mail-" . "fail";' 2>&1 || true)
+  fi
+  grep -q 'wpo-mail-ok' <<<"$out" || { warn "$(tail -n 3 <<<"$out")"; die "Testmail versturen mislukt."; }
+  ok "Testmail verstuurd naar Mailpit (aan test@example.test)"
+}
+cmd_mailpit() {
+  local name="" json=0 test=0 url counts total unread
+  while [ $# -gt 0 ]; do case "$1" in
+    --json) json=1;;
+    --test) test=1;;
+    -*) die "Onbekende optie: $1";;
+    *) name="$1";;
+  esac; shift; done
+  [ -n "$name" ] || die "Gebruik: wpopen mailpit <naam> [--json] [--test]"
+  get "$name"; need ddev; built
+  [ $test = 0 ] || mailpit_test
+  url=$(mailpit_url)
+  counts=$(curl -sk --max-time 5 "$url/api/v1/messages?limit=1" 2>/dev/null || true)
+  read -r total unread < <(python3 -c 'import json, sys
+try:
+    d = json.loads(sys.stdin.read()); print(int(d["total"]), int(d["unread"]))
+except Exception:
+    print("null null")' <<<"$counts")
+  if [ $json = 1 ]; then printf '{"url":"%s","total":%s,"unread":%s}\n' "$url" "$total" "$unread"; return; fi
+  echo "Mailpit: $url"
+  if [ "$total" = null ]; then note "Niet bereikbaar. Start eerst de lokale site: wpopen start $NAME"
+  else echo "$total mail(s) binnen, $unread ongelezen"; fi
+}
 
 # ───────────── start ─────────────
 # algemene vlaggen weghalen; niet bij `wp`, daar horen ze bij WP-CLI zelf

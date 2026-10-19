@@ -52,6 +52,9 @@
                 @if ($updates > 0)
                     <a href="{{ route('sites.show', $site) }}" wire:navigate><x-badge tone="warning">{{ trans_choice(':count update|:count updates', $updates) }}</x-badge></a>
                 @endif
+                @if ($site->isShared())
+                    <a href="{{ route('sites.show', $site) }}" wire:navigate title="{{ $site->shareUrl() }}"><x-badge tone="live">{{ __('Gedeeld') }}</x-badge></a>
+                @endif
                 @if ($site->healthTone() === 'danger')
                     <x-badge tone="danger">{{ __('Verbinding mislukt') }}</x-badge>
                 @endif
@@ -76,6 +79,7 @@
                     <x-menu-item icon="code" wire:click="launch({{ $site->id }}, 'editor')">{{ __('Openen in editor') }}</x-menu-item>
                     <x-menu-item icon="terminal" wire:click="launch({{ $site->id }}, 'terminal')">{{ __('Terminal in projectmap') }}</x-menu-item>
                     <x-menu-item icon="folder" wire:click="launch({{ $site->id }}, 'folder')">{{ __('Map openen') }}</x-menu-item>
+                    <x-menu-item icon="mail" wire:click="launch({{ $site->id }}, 'mailpit')" :description="__('Mail van de lokale site komt hier binnen; er gaat niets echt de deur uit.')">{{ __('Mailpit (testmails)') }}</x-menu-item>
                     <div class="my-1 h-px bg-line"></div>
                     <x-menu-item :icon="$site->isRunning() ? 'square' : 'play'" wire:click="runQuick({{ $site->id }}, '{{ $site->isRunning() ? 'stop' : 'start' }}')">{{ $site->isRunning() ? __('Lokale site stoppen') : __('Lokale site starten') }}</x-menu-item>
                 @else

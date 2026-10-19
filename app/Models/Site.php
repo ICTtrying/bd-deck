@@ -204,6 +204,30 @@ class Site extends Model
         return $this->data('ddev_status') === 'running';
     }
 
+    /**
+     * Openbare deellink (ddev share); null als de site niet (meer) gedeeld wordt.
+     */
+    public function shareUrl(): ?string
+    {
+        return $this->isShared() ? (string) $this->data('share.url') : null;
+    }
+
+    public function shareExpiresAt(): ?Carbon
+    {
+        $expires = $this->data('share.expires_at');
+
+        // wpopen geeft de tijd met de offset van de computer; tonen doen we in de tijdzone van de app
+        return is_string($expires) && $expires !== '' ? Carbon::parse($expires)->setTimezone(config('app.timezone')) : null;
+    }
+
+    /**
+     * De snapshot kan ouder zijn dan de eindtijd: een verlopen link telt dan al niet meer mee.
+     */
+    public function isShared(): bool
+    {
+        return filled($this->data('share.url')) && ($this->shareExpiresAt()?->isFuture() ?? false);
+    }
+
     public function liveUrl(string $path = ''): string
     {
         return rtrim((string) ($this->data('live_site_url') ?? 'https://'.$this->data('host')), '/').$path;

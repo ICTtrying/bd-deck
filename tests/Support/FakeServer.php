@@ -378,6 +378,26 @@ final class FakeServer
         File::deleteDirectory($this->root);
     }
 
+    /**
+     * Eigen nep-commando in PATH, bv. cloudflared of een curl die Mailpit nabootst.
+     */
+    public function fakeCommand(string $name, string $script): void
+    {
+        $this->stub($name, $script);
+    }
+
+    /**
+     * Extra gevallen voor de nep-ddev (bv. `ddev share`); al het andere gaat naar de standaard-stub.
+     */
+    public function extendDdev(string $cases): void
+    {
+        if (! is_file($this->bin.'/ddev-base')) {
+            rename($this->bin.'/ddev', $this->bin.'/ddev-base');
+        }
+
+        $this->stub('ddev', "#!/usr/bin/env bash\ncase \"\$*\" in\n{$cases}\nesac\nexec \"\$(dirname \"\$0\")/ddev-base\" \"\$@\"");
+    }
+
     private function stub(string $name, string $script): void
     {
         file_put_contents($this->bin.'/'.$name, $script."\n");
