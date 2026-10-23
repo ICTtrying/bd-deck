@@ -65,7 +65,7 @@
                 </dl>
 
                 @if ($share)
-                    <details class="rounded-lg border border-line bg-raised px-3 py-2.5 text-[0.8125rem]">
+                    <details wire:ignore.self class="rounded-lg border border-line bg-raised px-3 py-2.5 text-[0.8125rem]">
                         <summary class="cursor-pointer font-medium">{{ __('Bericht voor de klant') }}</summary>
                         <p class="mt-2 whitespace-pre-line">{{ $this->clientMessage() }}</p>
                         <x-copy-button :text="$this->clientMessage()" :label="__('Bericht kopiëren')" class="mt-2" />

@@ -63,6 +63,15 @@ describe('projectpagina', function (): void {
             ->assertSee('Stoppen');
     });
 
+    it('laat het bericht voor de klant open staan terwijl de dev server pollt', function (): void {
+        $site = Site::factory()->devRunning()->create();
+
+        // zonder wire:ignore.self klapt <details> bij elke poll (3s) weer dicht
+        Livewire::test(ShopifyDev::class, ['site' => $site])
+            ->assertSeeHtml('wire:poll.3s="refreshSite"')
+            ->assertSeeHtml('<details wire:ignore.self');
+    });
+
     it('meldt een map die ontbreekt', function (): void {
         $site = Site::factory()->shopify()->snapshotState(['built' => false])->create();
 
