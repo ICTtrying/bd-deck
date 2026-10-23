@@ -159,12 +159,16 @@
                 </x-panel>
 
                 <x-panel :title="__('Sneltoetsen')">
-                    <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-[0.8125rem]">
-                        @foreach ([['d', __('Dev server starten of stoppen')], ['p', __('Preview openen (start zo nodig)')], ['e', __('Theme editor openen')], ['s', __('Deelbare link openen')], ['c', __('Thema controleren')], ['l', __('Logboek')]] as [$key, $text])
-                            <dt><kbd class="rounded border border-line bg-raised px-1.5 py-px font-mono text-xs">{{ $key }}</kbd></dt>
-                            <dd class="text-muted">{{ $text }}</dd>
+                    <ul class="grid gap-0.5 text-[0.8125rem]">
+                        @foreach ([['d', 'toggle-dev', __('Dev server starten of stoppen')], ['p', 'preview', __('Preview openen (start zo nodig)')], ['e', 'editor', __('Theme editor openen')], ['s', 'share', __('Deelbare link openen')], ['c', 'check', __('Thema controleren')], ['l', 'log', __('Logboek')]] as [$key, $action, $text])
+                            <li>
+                                <button type="button" wire:click="shortcut('{{ $action }}')" class="flex w-full items-center gap-4 rounded-lg px-2 py-1.5 text-left text-muted transition-colors hover:bg-raised hover:text-ink">
+                                    <kbd class="rounded border border-line bg-raised px-1.5 py-px font-mono text-xs text-ink">{{ $key }}</kbd>
+                                    <span>{{ $text }}</span>
+                                </button>
+                            </li>
                         @endforeach
-                    </dl>
+                    </ul>
                 </x-panel>
             </div>
         </div>

@@ -72,6 +72,16 @@ describe('projectpagina', function (): void {
             ->assertSeeHtml('<details wire:ignore.self');
     });
 
+    it('maakt de sneltoetsen ook klikbaar', function (): void {
+        $site = Site::factory()->shopify()->create();
+
+        $component = Livewire::test(Show::class, ['site' => $site]);
+
+        foreach (['toggle-dev', 'preview', 'editor', 'share', 'check', 'log'] as $action) {
+            $component->assertSeeHtml("wire:click=\"shortcut('{$action}')\"");
+        }
+    });
+
     it('meldt een map die ontbreekt', function (): void {
         $site = Site::factory()->shopify()->snapshotState(['built' => false])->create();
 
