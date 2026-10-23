@@ -72,27 +72,9 @@
 #   wpopen mailpit <naam> [--json] [--test]   Mailpit van de lokale site: adres, aantal mails (--test: testmail sturen)
 #   wpopen artisan <naam> <args…>             php artisan op live (Laravel-sites)
 #
-#   Shopify-thema's (de Shopify CLI doet het werk; projectmappen staan in $WPO_SHOPIFY_DIR, standaard ~/Projects/shopify):
-#   wpopen shopify add <naam> --store winkel.myshopify.com [--path map] [--create] [--port n] [--url https://domein]
-#     [--ignore patroon]… [--sync] [--host 127.0.0.1|0.0.0.0]
-#                                             project koppelen (--create: nieuwe map vanaf het live thema, met git)
-#   wpopen shopify update <naam> [--store|--path|--port|--url|--ignore|--sync 0|1|--host|--name waarde]
-#   wpopen shopify dev|stop <naam>            dev server starten (poort per project) of stoppen; wpopen start|stop doet hetzelfde
-#   wpopen shopify status <naam> [--json] | logs <naam> [--lines n]
-#   wpopen shopify themes <naam> [--json]     thema's van de winkel (ook de manier om in te loggen)
-#   wpopen shopify pull <naam> [--all]        editor-wijzigingen van de klant (of het hele thema) van live ophalen, vastgelegd in git
-#   wpopen shopify check <naam> [--json]      shopify theme check, fouten vergeleken met eerder geaccepteerde fouten
-#   wpopen shopify push <naam> [--theme "naam"] [--no-pull] [--no-check] [--allow-check-errors]
-#                                             naar een NIET-gepubliceerd thema (nieuw, of bestaand), nooit rechtstreeks naar live;
-#                                             config/settings_data.json en templates/*.json blijven staan (instelbaar met --ignore)
-#   wpopen shopify publish <naam> --theme "naam of id" [--sync-editor-files | --keep-editor-files]
-#                                             preview-thema live zetten, na back-up van het live thema en een git-tag
-#   wpopen shopify rollback <naam>            het vorige live thema weer live zetten
-#   wpopen shopify test <naam> [--json]       CLI, themamap, inloggen en poort controleren
-#
 #   Algemeen: --yes slaat bevestigingsvragen over (de app vraagt zelf om bevestiging).
 set -euo pipefail
-WPO_VERSION="2.14.0"
+WPO_VERSION="2.14.1"
 DB="${WPO_DB:-$HOME/.config/wpsites/sites}"; mkdir -p "$(dirname "$DB")"; touch "$DB"
 BASE="${WP_SITES_DIR:-$HOME/wp-sites}"
 BACKUPS="${WPO_BACKUP_DIR:-$BASE/.wpopen-backups}"
@@ -4186,6 +4168,8 @@ except Exception:
 # pushen en pas daarna bewust publiceren. Er wordt nooit rechtstreeks naar het live thema gepusht (geen --live, geen --allow-live).
 # Regel in de sitelijst (velden 5 t/m 14): …|shopify|shopify|live-url|shopify||winkel|map|poort|negeren|vlaggen
 # De status van de dev server staat in $SHOPIFY_STATE/<naam>/, zodat de repo van de klant schoon blijft.
+# Shopify is bedoeld voor de app, niet voor de terminal: deze opdrachten staan daarom niet in `wpopen help`. De app roept aan:
+#   wpopen shopify add|update|dev|stop|status|logs|themes|pull|check|push|publish|rollback|test <naam> …   (en wpopen start|stop|test|info|remove)
 SHOPIFY_DIR="${WPO_SHOPIFY_DIR:-$HOME/Projects/shopify}"
 SHOPIFY_STATE="${WPO_SHOPIFY_STATE:-$(dirname "$DB")/shopify}"
 SHOPIFY_PORT_BASE="${WPO_SHOPIFY_PORT_BASE:-9292}"
@@ -4672,7 +4656,7 @@ shopify_ensure_repo() {  # git-repo in een bestaande map; zonder repo leggen we 
 }
 shopify_add() {
   local name="${1:-}" store="" create=0 sync=0 host=127.0.0.1 ignore=() p
-  [ -n "$name" ] && [[ "$name" != -* ]] || die "Gebruik: wpopen shopify add <naam> --store winkel.myshopify.com [--path map] [--create] [--port n] [--url https://domein] [--ignore patroon]… [--sync] [--host ip]"
+  [ -n "$name" ] && [[ "$name" != -* ]] || die "Gebruik: wpopen shopify add <naam> [--store winkel.myshopify.com] [--path map] [--create] [--port n] [--url https://domein] [--ignore patroon]… [--sync] [--host ip]"
   shift
   SPATH=""; SPORT=""; LIVEURL=""; SIGNORE=""; SFLAGS=""
   while [ $# -gt 0 ]; do case "$1" in
@@ -4682,10 +4666,15 @@ shopify_add() {
   esac; shift; done
   [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || die "Naam mag alleen letters, cijfers, punt, - en _ bevatten."
   db_has "$name" && die "Er bestaat al een site '$name'."
-  [ -n "$store" ] || die "Geef de winkel op met --store winkel.myshopify.com"
+  # alleen een naam is genoeg: de winkel heet dan <naam>.myshopify.com
+  if [ -z "$store" ]; then
+    [[ "$(printf '%s' "$name" | tr 'A-Z' 'a-z')" =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "'$name' is geen winkelnaam. Geef de winkel op met --store winkel.myshopify.com"
+    store="$name"
+  fi
   NAME="$name"; STORE=$(shopify_store "$store"); SLUG=$(slug "$name")
   TYPE=shopify; SSTATE="$SHOPIFY_STATE/$SLUG"
-  [ -n "$SPATH" ] || SPATH="$SHOPIFY_DIR/$SLUG"
+  # een map die we zelf kiezen (de standaardmap) mag nieuw zijn; bij een eigen pad moet je dat met --create bevestigen
+  [ -n "$SPATH" ] || { SPATH="$SHOPIFY_DIR/$SLUG"; create=1; }
   [ -n "$SPORT" ] || SPORT=$(shopify_free_port)
   [[ "$host" =~ ^(127\.0\.0\.1|0\.0\.0\.0)$ ]] || die "--host moet 127.0.0.1 of 0.0.0.0 zijn."
   if [ ${#ignore[@]} -gt 0 ]; then SIGNORE=$(IFS=';'; echo "${ignore[*]}"); fi

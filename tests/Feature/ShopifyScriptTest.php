@@ -62,7 +62,6 @@ describe('project toevoegen', function (): void {
             ->and($this->shopify->sitesFile())->toBe('');
     })->with([
         'eigen domein' => [['--store', 'klant.nl'], '.myshopify.com-naam'],
-        'geen winkel' => [[], 'Geef de winkel op'],
         'poort' => [['--store', 'demo', '--port', '80'], 'tussen 1024 en 65535'],
         'adres' => [['--store', 'demo', '--url', 'klant.nl'], 'volledig adres'],
         'patroon' => [['--store', 'demo', '--ignore', '../geheim'], 'Ongeldig patroon'],
@@ -111,6 +110,23 @@ describe('project toevoegen', function (): void {
             ->and($this->shopify->git($path, ['tag']))->toContain('deployed')
             ->and(file_get_contents($path.'/.gitignore'))->toContain('node_modules/')
             ->and($this->shopify->sitesFile())->toContain('nieuw||||shopify|shopify||shopify||demo-winkel.myshopify.com|');
+    });
+
+    it('haalt met alleen een naam het live thema op: winkel en map volgen uit de naam', function (): void {
+        $result = $this->shopify->run(['shopify', 'add', 'demo-winkel']);
+
+        $path = $this->shopify->projects.'/demo-winkel';
+        expect($result->successful())->toBeTrue($result->errorOutput().$result->output())
+            ->and(file_get_contents($path.'/templates/index.json'))->toContain('klant')
+            ->and($this->shopify->git($path, ['log', '--format=%s']))->toBe('Live thema, uitgangspunt')
+            ->and($this->shopify->sitesFile())->toContain('demo-winkel||||shopify|shopify||shopify||demo-winkel.myshopify.com|'.$path.'|')
+            ->and($this->shopify->calls())->toContain('theme list --store demo-winkel.myshopify.com', 'theme pull --store demo-winkel.myshopify.com --theme 100');
+    });
+
+    it('vraagt bij een naam die geen winkelnaam kan zijn om --store', function (): void {
+        $result = $this->shopify->run(['shopify', 'add', 'klant.nl']);
+
+        expect($result->failed())->toBeTrue()->and($result->errorOutput())->toContain("'klant.nl' is geen winkelnaam", '--store');
     });
 
     it('werkt instellingen bij en kan hernoemen', function (): void {
