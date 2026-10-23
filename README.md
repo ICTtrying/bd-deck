@@ -1,6 +1,6 @@
 # BD Deck
 
-Desktop-app van **Borgman Digital** voor het beheren van WordPress- en Laravel-sites: lokaal (DDEV) en live (WPMU DEV, Hostinger of elders) naast elkaar, met één klik ophalen, live zetten, terugdraaien en inloggen.
+Desktop-app van **Borgman Digital** voor het beheren van WordPress- en Laravel-sites: lokaal (DDEV) en live (WPMU DEV, Hostinger of elders) naast elkaar, met één klik ophalen, live zetten, terugdraaien en inloggen. Shopify-thema's werken op dezelfde manier: dev server, preview en veilig live zetten.
 
 **Installeren op Linux Mint** (installeert ook Docker, DDEV, VS Code en je SSH-sleutel, en zet de app in je menu):
 
@@ -30,6 +30,7 @@ BD Deck is een schil om het script **`wpopen`**. Alle logica voor bouwen, syncen
 - [Wat het doet](#wat-het-doet)
 - [Delen met collega's](#delen-met-collegas)
 - [Laravel-sites](#laravel-sites)
+- [Shopify-thema's](#shopify-themas)
 - [Verhuizen en live zetten](#verhuizen-en-live-zetten)
 - [Installeren](#installeren)
 - [Starten](#starten)
@@ -103,6 +104,34 @@ BD Deck herkent bij het toevoegen zelf of er WordPress (`wp-content`) of Laravel
 | **Artisan** | Tabblad *Artisan*: lokaal of op live. Op live beantwoordt `--no-interaction` vragen met nee; geef zelf `--force` mee. |
 
 Verhuizen naar een andere server en *Nieuwe lokale site* zijn er nog alleen voor WordPress.
+
+## Shopify-thema's
+
+Een Shopify-project is een themamap (standaard `~/Projects/shopify/<naam>`, instelbaar bij Instellingen) die een git-repo is, met een winkel (`naam.myshopify.com`, niet het eigen domein). De [Shopify CLI](https://shopify.dev/docs/storefronts/themes/tools/cli) (`npm install -g @shopify/cli`) doet het werk; BD Deck vindt hem ook in een nvm-map. Toevoegen doe je met *Site toevoegen → Shopify-thema* (of Ctrl+Shift+N): koppel een bestaande map, of laat BD Deck het live thema ophalen, er een git-repo van maken en vastleggen als eerste commit.
+
+| Onderdeel | Wat er gebeurt |
+| --- | --- |
+| **Dev server** | Eén klik (of de sneltoets `d`) start `shopify theme dev` met een eigen poort per project, zodat meerdere dev servers tegelijk draaien. Je krijgt de lokale preview, de deelbare previewlink (met een kant-en-klaar bericht voor de klant) en de theme editor, plus het live dev-log. Instelbaar per project: poort, `--host`, `--theme-editor-sync`. |
+| **Inloggen** | De eerste keer vraagt de CLI om in te loggen. BD Deck toont de link en de code als kaart en opent de link één keer in je browser; daarna gaat de actie vanzelf verder. *Thema's ophalen* is ook de manier om te controleren of je bent ingelogd. |
+| **Wachtwoordpagina** | Het storefront-wachtwoord sla je op bij de instellingen van het project. Het staat versleuteld in de kluis en gaat alleen als `SHOPIFY_FLAG_STORE_PASSWORD` naar de dev server; het komt nooit in een argument, een log of een repo (BD Deck maskeert het ook in de uitvoer). |
+| **Ophalen** | Standaard alleen wat de klant in de editor aanpast (`config/settings_data.json`, `templates/*.json`, `sections/*.json`), of het hele live thema. Heb je daar lokaal niet-vastgelegd werk, dan stopt BD Deck. Het resultaat komt als commit in git; ander niet-vastgelegd werk blijft onaangeraakt. |
+| **Controleren** | `shopify theme check`, met bestand en regel. Voor elke push loopt dit vanzelf: nieuwe fouten houden de push tegen, fouten die er al waren (en die je een keer hebt geaccepteerd) niet. |
+| **Live zetten** | Zie hieronder: nooit rechtstreeks. |
+
+**Live zetten, in stappen.** Dit zijn klantwinkels, dus er gaat nooit iets rechtstreeks naar het live thema (`--live` en `--allow-live` worden nergens meegegeven; een push naar een thema met rol *live* weigert het script zelf):
+
+1. *Wat de klant deed ophalen*: de editorbestanden van live, zodat je map niet achterloopt.
+2. *Controleren*: `theme check`.
+3. *Pushen naar preview*: naar een niet-gepubliceerd thema, nieuw (`shopify theme push --unpublished --theme "naam"`) of een bestaand preview-thema bijwerken. Bij een bestaand thema blijven de beschermde bestanden (hierboven, instelbaar per project) staan. Een **nieuw** thema krijgt juist de verse editorbestanden van live mee: anders had het geen pagina-instellingen en zou publiceren de winkel leegmaken. De exacte staat van je werkmap, ook niet-vastgelegd werk, komt als tag `bddeck/push-…` in git, zonder je branch of werkmap aan te raken.
+4. *Preview bekijken*: de previewlink, ook te delen.
+5. *Publiceren*: een venster toont winkel, nu live thema en nieuw thema, en vraagt de projectnaam. Vooraf maakt BD Deck een back-up van het live thema (`~/wp-sites/.wpopen-backups/<naam>/<tijd>-publish/`) en een git-tag. Heeft de klant sinds de preview iets in de editor aangepast, dan merkt BD Deck dat en neemt de live-versie over in het preview-thema (aanbevolen), of je kiest bewust de preview-versie. Daarna wordt het thema gepubliceerd.
+6. *Terugdraaien*: het oude live thema blijft in de winkel staan; terugdraaien publiceert dat weer, zolang er sindsdien niets anders is gepubliceerd.
+
+**Fouten** worden uitgelegd: niet ingelogd, geen toegang tot thema's (als collaborator heb je de toegangsrecht *Thema's* nodig), poort bezet, onbekende winkel, een wachtwoordpagina zonder opgeslagen wachtwoord.
+
+**Sneltoetsen op de projectpagina:** `d` dev server starten/stoppen, `p` preview (start zo nodig), `e` theme editor, `s` deelbare link, `c` themacontrole, `l` logboek. In het menu: Ctrl+Shift+N voor *Shopify-project toevoegen*; de snelzoeker (Ctrl+K) kent de Shopify-acties.
+
+Een project verwijderen haalt het alleen uit BD Deck; de themamap blijft altijd staan. Shopify-projecten doen niet mee aan updates controleren, back-ups en cache legen op het dashboard, en ook niet aan het delen van de sitelijst (de projectmap is persoonlijk). Uptime-bewaking werkt wel, op het eigen domein of de myshopify.com-naam.
 
 ## Verhuizen en live zetten
 
@@ -244,6 +273,13 @@ wpopen migrate <naam> [-p poort] user@host --url https://nieuw [--remote pad]
 wpopen domain <naam> https://klant.nl      live omzetten naar het definitieve domein (SSH)
 
 wpopen test|updates|cache|login|wp|ssh <naam> …
+
+wpopen shopify add <naam> --store winkel.myshopify.com [--path map] [--create] [--port n]
+wpopen shopify dev|stop|status|logs <naam>        (wpopen start|stop <naam> kan ook)
+wpopen shopify themes|pull|check <naam>           thema's, editor-wijzigingen ophalen, theme check
+wpopen shopify push <naam> [--theme "naam"]       naar een niet-gepubliceerd thema
+wpopen shopify publish <naam> --theme "naam of id" [--sync-editor-files | --keep-editor-files]
+wpopen shopify rollback <naam>
 ```
 
 Destructieve commando's vragen in de terminal om bevestiging; `--yes` slaat dat over (de app vraagt zelf en geeft `--yes` mee). `wpopen help` toont alles.
@@ -262,6 +298,7 @@ app/Services/WpOpen/
   CommandRunner.php                 zet een commando in de wachtrij als CommandRun
   SiteRegistry.php                  houdt de sites-tabel gelijk aan `wpopen list --json`
   ScriptInstaller.php               meegeleverde wpopen installeren/bijwerken
+  (Shopify gaat door dezelfde klassen: WpOpenCommand::shopify…, WpOpenAction::Shopify…)
 app/Jobs/RunWpOpenCommand.php       voert uit, schrijft uitvoer live weg, kan gestopt worden
 app/Services/
   Vault.php                         kluis (Argon2id + AES-256-GCM)
@@ -269,6 +306,8 @@ app/Services/
   DesktopLauncher.php               browser, editor, terminal, map (NativePHP of xdg-open)
   DesktopNotifier.php               systeemmelding na een actie
   AppSettings.php                   instellingen met standaardwaarden
+  ShopifyStorePassword.php          storefront-wachtwoord uit de kluis, alleen als omgeving voor de dev server
+  ShopifyDevLog.php                 leest het dev-log uit ~/.config/wpsites/shopify/<project>/
 app/Livewire/                       schermen (class-based components)
 app/Providers/NativeAppServiceProvider.php   venster, menubalk, tray, script bijwerken
 resources/views/components/         huisstijl: knop, badge, panel, modal, site-bridge, …
@@ -280,7 +319,7 @@ lang/en.json, lang/nl/              Engels (bron is Nederlands) en Nederlandse v
 
 | Model | Wat | Waar de waarheid staat |
 | --- | --- | --- |
-| `Site` | naam, favoriet, notities, live-inlog, laatste test en updates, snapshot | verbindingsgegevens in `~/.config/wpsites/sites` (wpopen) |
+| `Site` | naam, favoriet, notities, live-inlog, laatste test en updates, thema's en themacontrole (Shopify), snapshot | verbindingsgegevens in `~/.config/wpsites/sites` (wpopen); bij Shopify winkel, map, poort en beschermde bestanden, en de status van de dev server in `~/.config/wpsites/shopify/<project>/` |
 | `CommandRun` | elke aanroep van wpopen met status, uitvoer en duur | app |
 | `Credential` | kluisitem, geheim versleuteld | app |
 | `Setting` | instellingen (sleutel/waarde) | app |
@@ -314,6 +353,7 @@ Raakt de actie live? Laat dan een bevestiging zien (zie `Sites\Show::confirmatio
   - Voor elke push worden de live-versies van de bestanden bewaard, en de push stopt als live buiten BD Deck om is aangepast.
   - Bij een database-push blijft de lijst actieve plugins van live staan, en de lokale `dev/dev`-gebruiker wordt van live verwijderd (een echte live-gebruiker `dev` houdt zijn wachtwoord).
 - **Tijdelijke PHP-bestanden** (sites met alleen SFTP: database-export, updates, cache, auto-login): willekeurige bestandsnaam, token van 48 tekens, verloopt snel en verwijdert zichzelf.
+- **Shopify**: nooit rechtstreeks naar live; publiceren vraagt de projectnaam en maakt eerst een back-up van het live thema en een git-tag; het storefront-wachtwoord staat in de kluis, gaat alleen via de omgeving mee en wordt overal gemaskeerd; de dev server wordt alleen gestopt als het proces aantoonbaar van wpopen is (eigen gebruiker, herkenbare opdrachtregel, procesgroep-leider); een Shopify-projectmap wordt nooit verwijderd.
 - **Invoer**: de app bouwt nooit shell-strings; argumenten gaan los naar het script. Namen, paden, SSH-opties en back-up-ID's worden gevalideerd.
 - **Verwijderen** vraagt alleen een bevestiging: de live site blijft altijd staan, en bij het weggooien van een lokale site wordt eerst een back-up gemaakt. Acties die live overschrijven (database pushen, live back-up terugzetten, verhuizen) vragen wel de sitenaam.
 - **Eén gebruiker**: de app kent één eigenaar en geen rollen. Elke pagina vereist een ingelogde, ontgrendelde sessie.
@@ -324,6 +364,7 @@ Raakt de actie live? Laat dan een bevestiging zien (zie `Sites\Show::confirmatio
 php artisan test --compact
 ```
 
+- **Shopify** (`ShopifyScriptTest`): het echte `bin/wpopen` tegen een nep-Shopify-CLI en een nep-winkel (`tests/Support/FakeShopify.php`): thema's, themabestanden, publiceren, inloggen en een dev server die echt start en stopt. De nep-CLI weigert en logt elke poging om naar live te pushen, en de tests controleren dat die nooit voorkomt. Tests raken dus nooit een echte winkel. Daarnaast `ShopifyCommandTest` (argumenten en validatie), `ShopifyScreensTest` (schermen) en `ShopifyRunTest` (job, maskeren van het wachtwoord, dashboard).
 - **Servicelaag**: commando-opbouw, procesomgeving, foutmeldingen, de job met live log en annuleren, kluis en SSH-sleutels.
 - **Script end-to-end** (`WpOpenScriptTest`): het echte `bin/wpopen` tegen een nep-server, waarbij nep-versies van `ssh`, `rsync` en `wp` naar een tijdelijke map sturen. Het test push, back-up, de controle op live-wijzigingen, `--force`, rollback, reset, commit tijdens een push, bevestigen, test en WP-CLI, plus de sitelijst (migratie, toevoegen, bijwerken, validatie).
 - **Schermen**: instellen, inloggen en rate limiting, vergrendelen, dashboard, push-paneel (bericht en bevestiging), kluis, instellingen en taal.

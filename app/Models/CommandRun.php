@@ -127,6 +127,32 @@ class CommandRun extends Model
         return $id !== '' ? $id : null;
     }
 
+    /**
+     * Waarde die het script als SLEUTEL=waarde op een eigen regel meldt (PREVIEW_URL, LOGIN_URL, BACKUP, …).
+     */
+    public function reported(string $key): ?string
+    {
+        $value = Str::of($this->output ?? '')->match('/^'.preg_quote($key, '/').'=(.+)$/m')->trim()->toString();
+
+        return $value !== '' ? $value : null;
+    }
+
+    /**
+     * De inloglink en code die de Shopify CLI laat zien als je nog niet bent ingelogd; alleen zolang de run loopt.
+     *
+     * @return array{url: string, code: ?string}|null
+     */
+    public function shopifyLogin(): ?array
+    {
+        $url = $this->reported('LOGIN_URL');
+
+        if ($url === null || ! $this->status->isActive() || ! str_starts_with($url, 'https://accounts.shopify.com/')) {
+            return null;
+        }
+
+        return ['url' => $url, 'code' => $this->reported('LOGIN_CODE')];
+    }
+
     public function lastMessage(): ?string
     {
         $line = Str::of($this->output ?? '')->trim()->explode("\n")->filter(fn (string $line): bool => trim($line) !== '')->last();

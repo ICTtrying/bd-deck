@@ -72,9 +72,27 @@
 #   wpopen mailpit <naam> [--json] [--test]   Mailpit van de lokale site: adres, aantal mails (--test: testmail sturen)
 #   wpopen artisan <naam> <args…>             php artisan op live (Laravel-sites)
 #
+#   Shopify-thema's (de Shopify CLI doet het werk; projectmappen staan in $WPO_SHOPIFY_DIR, standaard ~/Projects/shopify):
+#   wpopen shopify add <naam> --store winkel.myshopify.com [--path map] [--create] [--port n] [--url https://domein]
+#     [--ignore patroon]… [--sync] [--host 127.0.0.1|0.0.0.0]
+#                                             project koppelen (--create: nieuwe map vanaf het live thema, met git)
+#   wpopen shopify update <naam> [--store|--path|--port|--url|--ignore|--sync 0|1|--host|--name waarde]
+#   wpopen shopify dev|stop <naam>            dev server starten (poort per project) of stoppen; wpopen start|stop doet hetzelfde
+#   wpopen shopify status <naam> [--json] | logs <naam> [--lines n]
+#   wpopen shopify themes <naam> [--json]     thema's van de winkel (ook de manier om in te loggen)
+#   wpopen shopify pull <naam> [--all]        editor-wijzigingen van de klant (of het hele thema) van live ophalen, vastgelegd in git
+#   wpopen shopify check <naam> [--json]      shopify theme check, fouten vergeleken met eerder geaccepteerde fouten
+#   wpopen shopify push <naam> [--theme "naam"] [--no-pull] [--no-check] [--allow-check-errors]
+#                                             naar een NIET-gepubliceerd thema (nieuw, of bestaand), nooit rechtstreeks naar live;
+#                                             config/settings_data.json en templates/*.json blijven staan (instelbaar met --ignore)
+#   wpopen shopify publish <naam> --theme "naam of id" [--sync-editor-files | --keep-editor-files]
+#                                             preview-thema live zetten, na back-up van het live thema en een git-tag
+#   wpopen shopify rollback <naam>            het vorige live thema weer live zetten
+#   wpopen shopify test <naam> [--json]       CLI, themamap, inloggen en poort controleren
+#
 #   Algemeen: --yes slaat bevestigingsvragen over (de app vraagt zelf om bevestiging).
 set -euo pipefail
-WPO_VERSION="2.13.0"
+WPO_VERSION="2.14.0"
 DB="${WPO_DB:-$HOME/.config/wpsites/sites}"; mkdir -p "$(dirname "$DB")"; touch "$DB"
 BASE="${WP_SITES_DIR:-$HOME/wp-sites}"
 BACKUPS="${WPO_BACKUP_DIR:-$BASE/.wpopen-backups}"
@@ -164,8 +182,9 @@ valid_field() { [[ "$1" != *"|"* && "$1" != *$'\n'* ]] || die "'|' en enters zij
 get() {
   local l; l=$(awk -F'|' -v n="$1" '$1==n{print; exit}' "$DB")
   [ -n "$l" ] || die "Site '$1' onbekend. Zie: wpopen list  (of: wpopen import)"
-  IFS='|' read -r NAME TARGET OPTS REMOTE MODE PROVIDER LIVEURL TYPE PUBDIR <<<"$l"
+  IFS='|' read -r NAME TARGET OPTS REMOTE MODE PROVIDER LIVEURL TYPE PUBDIR STORE SPATH SPORT SIGNORE SFLAGS <<<"$l"
   TYPE="${TYPE:-wordpress}"
+  if [ "$TYPE" = shopify ]; then shopify_vars; return 0; fi
   if [ -z "$TARGET" ]; then MODE=local; fi
   MODE="${MODE:-ssh}"; PROVIDER="${PROVIDER:-$(provider_of "$TARGET" "$OPTS")}"
   SLUG=$(slug "$NAME"); PROJ="$BASE/$SLUG"; LWPC="$PROJ/wp-content"
@@ -288,6 +307,7 @@ cmd_setup() {
     command -v gh >/dev/null && echo "gh|ok|gh (optioneel)|maakt GitHub-repo's automatisch" || echo "gh|skip|gh (optioneel)|https://cli.github.com"
     [ -f "$KEY.pub" ] && echo "key|ok|SSH-sleutel|$KEY.pub" || echo "key|skip|SSH-sleutel|wordt aangemaakt bij de eerste site"
     command -v cloudflared >/dev/null && echo "cloudflared|ok|cloudflared (optioneel)|voor deellinks" || echo "cloudflared|skip|cloudflared (optioneel)|wordt vanzelf geïnstalleerd bij de eerste deellink"
+    if (shopify_cli) 2>/dev/null; then echo "shopify|ok|Shopify CLI (optioneel)|voor Shopify-thema's"; else echo "shopify|skip|Shopify CLI (optioneel)|npm install -g @shopify/cli"; fi
   } | checks_out "$json"
   if [ $json = 0 ] && ! command -v ddev >/dev/null; then
     echo; echo "Ontbrekende onderdelen installeren (Ubuntu/Debian/Mint):"
@@ -313,8 +333,14 @@ cmd_list() {
 }
 cmd_info() {
   [ $# -ge 1 ] || die "Gebruik: wpopen info <naam> [--json]"
-  get "$1"
+  ALLOW_SHOPIFY=1; get "$1"
   if [ "${2:-}" = --json ]; then sites_json "$NAME"; return; fi
+  if is_shopify; then
+    echo "$NAME  (Shopify, $STORE)"
+    echo "  project: $SPROJ $([ -d "$SPROJ/layout" ] && echo '' || echo '(map ontbreekt of is geen thema)')"
+    echo "  dev:     $LOCALURL $(shopify_dev_alive && echo '(draait)' || echo '(gestopt)')"
+    return
+  fi
   if is_local; then echo "$NAME  (lokaal, nog geen live-server)"; echo "  lokaal:  $LOCALURL  →  $PROJ"; return; fi
   echo "$NAME  ($PROVIDER, $MODE)"
   echo "  server:  $TARGET ${OPTS:+($OPTS)}"
@@ -328,7 +354,7 @@ cmd_info() {
 sites_json() {
   local ddevj=""
   command -v ddev >/dev/null && ddevj=$(ddev list -j 2>/dev/null || true)
-  DDEVJ="$ddevj" DBF="$DB" BASE="$BASE" BACKUPS="$BACKUPS" ONLY="${1:-}" python3 - <<'PY'
+  DDEVJ="$ddevj" DBF="$DB" BASE="$BASE" BACKUPS="$BACKUPS" ONLY="${1:-}" SHOPIFY_DIR="$SHOPIFY_DIR" SHOPIFY_STATE="$SHOPIFY_STATE" python3 - <<'PY'
 import json, os, re, subprocess, time
 from datetime import datetime, timezone
 dbf, base, backups, only = os.environ["DBF"], os.environ["BASE"], os.environ["BACKUPS"], os.environ.get("ONLY", "")
@@ -370,15 +396,93 @@ def share(proj):
     iso = lambda t: datetime.fromtimestamp(t, timezone.utc).astimezone().isoformat(timespec="seconds")
     return {"url": st["url"], "started_at": iso(started), "expires_at": iso(expires)}
 
+def kv(path):
+    return dict(l.split("=", 1) for l in read(path).splitlines() if "=" in l)
+
+def shopify_dev(state):
+    # alleen een dev server die echt nog draait: proces leeft en het is de server van wpopen
+    st = kv(os.path.join(state, "dev"))
+    try:
+        pid = int(st.get("pid", ""))
+        if pid <= 1 or b"wpopen-shopify-dev" not in open("/proc/%d/cmdline" % pid, "rb").read():
+            return None
+    except (ValueError, OSError):
+        return None
+    iso = lambda t: datetime.fromtimestamp(int(t), timezone.utc).astimezone().isoformat(timespec="seconds") if str(t).isdigit() else None
+    return {"pid": pid, "url": st.get("url") or None, "share_url": st.get("share") or None, "editor_url": st.get("editor") or None,
+            "theme_id": int(st["theme_id"]) if st.get("theme_id", "").isdigit() else None, "started_at": iso(st.get("started", ""))}
+
+def shopify_git(proj, patterns):
+    if not os.path.isdir(os.path.join(proj, ".git")):
+        return None
+    from fnmatch import fnmatch
+    has_deployed = bool(git(proj, "rev-parse", "-q", "--verify", "refs/tags/deployed"))
+    roots = git(proj, "rev-list", "--max-parents=0", "HEAD").splitlines()
+    base_ref = "refs/tags/deployed" if has_deployed else (roots[-1] if roots else "HEAD")
+    status = git(proj, "status", "--porcelain")
+    last = git(proj, "log", "-1", "--format=%h%x1f%s%x1f%cI")
+    lp = (last.split("\x1f") + ["", "", ""])[:3]
+    # bestanden die klanten in de editor aanpassen tellen niet als "klaar om te pushen": die gaan nooit mee
+    changed = [x for x in git(proj, "diff", "--name-only", "--diff-filter=d", base_ref, "HEAD").splitlines() if x and not any(fnmatch(x, p) for p in patterns)]
+    return {
+        "branch": git(proj, "branch", "--show-current"),
+        "dirty": len(status.splitlines()) if status else 0,
+        "pending_files": len(changed),
+        "unpushed_commits": num(git(proj, "rev-list", "--count", base_ref + "..HEAD")),
+        "last_commit": {"hash": lp[0], "subject": lp[1], "date": lp[2]} if lp[0] else None,
+        "last_deploy": git(proj, "log", "-1", "--format=%cI", "refs/tags/deployed") if has_deployed else None,
+        "remote": git(proj, "remote", "get-url", "origin") or None,
+    }
+
+def shopify_site(f):
+    name, liveurl, store, path, port, ignore, flags = f[0], f[6], f[9], f[10], f[11], f[12], f[13]
+    s = slug(name)
+    proj = path or os.path.join(os.environ["SHOPIFY_DIR"], s)
+    state = os.path.join(os.environ["SHOPIFY_STATE"], s)
+    port = int(port) if port.isdigit() else 9292
+    flags = dict(x.partition("=")[::2] for x in flags.split(";") if x)
+    default_ignore = ["config/settings_data.json", "templates/*.json", "sections/*.json"]
+    patterns = [] if ignore == "none" else [p for p in ignore.split(";") if p] or default_ignore
+    dev = shopify_dev(state)
+    livehost = re.sub(r"^https?://", "", liveurl).split("/")[0] if liveurl else store
+    handle = store.split(".")[0]
+    last_push, last_publish = kv(os.path.join(state, "last-push")), kv(os.path.join(state, "last-publish"))
+    site = {
+        "name": name, "slug": s, "target": "", "user": "", "host": "", "port": 22, "opts": "", "remote": "", "public_dir": None,
+        "root": ".", "mode": "shopify", "provider": "shopify", "type": "shopify", "local_only": False,
+        "live_url": liveurl or None, "live_host": livehost or None, "live_site_url": ("https://" + livehost) if livehost else None,
+        "local_url": (dev or {}).get("url") or "http://127.0.0.1:%d" % port, "project_dir": proj, "wp_content_dir": proj,
+        "built": os.path.isdir(os.path.join(proj, "layout")) and os.path.isdir(os.path.join(proj, "templates")),
+        "multisite": False, "subsites": [],
+        "ddev_status": "running" if dev else "stopped", "mailpit_url": None, "share": None,
+        "git": shopify_git(proj, patterns), "backups": 0, "last_backup": None,
+        "shopify": {
+            "store": store, "store_url": "https://" + store, "admin_url": "https://admin.shopify.com/store/%s/themes" % handle,
+            "port": port, "host": flags.get("host") or "127.0.0.1", "theme_editor_sync": flags.get("sync") == "1",
+            "ignore": patterns, "ignore_is_default": ignore == "", "protection_disabled": ignore == "none",
+            "dev": dev,
+            "last_push": {k: last_push.get(k) for k in ("theme_id", "theme_name", "preview_url", "editor_url", "at", "snapshot")} if last_push.get("theme_id") else None,
+            "last_publish": {k: last_publish.get(k) for k in ("new_id", "new_name", "previous_id", "previous_name", "at", "backup", "snapshot", "rolled_back_at")} if last_publish.get("new_id") else None,
+        },
+    }
+    bdir = os.path.join(backups, s)
+    if os.path.isdir(bdir):
+        bl = sorted(x for x in os.listdir(bdir) if os.path.isdir(os.path.join(bdir, x)))
+        site["backups"], site["last_backup"] = len(bl), (bl[-1] if bl else None)
+    return site
+
 sites = []
 for line in open(dbf, errors="ignore"):
     f = line.rstrip("\n").split("|")
     if not f or not f[0]:
         continue
-    f += [""] * (9 - len(f))
+    f += [""] * (14 - len(f))
     name, target, opts, remote, mode, provider, liveurl, kind, pubdir = f[:9]
     kind = kind or "wordpress"
     if only and name != only:
+        continue
+    if kind == "shopify":
+        sites.append(shopify_site(f))
         continue
     s = slug(name)
     proj = os.path.join(base, s)
@@ -648,7 +752,8 @@ cmd_add() {
 }
 cmd_update() {
   [ $# -ge 1 ] || die "Gebruik: wpopen update <naam> [--name|--target|--opts|--remote|--mode|--provider|--url|--public waarde]"
-  get "$1"; shift
+  ALLOW_SHOPIFY=1; get "$1"; shift
+  if is_shopify; then shopify_update "$@"; return; fi
   local n="$NAME" t="$TARGET" o="$OPTS" r="$REMOTE" m="$MODE" p="$PROVIDER" u="$LIVEURL" pub="$PUBDIR"
   while [ $# -gt 0 ]; do
     [ $# -ge 2 ] || die "Waarde ontbreekt voor $1"
@@ -679,7 +784,9 @@ cmd_update() {
 }
 cmd_remove() {
   [ $# -ge 1 ] || die "Gebruik: wpopen remove <naam> [--purge]"
-  get "$1"; shift
+  ALLOW_SHOPIFY=1; get "$1"; shift
+  # de themamap van een Shopify-project is de repo van de klant: die gooit wpopen nooit weg
+  if is_shopify; then shopify_remove; return; fi
   if [ "${1:-}" = --purge ] && [ -d "$PROJ" ]; then
     confirm "Lokale site $NAME met database verwijderen ($PROJ)?" || die "Afgebroken."
     if [ -f "$PROJ/.wpopen-ready" ]; then new_backup remove; backup_local || true; fi
@@ -741,8 +848,11 @@ def read_db():
     return sites
 
 if mode == "export":
-    sites, local, stripped = [], 0, []
+    sites, local, stripped, shopify = [], 0, [], 0
     for name, (n, target, opts, remote, kind_mode, provider, liveurl, kind, pubdir) in read_db().items():
+        if kind == "shopify":
+            shopify += 1
+            continue
         if not target:
             local += 1
             continue
@@ -756,6 +866,8 @@ if mode == "export":
         })
     if local:
         print("· %d lokale site(s) zonder server niet meegenomen" % local, file=sys.stderr)
+    if shopify:
+        print("· %d Shopify-project(en) niet meegenomen: de projectmap is persoonlijk" % shopify, file=sys.stderr)
     if stripped:
         print("· persoonlijke SSH-opties weggelaten bij: " + ", ".join(stripped), file=sys.stderr)
     print(json.dumps({
@@ -1733,7 +1845,10 @@ cmd_open() {
 cmd_build() { [ $# -ge 1 ] || die "Gebruik: wpopen build <naam>"; WPO_NO_LAUNCH=1 cmd_open "$@"; }
 cmd_startstop() {
   [ $# -ge 2 ] || die "Gebruik: wpopen start|stop <naam>"
-  need ddev; get "$2"; built; cd "$PROJ"
+  # bij een Shopify-project is "starten" de dev server
+  ALLOW_SHOPIFY=1; get "$2"
+  if is_shopify; then if [ "$1" = start ]; then shopify_dev_start; else shopify_dev_stop; fi; return; fi
+  need ddev; built; cd "$PROJ"
   if [ "$1" = start ]; then ddev_up >/dev/null && ok "$NAME draait op $LOCALURL"
   else ddev stop >/dev/null && ok "$NAME gestopt"; fi
 }
@@ -3478,7 +3593,8 @@ cmd_safe_update() {
 ms_since() { echo $(( ($(date +%s%N) - $1) / 1000000 )); }
 cmd_test() {
   [ $# -ge 1 ] || die "Gebruik: wpopen test <naam> [--json]"
-  get "$1"; local json=0 t out code; [ "${2:-}" = --json ] && json=1
+  ALLOW_SHOPIFY=1; get "$1"; local json=0 t out code; [ "${2:-}" = --json ] && json=1
+  if is_shopify; then shopify_test "$json"; return; fi
   {
     t=$(date +%s%N)
     if is_local; then
@@ -4064,6 +4180,820 @@ except Exception:
   else echo "$total mail(s) binnen, $unread ongelezen"; fi
 }
 
+# ───────────── Shopify-thema's ─────────────
+# Een project is een themamap (standaard $WPO_SHOPIFY_DIR/<naam>, een git-repo) met een winkel (.myshopify.com). De Shopify CLI
+# doet het werk; wpopen voegt toe wat de app nodig heeft: dev server starten en stoppen, veilig naar een niet-gepubliceerd thema
+# pushen en pas daarna bewust publiceren. Er wordt nooit rechtstreeks naar het live thema gepusht (geen --live, geen --allow-live).
+# Regel in de sitelijst (velden 5 t/m 14): …|shopify|shopify|live-url|shopify||winkel|map|poort|negeren|vlaggen
+# De status van de dev server staat in $SHOPIFY_STATE/<naam>/, zodat de repo van de klant schoon blijft.
+SHOPIFY_DIR="${WPO_SHOPIFY_DIR:-$HOME/Projects/shopify}"
+SHOPIFY_STATE="${WPO_SHOPIFY_STATE:-$(dirname "$DB")/shopify}"
+SHOPIFY_PORT_BASE="${WPO_SHOPIFY_PORT_BASE:-9292}"
+# bestanden die klanten zelf in de theme editor aanpassen: die gaan standaard nooit mee bij een push
+SHOPIFY_EDITOR_FILES='config/settings_data.json;templates/*.json;sections/*.json'
+
+is_shopify() { [ "$TYPE" = shopify ]; }
+shopify_vars() {  # afgeleide waarden van een Shopify-regel (na het lezen in get)
+  [ -n "${ALLOW_SHOPIFY:-}" ] || die "$NAME is een Shopify-project. Dit kan alleen met: wpopen shopify <opdracht> $NAME"
+  MODE=shopify; PROVIDER=shopify; SLUG=$(slug "$NAME"); ROOT=""
+  SPROJ="${SPATH:-$SHOPIFY_DIR/$SLUG}"; PROJ="$SPROJ"; LWPC="$SPROJ"
+  SPORT="${SPORT:-$SHOPIFY_PORT_BASE}"; SSTATE="$SHOPIFY_STATE/$SLUG"
+  SHOST=127.0.0.1; SSYNC=0
+  local kv kvs=()
+  IFS=';' read -ra kvs <<<"$SFLAGS"
+  for kv in ${kvs[@]+"${kvs[@]}"}; do case "$kv" in host=*) SHOST="${kv#host=}";; sync=1) SSYNC=1;; esac; done
+  LOCALURL="http://127.0.0.1:$SPORT"
+  if [ -n "$LIVEURL" ]; then LIVEHOST="${LIVEURL#*//}"; LIVEHOST="${LIVEHOST%%/*}"; else LIVEHOST="$STORE"; fi
+  return 0
+}
+sget() {  # naam — leest een Shopify-project
+  ALLOW_SHOPIFY=1; get "$1"
+  is_shopify || die "$NAME is geen Shopify-project."
+}
+
+# ── de CLI ──
+shopify_cli() {  # zorgt dat `shopify` (en node ernaast) in PATH staat, ook als de app zonder npm-paden start
+  command -v shopify >/dev/null && return 0
+  local c="" d
+  while IFS= read -r d; do
+    if [ -x "$d/shopify" ]; then c="$d"; break; fi
+  done < <({ ls -d "$HOME"/.nvm/versions/node/*/bin 2>/dev/null | sort -rV || true
+             printf '%s\n' "$HOME/.local/share/pnpm" "$HOME/.npm-global/bin" "$HOME/.volta/bin" /usr/local/bin /opt/homebrew/bin; })
+  [ -n "$c" ] || die "De Shopify CLI ontbreekt. Installeer hem met: npm install -g @shopify/cli"
+  PATH="$c:$PATH"; export PATH
+}
+# het storefront-wachtwoord staat alleen in de omgeving; mocht de CLI het ooit uitschrijven, dan komt het nooit in een log.
+# Zuiver bash en regel voor regel: awk (mawk) buffert een pipe en zou het log tot het einde leeg laten.
+shopify_redact() {
+  local line p="${SHOPIFY_FLAG_STORE_PASSWORD:-}"
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ "${#p}" -lt 3 ] || line="${line//"$p"/••••}"
+    printf '%s\n' "$line"
+  done
+}
+export -f shopify_redact
+shopify_announce_login() {  # logbestand — de inloglink en code van de CLI, één keer en zonder ruis
+  [ -z "${SHOPIFY_LOGIN_SHOWN:-}" ] || return 0
+  local url code
+  url=$(grep -oE 'https://accounts\.shopify\.com/[^ "\\]+' "$1" 2>/dev/null | sed -n 1p || true)
+  [ -n "$url" ] || return 0
+  code=$(grep -oiE 'verification code: *[A-Z0-9]{4}-[A-Z0-9]{4}' "$1" 2>/dev/null | grep -oE '[A-Z0-9]{4}-[A-Z0-9]{4}$' | sed -n 1p || true)
+  [ -n "$code" ] || code=$(grep -oE 'user_code%5D=[A-Z0-9]{4}-[A-Z0-9]{4}' <<<"$url" | grep -oE '[A-Z0-9]{4}-[A-Z0-9]{4}$' | sed -n 1p || true)
+  SHOPIFY_LOGIN_SHOWN=1
+  step "Inloggen bij Shopify nodig: open de link en bevestig de code"
+  echo "LOGIN_URL=$url"
+  [ -z "$code" ] || echo "LOGIN_CODE=$code"
+}
+shopify_capture() {  # uitvoerbestand opdracht… — voor JSON-uitvoer: bewaart alles in het bestand, laat intussen alleen de inlogvraag zien
+  local out="$1" pid rc=0; shift
+  : > "$out"
+  # --foreground: geen eigen procesgroep, zodat stoppen vanuit de app de CLI meeneemt
+  timeout --foreground "${WPO_SHOPIFY_TIMEOUT:-900}" shopify "$@" </dev/null >"$out" 2>&1 &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do shopify_announce_login "$out"; sleep 0.5; done
+  wait "$pid" || rc=$?
+  shopify_announce_login "$out"
+  return "$rc"
+}
+shopify_stream() {  # opdracht… — CLI-uitvoer live tonen (wachtwoord gemaskeerd); alles ook in $SHOPIFY_LAST
+  mkdir -p "$SSTATE"; SHOPIFY_LAST="$SSTATE/last-output.log"
+  if timeout --foreground "${WPO_SHOPIFY_TIMEOUT:-900}" shopify "$@" </dev/null 2>&1 | shopify_redact | tee "$SHOPIFY_LAST"; then return 0; else return 1; fi
+}
+shopify_explain() {  # logbestand — vertaalt een foutmelding van de CLI naar wat je eraan kunt doen
+  local t; t=$(tail -n 60 "$1" 2>/dev/null | tr 'A-Z' 'a-z' || true)
+  if grep -qE 'eaddrinuse|address already in use|port .*(already )?in use' <<<"$t"; then
+    warn "Poort $SPORT is al in gebruik. Stop het andere programma of kies een andere poort bij de instellingen van het project."
+  elif grep -qE 'not authori[sz]ed|forbidden|permission|have access|access denied|403' <<<"$t"; then
+    warn "Geen toegang tot de thema's van $STORE. Als collaborator heb je de toegangsrecht 'Thema's' nodig (Shopify-admin → Instellingen → Gebruikers), of een account met thema-toegang."
+  elif grep -qE "couldn.t find the store|store .*not found|could not find .*store|enotfound|getaddrinfo|no such store|404" <<<"$t"; then
+    warn "De winkel $STORE bestaat niet of is niet bereikbaar. Controleer de .myshopify.com-naam bij de instellingen van het project."
+  elif grep -qE 'password|prompt|tty|interactive' <<<"$t"; then
+    warn "De CLI vroeg om invoer die BD Deck niet kan geven. Heeft de winkel een wachtwoordpagina? Sla dan het storefront-wachtwoord op bij de instellingen van het project."
+  elif grep -qE 'log in|login|authenticat|session|expired|unauthori[sz]ed|401' <<<"$t"; then
+    warn "Waarschijnlijk niet (meer) ingelogd bij Shopify. Start de actie opnieuw en bevestig de inloglink."
+  else
+    return 1
+  fi
+}
+shopify_fail() {  # logbestand melding — uitleg of de laatste regels van de CLI, dan stoppen
+  shopify_explain "$1" || { warn "Laatste regels van de Shopify CLI:"; tail -n 8 "$1" 2>/dev/null | shopify_redact >&2 || true; }
+  die "$2"
+}
+
+# ── hulpjes ──
+shopify_store() {  # invoer → winkel.myshopify.com, of stoppen
+  local s; s=$(printf '%s' "$1" | tr 'A-Z' 'a-z'); s="${s#http://}"; s="${s#https://}"; s="${s%%/*}"
+  [[ "$s" =~ ^[a-z0-9][a-z0-9-]*$ ]] && s="$s.myshopify.com"
+  [[ "$s" =~ ^[a-z0-9][a-z0-9-]*\.myshopify\.com$ ]] || die "Gebruik de .myshopify.com-naam van de winkel (bijvoorbeeld winkel.myshopify.com), niet het eigen domein."
+  echo "$s"
+}
+shopify_ignores() {  # patronen die bij een push nooit overschreven worden, één per regel
+  [ "${SIGNORE:-}" != none ] || return 0
+  printf '%s\n' "${SIGNORE:-$SHOPIFY_EDITOR_FILES}" | tr ';' '\n' | sed '/^$/d'
+}
+shopify_editor_patterns() {  # bestanden die klanten in de editor aanpassen; ook zonder bescherming blijven dit de standaardbestanden
+  if [ "${SIGNORE:-}" = none ] || [ -z "${SIGNORE:-}" ]; then printf '%s\n' "$SHOPIFY_EDITOR_FILES" | tr ';' '\n'; else shopify_ignores; fi
+}
+shopify_port_free() { ! (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+shopify_free_port() {  # eerste poort vanaf 9292 die niet bij een ander project hoort en nu vrij is
+  local used p; used=$(awk -F'|' '$8=="shopify"{print $12}' "$DB")
+  for ((p = SHOPIFY_PORT_BASE; p < SHOPIFY_PORT_BASE + 200; p++)); do
+    grep -qx "$p" <<<"$used" && continue
+    shopify_port_free "$p" && { echo "$p"; return; }
+  done
+  echo "$SHOPIFY_PORT_BASE"
+}
+shopify_need() {  # CLI en projectmap controleren
+  need git; shopify_cli
+  [ -d "$SPROJ" ] || die "De projectmap $SPROJ bestaat niet. Pas het pad aan bij de instellingen van het project."
+  { [ -d "$SPROJ/layout" ] && [ -d "$SPROJ/templates" ]; } || die "$SPROJ is geen Shopify-thema (de mappen layout/ en templates/ ontbreken)."
+}
+sg() { (cd "$SPROJ" && gitc "$@"); }   # git in de projectmap
+shopify_snapshot() {  # soort → tag met de exacte staat van de werkmap (ook niet-gecommit werk), zonder branch of index aan te raken
+  local tag="bddeck/$1-$(date +%Y%m%d-%H%M%S)" idx tree commit
+  mkdir -p "$SSTATE"; idx="$SSTATE/snapshot.index"; rm -f "$idx"
+  [ ! -f "$SPROJ/.git/index" ] || cp "$SPROJ/.git/index" "$idx"
+  tree=$(cd "$SPROJ" && GIT_INDEX_FILE="$idx" git add -A >/dev/null 2>&1 && GIT_INDEX_FILE="$idx" git write-tree)
+  if sg rev-parse -q --verify HEAD >/dev/null; then commit=$(cd "$SPROJ" && gitc commit-tree "$tree" -p HEAD -m "BD Deck: momentopname voor $1")
+  else commit=$(cd "$SPROJ" && gitc commit-tree "$tree" -m "BD Deck: momentopname voor $1"); fi
+  sg tag "$tag" "$commit"; rm -f "$idx"
+  SHOPIFY_SNAPSHOT_TAG="$tag"; SHOPIFY_SNAPSHOT_COMMIT="$commit"
+}
+shopify_kv() {  # bestand sleutel — waarde uit een sleutel=waarde-bestand
+  sed -n "s/^$2=//p" "$1" 2>/dev/null | sed -n 1p
+}
+
+shopify_py() {  # themes | pick | check — JSON van de CLI verwerken
+  python3 - "$@" <<'PY'
+import json, os, re, sys
+
+mode = sys.argv[1]
+
+def values(text):
+    # de CLI zet soms tekst of diagnostische JSON-regels voor het resultaat: neem alle JSON-waarden die er staan
+    dec, i, out = json.JSONDecoder(), 0, []
+    while i < len(text):
+        if text[i] in "[{":
+            try:
+                v, j = dec.raw_decode(text, i)
+                if not (isinstance(v, dict) and v.get("type") == "diagnostic"):
+                    out.append(v)
+                i = j
+                continue
+            except ValueError:
+                pass
+        i += 1
+    return out
+
+if mode == "themes":
+    store = os.environ["STORE"]
+    vals = values(open(os.environ["FILE"], errors="ignore").read())
+    items = next((v for v in reversed(vals) if isinstance(v, list)), None)
+    if items is None:
+        d = next((v for v in reversed(vals) if isinstance(v, dict) and isinstance(v.get("themes"), list)), None)
+        items = d["themes"] if d else None
+    if items is None:
+        print("null")
+        sys.exit(0)
+    out = []
+    for t in items:
+        if not isinstance(t, dict):
+            continue
+        m = re.search(r"(\d+)\D*$", str(t.get("id", "")))
+        if not m:
+            continue
+        role = str(t.get("role", "")).lower()
+        role = {"main": "live", "live": "live", "unpublished": "unpublished", "development": "development", "demo": "demo"}.get(role, role or "other")
+        n = int(m.group(1))
+        out.append({"id": n, "name": str(t.get("name", "")), "role": role,
+                    "preview_url": "https://%s/?preview_theme_id=%d" % (store, n),
+                    "editor_url": "https://%s/admin/themes/%d/editor" % (store, n),
+                    "updated_at": t.get("updated_at") or None})
+    print(json.dumps(out, ensure_ascii=False))
+
+elif mode == "pick":
+    key, val = os.environ["KEY"], os.environ["VAL"]
+    for t in json.loads(os.environ["THEMES"]):
+        if (key == "id" and str(t["id"]) == val) or (key == "name" and t["name"] == val) or (key == "role" and t["role"] == val):
+            print("%d\t%s\t%s" % (t["id"], t["name"], t["role"]))
+            break
+
+elif mode == "pushed":
+    # uitkomst van `theme push --json`: het thema dat is aangemaakt of bijgewerkt
+    for v in reversed(values(open(os.environ["FILE"], errors="ignore").read())):
+        t = v.get("theme") if isinstance(v, dict) and isinstance(v.get("theme"), dict) else v
+        if isinstance(t, dict) and re.search(r"\d+", str(t.get("id", ""))):
+            print("%s\t%s" % (re.search(r"(\d+)\D*$", str(t["id"])).group(1), t.get("name", "")))
+            break
+
+elif mode == "check":
+    project, baseline = os.environ["PROJECT"].rstrip("/") + "/", os.environ["BASELINE"]
+    vals = values(open(os.environ["FILE"], errors="ignore").read())
+    files = next((v for v in reversed(vals) if isinstance(v, list)), None)
+    if files is None:
+        print("CHECK_UNREADABLE")
+        sys.exit(2)
+    offenses = []
+    for f in files:
+        rel = str(f.get("path", ""))
+        rel = rel[len(project):] if rel.startswith(project) else rel
+        for o in f.get("offenses", []):
+            offenses.append({"file": rel, "line": int(o.get("start_row", 0)) + 1, "check": o.get("check", ""),
+                             "severity": o.get("severity", "info"), "message": str(o.get("message", ""))})
+    count = lambda s: sum(1 for o in offenses if o["severity"] == s)
+    errors = [o for o in offenses if o["severity"] == "error"]
+    print_ = lambda o: "%s:%d  %s: %s" % (o["file"], o["line"], o["check"], o["message"])
+    fingerprint = lambda o: "|".join((o["file"], o["check"], o["message"]))
+    try:
+        known = set(l.rstrip("\n") for l in open(baseline))
+    except OSError:
+        known = set()
+    fresh = [o for o in errors if fingerprint(o) not in known]
+    if os.environ.get("ACCEPT") == "1":
+        os.makedirs(os.path.dirname(baseline), exist_ok=True)
+        open(baseline, "w").write("".join(fingerprint(o) + "\n" for o in errors))
+        fresh = []
+    summary = {"errors": len(errors), "warnings": count("warning"), "info": count("info"), "new_errors": len(fresh)}
+    open(os.environ["FILE"] + ".sum", "w").write("".join("%s=%d\n" % kv for kv in summary.items()))
+    if os.environ.get("JSON") == "1":
+        print(json.dumps({**summary, "offenses": offenses[:300]}, ensure_ascii=False))
+        sys.exit(0)
+    head = "%d fouten, %d waarschuwingen, %d tips" % (summary["errors"], summary["warnings"], summary["info"])
+    if not offenses:
+        print("✓ Geen problemen gevonden")
+    else:
+        print(("✗ " if errors else "! ") + head + ((" (waarvan %d nieuw)" % len(fresh)) if errors and known and len(fresh) != len(errors) else ""))
+        shown = 0
+        for sev, mark in (("error", "✗"), ("warning", "!"), ("info", "·")):
+            for o in [x for x in offenses if x["severity"] == sev]:
+                if shown >= int(os.environ.get("LIMIT", "25")):
+                    break
+                new = " (nieuw)" if sev == "error" and o in fresh and known else ""
+                print("  %s %s%s" % (mark, print_(o), new))
+                shown += 1
+        if len(offenses) > shown:
+            print("  · … en %d meer" % (len(offenses) - shown))
+PY
+}
+
+# ── thema's van de winkel ──
+shopify_list_themes() {  # zet de genormaliseerde lijst in $THEMES; hier verschijnt ook de inlogvraag
+  local out="$SSTATE/themes.out"
+  mkdir -p "$SSTATE"
+  shopify_capture "$out" theme list --store "$STORE" --json || shopify_fail "$out" "De thema's van $STORE ophalen is mislukt."
+  THEMES=$(STORE="$STORE" FILE="$out" shopify_py themes)
+  rm -f "$out"
+  [ -n "$THEMES" ] && [ "$THEMES" != null ] || die "Kon de themalijst van $STORE niet lezen."
+}
+shopify_pick() {  # sleutel waarde — id<TAB>naam<TAB>rol van het eerste thema dat past, of leeg
+  KEY="$1" VAL="$2" THEMES="$THEMES" shopify_py pick
+}
+shopify_live_theme() {  # zet SHOPIFY_LIVE_ID en SHOPIFY_LIVE_NAME
+  local row; row=$(shopify_pick role live)
+  [ -n "$row" ] || die "$STORE heeft geen live thema gevonden."
+  SHOPIFY_LIVE_ID="${row%%$'\t'*}"; row="${row#*$'\t'}"; SHOPIFY_LIVE_NAME="${row%%$'\t'*}"
+}
+cmd_shopify_themes() {
+  local json=0 row
+  [ $# -ge 1 ] || die "Gebruik: wpopen shopify themes <naam> [--json]"
+  sget "$1"; shift; [ "${1:-}" != --json ] || json=1
+  shopify_cli
+  step "Thema's van $STORE ophalen…"
+  shopify_list_themes
+  if [ $json = 1 ]; then echo "$THEMES"; return; fi
+  THEMES="$THEMES" python3 -c '
+import json, os
+for t in json.loads(os.environ["THEMES"]):
+    print("%-12s %-14s %s" % (t["role"], t["id"], t["name"]))'
+}
+
+# ── git: ophalen en vastleggen ──
+shopify_pull_files() {  # thema-id alles(0|1) — haalt bestanden van de winkel op en legt ze vast in git
+  local id="$1" all="$2" pat dirty changed args=() specs=()
+  if [ "$all" = 1 ]; then
+    dirty=$(sg status --porcelain)
+  else
+    while IFS= read -r pat; do args+=(--only "$pat"); done < <(shopify_editor_patterns)
+    while IFS= read -r pat; do specs+=("$pat"); done < <(shopify_editor_patterns)
+    dirty=$(sg status --porcelain -- "${specs[@]}")
+  fi
+  if [ -n "$dirty" ]; then
+    warn "Er staan lokale wijzigingen in de bestanden die opgehaald worden:"; echo "$dirty" | sed 's/^/    /' >&2
+    die "Leg die lokale wijzigingen eerst vast in git (commit) of zet ze weg, anders worden ze overschreven."
+  fi
+  step "$([ "$all" = 1 ] && echo "Het hele thema ($id) ophalen…" || echo "Editor-wijzigingen van de klant ophalen (thema $id)…")"
+  shopify_stream theme pull --store "$STORE" --theme "$id" --path "$SPROJ" --nodelete ${args[@]+"${args[@]}"} || shopify_fail "$SHOPIFY_LAST" "Ophalen van thema $id is mislukt."
+  # alleen wat we net opgehaald hebben: ander niet-vastgelegd werk blijft precies zoals het was
+  local scope=(--)
+  if [ "$all" = 1 ]; then sg add -A; else sg add -A -- "${specs[@]}"; scope=(-- "${specs[@]}"); fi
+  if sg diff --cached --quiet "${scope[@]}"; then
+    ok "Al up-to-date: er is niets veranderd"; SHOPIFY_PULL_CHANGED=0
+  else
+    changed=$(sg diff --cached --name-only "${scope[@]}")
+    SHOPIFY_PULL_CHANGED=$(printf '%s\n' "$changed" | sed '/^$/d' | wc -l | tr -d ' ')
+    sg commit -q -m "Live thema opgehaald ($([ "$all" = 1 ] && echo volledig || echo editor-wijzigingen)), $(date +%F)" "${scope[@]}"
+    ok "$SHOPIFY_PULL_CHANGED bestand(en) bijgewerkt en vastgelegd in git"
+    printf '%s\n' "$changed" | sed 's/^/    /'
+  fi
+  [ "$all" != 1 ] || sg tag -f deployed HEAD
+}
+cmd_shopify_pull() {
+  local all=0 name="${1:-}"
+  [ -n "$name" ] || die "Gebruik: wpopen shopify pull <naam> [--all]"
+  sget "$name"; shift
+  while [ $# -gt 0 ]; do case "$1" in --all) all=1;; *) die "Onbekende optie: $1";; esac; shift; done
+  shopify_need
+  step "Live thema zoeken…"; shopify_list_themes; shopify_live_theme
+  note "Live thema: $SHOPIFY_LIVE_NAME ($SHOPIFY_LIVE_ID)"
+  shopify_pull_files "$SHOPIFY_LIVE_ID" "$all"
+  echo "PULL_CHANGED=$SHOPIFY_PULL_CHANGED"
+}
+
+# ── thema controleren ──
+shopify_run_check() {  # accepteren(0|1) json(0|1) — zet SHOPIFY_CHECK_ERRORS/WARNINGS/INFO/NEW
+  local out="$SSTATE/check.out" rc=0
+  mkdir -p "$SSTATE"
+  step "Thema controleren (shopify theme check)…"
+  # de CLI geeft een afsluitcode ≠ 0 bij fouten; het oordeel nemen we zelf uit de uitvoer
+  timeout --foreground "${WPO_SHOPIFY_TIMEOUT:-900}" shopify theme check --path "$SPROJ" --output json --no-color </dev/null >"$out" 2>"$out.err" || rc=$?
+  FILE="$out" PROJECT="$SPROJ" BASELINE="$SSTATE/check-baseline" ACCEPT="$1" JSON="$2" shopify_py check || {
+    warn "Kon de uitvoer van de themacontrole niet lezen:"; tail -n 5 "$out.err" >&2 || true
+    die "Themacontrole mislukt."
+  }
+  SHOPIFY_CHECK_ERRORS=$(shopify_kv "$out.sum" errors); SHOPIFY_CHECK_WARNINGS=$(shopify_kv "$out.sum" warnings)
+  SHOPIFY_CHECK_INFO=$(shopify_kv "$out.sum" info); SHOPIFY_CHECK_NEW=$(shopify_kv "$out.sum" new_errors)
+  rm -f "$out" "$out.err" "$out.sum"
+}
+cmd_shopify_check() {
+  local json=0 name="${1:-}"
+  [ -n "$name" ] || die "Gebruik: wpopen shopify check <naam> [--json]"
+  sget "$name"; shift; [ "${1:-}" != --json ] || json=1
+  shopify_need
+  if [ $json = 1 ]; then shopify_run_check 0 1; else shopify_run_check 0 0; fi
+  # fouten laten de actie mislukken, zodat dat in het logboek en in de melding te zien is
+  [ "${SHOPIFY_CHECK_ERRORS:-0}" = 0 ] || exit 1
+}
+
+# ── dev server ──
+shopify_ours() {  # pid — alleen een dev server die wpopen zelf startte; een oud of fout statusbestand mag nooit iets anders raken
+  [[ "${1:-}" =~ ^[0-9]+$ ]] && [ "$1" -gt 1 ] && [ "$1" != "$$" ] || return 1
+  [ "$(ps -o uid= -p "$1" 2>/dev/null | tr -d ' ')" = "$(id -u)" ] || return 1
+  tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null | grep -q 'wpopen-shopify-dev' || return 1
+}
+shopify_kill() {  # pid — de dev server met alles wat hij gestart heeft (alleen als hij echt van ons is)
+  local pid="$1" k kids i
+  shopify_ours "$pid" || return 0
+  kids=$(descendants "$pid")
+  # alleen als groepsleider: anders zou -pid een vreemde groep (in het ergste geval -1: alles) treffen
+  if [ "$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')" = "$pid" ]; then kill -TERM -- "-$pid" 2>/dev/null || true; fi
+  kill -TERM "$pid" 2>/dev/null || true
+  for k in $kids; do [[ "$k" =~ ^[0-9]+$ ]] && [ "$k" -gt 1 ] && kill -TERM "$k" 2>/dev/null || true; done
+  for i in 1 2 3 4 5 6 7 8 9 10; do alive "$pid" || return 0; sleep 0.5; done
+  if shopify_ours "$pid" && [ "$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')" = "$pid" ]; then kill -KILL -- "-$pid" 2>/dev/null || true; fi
+}
+shopify_dev_alive() {  # draait de dev server nog? zo niet: resten opruimen
+  [ -f "$SSTATE/dev" ] || return 1
+  if shopify_ours "$(shopify_kv "$SSTATE/dev" pid)"; then return 0; fi
+  rm -f "$SSTATE/dev"; return 1
+}
+shopify_dev_report() {
+  local f="$SSTATE/dev"
+  echo "PREVIEW_URL=$(shopify_kv "$f" url)"
+  [ -z "$(shopify_kv "$f" share)" ] || echo "SHARE_URL=$(shopify_kv "$f" share)"
+  [ -z "$(shopify_kv "$f" editor)" ] || echo "EDITOR_URL=$(shopify_kv "$f" editor)"
+  [ -z "$(shopify_kv "$f" theme_id)" ] || echo "THEME_ID=$(shopify_kv "$f" theme_id)"
+}
+shopify_dev_start() {
+  shopify_need
+  mkdir -p "$SSTATE"; chmod 700 "$SSTATE" 2>/dev/null || true
+  exec 9>"$SSTATE/lock"; flock 9 || true
+  if shopify_dev_alive; then ok "De dev server van $NAME draait al"; shopify_dev_report; return 0; fi
+  shopify_port_free "$SPORT" || die "Poort $SPORT is bezet (een ander programma of een andere dev server). Kies een andere poort bij de instellingen van het project."
+  local args=(theme dev --store "$STORE" --path "$SPROJ" --port "$SPORT" --host "$SHOST")
+  [ "$SSYNC" != 1 ] || args+=(--theme-editor-sync --reconciliation-strategy keep-local)
+  local log="$SSTATE/dev.log" pid url="" share="" editor="" id="" box t
+  : > "$log"; chmod 600 "$log"
+  step "Dev server starten voor $STORE (poort $SPORT)…"
+  [ -z "${SHOPIFY_FLAG_STORE_PASSWORD:-}" ] || note "Storefront-wachtwoord wordt meegegeven."
+  # eigen sessie en procesgroep: de dev server blijft draaien als wpopen klaar is en is in één keer te stoppen;
+  # slot (fd 9) niet erven, anders blijft het vergrendeld zolang de server draait
+  LOG="$log" setsid bash -c 'shopify "$@" 2>&1 | shopify_redact >> "$LOG"' wpopen-shopify-dev "${args[@]}" </dev/null >/dev/null 2>&1 9>&- &
+  pid=$!
+  local now deadline login_deadline; now=$(date +%s)
+  deadline=$(( now + ${WPO_SHOPIFY_WAIT:-120} )); login_deadline=$(( now + ${WPO_SHOPIFY_LOGIN_WAIT:-600} ))
+  while :; do
+    if [ -z "${SHOPIFY_LOGIN_SHOWN:-}" ]; then shopify_announce_login "$log"; [ -z "${SHOPIFY_LOGIN_SHOWN:-}" ] || deadline=$login_deadline; fi
+    url=$(grep -oE "https?://(127\.0\.0\.1|localhost|0\.0\.0\.0):$SPORT" "$log" 2>/dev/null | sed -n 1p || true)
+    if [ -n "$url" ]; then break; fi
+    if ! alive "$pid"; then
+      shopify_fail "$log" "De dev server is gestopt voordat hij klaar was."
+    fi
+    if [ "$(date +%s)" -gt "$deadline" ]; then
+      shopify_kill "$pid"
+      shopify_fail "$log" "De dev server was niet klaar binnen ${WPO_SHOPIFY_WAIT:-120} seconden. Zie het dev-log voor de laatste meldingen."
+    fi
+    sleep 0.5
+  done
+  sleep 1   # de drie adressen komen in één blok; even wachten tot het compleet is
+  url="${url/0.0.0.0/127.0.0.1}"
+  share=$(grep -oE 'https://[A-Za-z0-9.-]+/\?preview_theme_id=[0-9]+' "$log" 2>/dev/null | sed -n 1p || true)
+  editor=$(grep -oE 'https://[^ │"]*/themes/[0-9]+/editor[^ │"]*' "$log" 2>/dev/null | sed -n 1p || true)
+  id=$(printf '%s\n%s\n' "$share" "$editor" | grep -oE '(preview_theme_id=|/themes/)[0-9]+' | grep -oE '[0-9]+$' | sed -n 1p || true)
+  printf 'pid=%s\nport=%s\nhost=%s\nurl=%s\nshare=%s\neditor=%s\ntheme_id=%s\nstarted=%s\n' "$pid" "$SPORT" "$SHOST" "$url" "$share" "$editor" "$id" "$(date +%s)" > "$SSTATE/dev"
+  ok "Dev server van $NAME draait op $url"
+  [ "$SHOST" != 0.0.0.0 ] || warn "De dev server luistert op het hele netwerk (--host 0.0.0.0): iedereen op je netwerk kan de preview zien."
+  shopify_dev_report
+}
+shopify_dev_stop() {
+  mkdir -p "$SSTATE"
+  if shopify_dev_alive; then
+    step "Dev server van $NAME stoppen…"
+    shopify_kill "$(shopify_kv "$SSTATE/dev" pid)"
+    rm -f "$SSTATE/dev"
+    ok "Dev server van $NAME gestopt"
+  else
+    rm -f "$SSTATE/dev"; note "De dev server van $NAME draaide niet."
+  fi
+}
+cmd_shopify_logs() {
+  local lines=80 name="${1:-}"
+  [ -n "$name" ] || die "Gebruik: wpopen shopify logs <naam> [--lines n]"
+  sget "$name"; shift
+  while [ $# -gt 0 ]; do case "$1" in --lines) lines="${2:-}"; shift;; *) die "Onbekende optie: $1";; esac; shift; done
+  [[ "$lines" =~ ^[0-9]+$ ]] || die "--lines moet een getal zijn."
+  if [ -f "$SSTATE/dev.log" ]; then tail -n "$lines" "$SSTATE/dev.log" | shopify_redact; else note "Nog geen dev-log voor $NAME."; fi
+}
+cmd_shopify_status() {
+  local json=0 name="${1:-}"
+  [ -n "$name" ] || die "Gebruik: wpopen shopify status <naam> [--json]"
+  sget "$name"; shift; [ "${1:-}" != --json ] || json=1
+  if shopify_dev_alive; then
+    if [ $json = 1 ]; then
+      URL="$(shopify_kv "$SSTATE/dev" url)" SHARE="$(shopify_kv "$SSTATE/dev" share)" EDITOR_URL="$(shopify_kv "$SSTATE/dev" editor)" python3 -c '
+import json, os
+print(json.dumps({"running": True, "url": os.environ["URL"], "share_url": os.environ["SHARE"] or None, "editor_url": os.environ["EDITOR_URL"] or None}))'
+    else ok "Dev server van $NAME draait op $(shopify_kv "$SSTATE/dev" url)"; shopify_dev_report; fi
+  else
+    if [ $json = 1 ]; then echo '{"running":false}'; else note "De dev server van $NAME draait niet."; fi
+  fi
+}
+
+# ── project toevoegen en bijwerken ──
+shopify_write() {  # oude-naam nieuwe-naam — schrijft de regel in de sitelijst met de huidige waarden van STORE, SPATH, SPORT, …
+  valid_field "$STORE"; valid_field "$SPATH"; valid_field "$LIVEURL"; valid_field "$SIGNORE"; valid_field "$SFLAGS"
+  db_write "$1" "$(printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s' "$2" "" "" "" shopify shopify "$LIVEURL" shopify "" "$STORE" "$SPATH" "$SPORT" "$SIGNORE" "$SFLAGS")"
+}
+shopify_checked_options() {  # controleert de gedeelde opties van add en update; zet SPATH, SPORT, LIVEURL, SIGNORE, SFLAGS
+  [ -z "$SPATH" ] || { [[ "$SPATH" == /* ]] || die "Het pad van de projectmap moet absoluut zijn."; [[ "$SPATH" != *".."* ]] || die "Het pad mag geen .. bevatten."; }
+  [[ "$SPORT" =~ ^[0-9]+$ ]] && [ "$SPORT" -ge 1024 ] && [ "$SPORT" -le 65535 ] || die "De poort moet tussen 1024 en 65535 liggen."
+  [ -z "$LIVEURL" ] || [[ "$LIVEURL" =~ ^https?://[A-Za-z0-9.-]+/?$ ]] || die "Gebruik een volledig adres zonder pad, bijvoorbeeld https://klant.nl"
+  LIVEURL="${LIVEURL%/}"
+  local p
+  # met read en tr, niet met een for-lus: een patroon als templates/*.json mag nooit door de shell uitgebreid worden
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    [ "$p" = none ] && [ "$SIGNORE" = none ] && continue
+    [[ "$p" =~ ^[A-Za-z0-9._*?/-]+$ ]] && [[ "$p" != /* ]] && [[ "$p" != *..* ]] || die "Ongeldig patroon om te beschermen: $p"
+  done < <(printf '%s\n' "$SIGNORE" | tr ';' '\n')
+  while IFS= read -r p; do
+    [ -z "$p" ] || [[ "$p" =~ ^(host=(127\.0\.0\.1|0\.0\.0\.0)|sync=1)$ ]] || die "Ongeldige vlag: $p"
+  done < <(printf '%s\n' "$SFLAGS" | tr ';' '\n')
+}
+shopify_flags() {  # host synchroniseren → vlaggen voor in de regel
+  local f=""
+  [ "$1" = 127.0.0.1 ] || f="host=$1"
+  [ "$2" != 1 ] || f="${f:+$f;}sync=1"
+  echo "$f"
+}
+shopify_ensure_repo() {  # git-repo in een bestaande map; zonder repo leggen we de huidige bestanden vast als uitgangspunt
+  [ -d "$SPATH/.git" ] && return 0
+  (cd "$SPATH" && gitc init -q -b main && gitc add -A && gitc commit -q -m "Uitgangspunt: huidige bestanden (BD Deck)" && gitc tag -f deployed HEAD >/dev/null)
+  note "$SPATH had nog geen git-repo: de huidige bestanden zijn vastgelegd als uitgangspunt."
+}
+shopify_add() {
+  local name="${1:-}" store="" create=0 sync=0 host=127.0.0.1 ignore=() p
+  [ -n "$name" ] && [[ "$name" != -* ]] || die "Gebruik: wpopen shopify add <naam> --store winkel.myshopify.com [--path map] [--create] [--port n] [--url https://domein] [--ignore patroon]… [--sync] [--host ip]"
+  shift
+  SPATH=""; SPORT=""; LIVEURL=""; SIGNORE=""; SFLAGS=""
+  while [ $# -gt 0 ]; do case "$1" in
+    --store) store="${2:-}"; shift;; --path) SPATH="${2:-}"; shift;; --port) SPORT="${2:-}"; shift;; --url) LIVEURL="${2:-}"; shift;;
+    --ignore) ignore+=("${2:-}"); shift;; --create) create=1;; --sync) sync=1;; --host) host="${2:-}"; shift;;
+    *) die "Onbekende optie: $1";;
+  esac; shift; done
+  [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || die "Naam mag alleen letters, cijfers, punt, - en _ bevatten."
+  db_has "$name" && die "Er bestaat al een site '$name'."
+  [ -n "$store" ] || die "Geef de winkel op met --store winkel.myshopify.com"
+  NAME="$name"; STORE=$(shopify_store "$store"); SLUG=$(slug "$name")
+  TYPE=shopify; SSTATE="$SHOPIFY_STATE/$SLUG"
+  [ -n "$SPATH" ] || SPATH="$SHOPIFY_DIR/$SLUG"
+  [ -n "$SPORT" ] || SPORT=$(shopify_free_port)
+  [[ "$host" =~ ^(127\.0\.0\.1|0\.0\.0\.0)$ ]] || die "--host moet 127.0.0.1 of 0.0.0.0 zijn."
+  if [ ${#ignore[@]} -gt 0 ]; then SIGNORE=$(IFS=';'; echo "${ignore[*]}"); fi
+  SFLAGS=$(shopify_flags "$host" "$sync")
+  shopify_checked_options
+  SPROJ="$SPATH"
+  # twee dev servers op dezelfde winkel delen één dev-thema; dat werkt niet naast elkaar
+  awk -F'|' -v s="$STORE" -v n="$name" '$8=="shopify" && $10==s && $1!=n{x=$1} END{if(x) print x}' "$DB" | while read -r other; do
+    warn "Let op: $other gebruikt dezelfde winkel. Twee dev servers op één winkel delen hetzelfde dev-thema; start ze niet tegelijk."
+  done
+  awk -F'|' -v p="$SPORT" -v n="$name" '$8=="shopify" && $12==p && $1!=n{x=$1} END{if(x) print x}' "$DB" | while read -r other; do
+    warn "Let op: poort $SPORT wordt ook door $other gebruikt; kies een andere poort als je ze tegelijk wilt draaien."
+  done
+  if [ -d "$SPATH" ] && [ -n "$(ls -A "$SPATH" 2>/dev/null)" ]; then
+    need git
+    { [ -d "$SPATH/layout" ] && [ -d "$SPATH/templates" ]; } || die "$SPATH is geen Shopify-thema (de mappen layout/ en templates/ ontbreken)."
+    shopify_ensure_repo
+    step "Bestaande themamap gekoppeld: $SPATH"
+  else
+    [ $create = 1 ] || die "De map $SPATH bestaat niet of is leeg. Kies een bestaande themamap, of laat BD Deck het live thema ophalen (--create)."
+    need git; shopify_cli; mkdir -p "$SPATH"
+    step "Nieuw project vanaf het live thema van $STORE…"
+    mkdir -p "$SSTATE"
+    shopify_list_themes; shopify_live_theme
+    note "Live thema: $SHOPIFY_LIVE_NAME ($SHOPIFY_LIVE_ID)"
+    shopify_stream theme pull --store "$STORE" --theme "$SHOPIFY_LIVE_ID" --path "$SPATH" || { shopify_explain "$SHOPIFY_LAST" || true; die "Het live thema ophalen is mislukt."; }
+    { [ -d "$SPATH/layout" ] && [ -d "$SPATH/templates" ]; } || die "Het opgehaalde thema is onvolledig (layout/ of templates/ ontbreekt)."
+    [ -f "$SPATH/.gitignore" ] || printf '.DS_Store\nnode_modules/\n.shopify/\n' > "$SPATH/.gitignore"
+    (cd "$SPATH" && gitc init -q -b main && gitc add -A && gitc commit -q -m "Live thema, uitgangspunt" && gitc tag -f deployed HEAD >/dev/null)
+    ok "Live thema opgehaald en vastgelegd als eerste commit"
+  fi
+  shopify_write "$name" "$name"
+  ok "$name toegevoegd ($STORE, poort $SPORT)"
+}
+shopify_update() {  # na sget: --store, --path, --port, --url, --ignore (herhaalbaar, of none), --sync 0|1, --host
+  local newname="$NAME" store="$STORE" sync="$SSYNC" host="$SHOST" ignore=() set_ignore=0
+  while [ $# -gt 0 ]; do
+    [ $# -ge 2 ] || die "Waarde ontbreekt voor $1"
+    case "$1" in
+      --name) newname="$2";; --store) store="$2";; --path) SPATH="$2";; --port) SPORT="$2";; --url) LIVEURL="$2";;
+      --ignore) set_ignore=1; ignore+=("$2");; --sync) sync="$2";; --host) host="$2";;
+      *) die "Onbekende optie: $1";;
+    esac; shift 2
+  done
+  [[ "$newname" =~ ^[A-Za-z0-9._-]+$ ]] || die "Naam mag alleen letters, cijfers, punt, - en _ bevatten."
+  if [ "$newname" != "$NAME" ]; then
+    db_has "$newname" && die "Er bestaat al een site '$newname'."
+    shopify_dev_alive && die "Stop eerst de dev server voordat je het project hernoemt."
+  fi
+  STORE=$(shopify_store "$store")
+  [ -n "$SPATH" ] || SPATH="$SPROJ"
+  [[ "$sync" =~ ^[01]$ ]] || die "--sync moet 0 of 1 zijn."
+  [[ "$host" =~ ^(127\.0\.0\.1|0\.0\.0\.0)$ ]] || die "--host moet 127.0.0.1 of 0.0.0.0 zijn."
+  if [ $set_ignore = 1 ]; then SIGNORE=$(IFS=';'; echo "${ignore[*]}"); [ -n "$SIGNORE" ] || SIGNORE=""; fi
+  SFLAGS=$(shopify_flags "$host" "$sync")
+  shopify_checked_options
+  shopify_write "$NAME" "$newname"
+  if [ "$newname" != "$NAME" ] && [ -d "$SSTATE" ]; then mv "$SSTATE" "$SHOPIFY_STATE/$(slug "$newname")" 2>/dev/null || true; fi
+  ok "$newname bijgewerkt"
+}
+shopify_remove() {  # na sget: alleen uit de lijst; de projectmap van de klant blijft altijd staan
+  shopify_dev_alive && { shopify_kill "$(shopify_kv "$SSTATE/dev" pid)"; note "Dev server gestopt."; }
+  [ -n "$SSTATE" ] && [ "$SSTATE" != "$SHOPIFY_STATE/" ] && [ "$(dirname "$SSTATE")" = "$SHOPIFY_STATE" ] && rm -rf "$SSTATE"
+  db_write "$NAME" ""
+  ok "$NAME uit de sitelijst gehaald (de projectmap $SPROJ blijft staan)"
+}
+
+# ── verbindingstest ──
+shopify_test() {  # json(0|1) — controles als regels sleutel|status|label|detail
+  local json="$1" t out ver
+  {
+    if (shopify_cli) 2>/dev/null; then
+      shopify_cli
+      ver=$(shopify version 2>/dev/null | tr -d '\r' | tail -n 1 || true)
+      echo "cli|ok|Shopify CLI|${ver:-gevonden}"
+    else echo "cli|fail|Shopify CLI|ontbreekt: npm install -g @shopify/cli"; fi
+    if [ -d "$SPROJ/layout" ] && [ -d "$SPROJ/templates" ]; then echo "project|ok|Themamap|$SPROJ"
+    elif [ -d "$SPROJ" ]; then echo "project|fail|Themamap|geen thema: layout/ en templates/ ontbreken"
+    else echo "project|fail|Themamap|bestaat niet: $SPROJ"; fi
+    if command -v shopify >/dev/null; then
+      mkdir -p "$SSTATE"
+      # --no-input: een test mag nooit blijven wachten op een inlogvraag
+      timeout --foreground 60 shopify theme list --store "$STORE" --json --no-input </dev/null >"$SSTATE/test.out" 2>&1 || true
+      out=$(cat "$SSTATE/test.out")
+      THEMES=$(STORE="$STORE" FILE="$SSTATE/test.out" shopify_py themes 2>/dev/null || true); rm -f "$SSTATE/test.out"
+      if [ -n "$THEMES" ] && [ "$THEMES" != null ]; then
+        echo "store|ok|Winkel $STORE|ingelogd, $(THEMES="$THEMES" python3 -c 'import json, os; print(len(json.loads(os.environ["THEMES"])))') thema's"
+      elif grep -qiE 'log in|login|authenticat|session|no-input' <<<"$out"; then echo "store|warn|Winkel $STORE|niet ingelogd: start de dev server of haal de themalijst op en bevestig de inloglink"
+      else echo "store|fail|Winkel $STORE|$(printf '%s' "$out" | tail -n 1 | tr '|' '/' | cut -c1-160)"; fi
+    else echo "store|skip|Winkel $STORE|overgeslagen"; fi
+    if shopify_dev_alive; then echo "dev|ok|Dev server|draait op $(shopify_kv "$SSTATE/dev" url)"
+    elif shopify_port_free "$SPORT"; then echo "dev|skip|Dev server|gestopt, poort $SPORT is vrij"
+    else echo "dev|warn|Dev server|gestopt, maar poort $SPORT is bezet door een ander programma"; fi
+    if [[ "$LIVEHOST" =~ ^[a-z0-9.-]+$ ]]; then
+      t=$(date +%s%N)
+      out=$(curl -sS -o /dev/null -L --max-time 20 -w '%{http_code}' "https://$LIVEHOST/" 2>&1 || true)
+      # een winkel met wachtwoordpagina antwoordt met 200 op /password; dat telt als bereikbaar
+      if [[ "$out" =~ ^[23][0-9][0-9]$ ]]; then echo "http|ok|Live winkel|HTTP $out in $(ms_since "$t") ms"
+      else echo "http|fail|Live winkel|$(head -1 <<<"$out" | tr '|' '/' | cut -c1-160)"; fi
+    fi
+  } | checks_out "$json"
+}
+
+# ── veilig live zetten: push naar een niet-gepubliceerd thema ──
+shopify_record() {  # bestand sleutel=waarde… — status van de laatste push of publicatie
+  local f="$1"; shift
+  mkdir -p "$SSTATE"; : > "$f"
+  local kv; for kv in "$@"; do printf '%s\n' "$kv" >> "$f"; done
+}
+cmd_shopify_push() {
+  local name="${1:-}" title="" pull=1 check=1 accept=0 row id role ptheme=""
+  [ -n "$name" ] || die "Gebruik: wpopen shopify push <naam> [--theme \"naam\"] [--no-pull] [--no-check] [--allow-check-errors] [--yes]"
+  sget "$name"; shift
+  while [ $# -gt 0 ]; do case "$1" in
+    --theme) title="${2:-}"; shift;; --no-pull) pull=0;; --no-check) check=0;; --allow-check-errors) accept=1;;
+    *) die "Onbekende optie: $1";;
+  esac; shift; done
+  valid_field "$title"
+  [ -n "$title" ] || title="BD Deck $(date '+%d-%m-%Y %H:%M')"
+  shopify_need
+
+  step "Stap 1/6: thema's van $STORE ophalen"
+  shopify_list_themes; shopify_live_theme
+  note "Nu live: $SHOPIFY_LIVE_NAME ($SHOPIFY_LIVE_ID) — dit thema wordt niet aangeraakt"
+
+  step "Stap 2/6: doelthema bepalen"
+  row=$(shopify_pick name "$title")
+  if [ -n "$row" ]; then
+    id="${row%%$'\t'*}"; role="${row##*$'\t'}"
+    case "$role" in
+      unpublished) ;;
+      live) die "'$title' is het live thema. BD Deck pusht nooit rechtstreeks naar live: kies een ander thema of laat een nieuw thema maken." ;;
+      *) die "'$title' is een $role-thema en geen niet-gepubliceerd thema. Kies een ander thema of laat een nieuw thema maken." ;;
+    esac
+    note "Bestaand niet-gepubliceerd thema '$title' ($id) wordt bijgewerkt; de editorbestanden van de klant blijven staan"
+  else
+    id=""; note "Nieuw niet-gepubliceerd thema '$title' wordt aangemaakt, met de laatste editorbestanden van live"
+  fi
+  echo "PUSH_STORE=$STORE"; echo "PUSH_THEME=$title"
+  confirm "Pushen naar het niet-gepubliceerde thema '$title' in $STORE?" || die "Afgebroken."
+
+  step "Stap 3/6: editor-wijzigingen van de klant ophalen"
+  if [ $pull = 1 ] || [ -z "$id" ]; then shopify_pull_files "$SHOPIFY_LIVE_ID" 0
+  else note "Overgeslagen (--no-pull): lokale editorbestanden lopen mogelijk achter op live"; fi
+
+  step "Stap 4/6: thema controleren"
+  if [ $check = 1 ]; then
+    shopify_run_check "$accept" 0
+    if [ "${SHOPIFY_CHECK_NEW:-0}" -gt 0 ]; then
+      die "De themacontrole vond $SHOPIFY_CHECK_NEW nieuwe fout(en). Los ze op, of push toch met --allow-check-errors."
+    fi
+    [ "${SHOPIFY_CHECK_ERRORS:-0}" = 0 ] || note "De $SHOPIFY_CHECK_ERRORS fout(en) hierboven waren er al eerder en zijn geaccepteerd."
+  else note "Overgeslagen (--no-check)"; fi
+
+  step "Stap 5/6: momentopname in git"
+  shopify_snapshot push
+  ok "Staat vastgelegd als tag $SHOPIFY_SNAPSHOT_TAG"
+
+  step "Stap 6/6: uploaden naar $STORE"
+  local args=(theme push --store "$STORE" --path "$SPROJ" --json)
+  if [ -n "$id" ]; then
+    args+=(--theme "$id")
+    while IFS= read -r ptheme; do args+=(--ignore "$ptheme"); done < <(shopify_ignores)
+  else
+    args+=(--unpublished --theme "$title")
+  fi
+  local out="$SSTATE/push.out"
+  shopify_capture "$out" "${args[@]}" || shopify_fail "$out" "Pushen naar $STORE is mislukt."
+  local pushed; pushed=$(FILE="$out" shopify_py pushed)
+  rm -f "$out"
+  if [ -n "$pushed" ]; then id="${pushed%%$'\t'*}"
+  elif [ -z "$id" ]; then
+    # de CLI gaf geen bruikbare JSON: het nieuwe thema zoeken op naam
+    shopify_list_themes; row=$(shopify_pick name "$title"); id="${row%%$'\t'*}"
+  fi
+  [ -n "$id" ] || die "Gepusht, maar het thema-id is niet terug te vinden. Kijk in de themalijst."
+  local preview="https://$STORE/?preview_theme_id=$id" editor="https://$STORE/admin/themes/$id/editor"
+  shopify_record "$SSTATE/last-push" "theme_id=$id" "theme_name=$title" "preview_url=$preview" "editor_url=$editor" "at=$(date -Is)" "snapshot=$SHOPIFY_SNAPSHOT_TAG" "store=$STORE"
+  ok "Gepusht naar '$title' ($id). De winkel zelf is niet veranderd: bekijk eerst de preview."
+  echo "THEME_ID=$id"; echo "PREVIEW_URL=$preview"; echo "EDITOR_URL=$editor"
+}
+
+# ── bewust publiceren en terugdraaien ──
+shopify_editor_diff() {  # live-id thema-id — zet in SHOPIFY_DRIFT de editorbestanden die live anders heeft dan het preview-thema
+  local a="$SSTATE/tmp/live" b="$SSTATE/tmp/preview" pat args=()
+  rm -rf "$SSTATE/tmp"; mkdir -p "$a" "$b"
+  while IFS= read -r pat; do args+=(--only "$pat"); done < <(shopify_editor_patterns)
+  shopify_stream theme pull --store "$STORE" --theme "$1" --path "$a" "${args[@]}" >/dev/null || shopify_fail "$SHOPIFY_LAST" "Editorbestanden van live ophalen is mislukt."
+  shopify_stream theme pull --store "$STORE" --theme "$2" --path "$b" "${args[@]}" >/dev/null || shopify_fail "$SHOPIFY_LAST" "Editorbestanden van het preview-thema ophalen is mislukt."
+  # alle bestanden aan beide kanten; een bestand dat maar aan één kant staat of anders is, telt als verschil
+  SHOPIFY_DRIFT=""
+  local rel
+  while IFS= read -r rel; do
+    cmp -s "$a/$rel" "$b/$rel" || SHOPIFY_DRIFT="${SHOPIFY_DRIFT:+$SHOPIFY_DRIFT$'\n'}$rel"
+  done < <({ (cd "$a" && find . -type f) ; (cd "$b" && find . -type f); } | sed 's#^\./##' | sort -u)
+  rm -rf "$SSTATE/tmp"
+}
+cmd_shopify_publish() {
+  local name="${1:-}" title="" mode="" row id role prev_id prev_name
+  [ -n "$name" ] || die "Gebruik: wpopen shopify publish <naam> --theme \"naam of id\" [--sync-editor-files | --keep-editor-files] --yes"
+  sget "$name"; shift
+  while [ $# -gt 0 ]; do case "$1" in
+    --theme) title="${2:-}"; shift;; --sync-editor-files) mode=sync;; --keep-editor-files) mode=keep;;
+    *) die "Onbekende optie: $1";;
+  esac; shift; done
+  [ -n "$title" ] || die "Geef het thema op dat gepubliceerd moet worden met --theme."
+  shopify_need
+
+  step "Stap 1/6: thema's van $STORE ophalen"
+  shopify_list_themes; shopify_live_theme
+  row=$(shopify_pick id "$title"); [ -n "$row" ] || row=$(shopify_pick name "$title")
+  [ -n "$row" ] || die "Thema '$title' bestaat niet in $STORE."
+  id="${row%%$'\t'*}"; role="${row##*$'\t'}"; row="${row#*$'\t'}"; title="${row%%$'\t'*}"
+  [ "$role" != live ] || die "'$title' is al het live thema."
+  [ "$role" = unpublished ] || die "'$title' is een $role-thema; alleen niet-gepubliceerde thema's kunnen live gezet worden."
+  prev_id="$SHOPIFY_LIVE_ID"; prev_name="$SHOPIFY_LIVE_NAME"
+
+  step "Stap 2/6: bevestigen"
+  echo "PUBLISH_STORE=$STORE"; echo "PUBLISH_CURRENT=$prev_name ($prev_id)"; echo "PUBLISH_NEW=$title ($id)"
+  note "Winkel: $STORE"; note "Nu live: $prev_name ($prev_id)"; note "Wordt live: $title ($id)"
+  confirm "$title live zetten in $STORE (nu live: $prev_name)?" || die "Afgebroken."
+
+  step "Stap 3/6: back-up van het huidige live thema"
+  new_backup publish
+  meta store "$STORE"; meta previous_live_id "$prev_id"; meta previous_live_name "$prev_name"; meta new_theme_id "$id"; meta new_theme_name "$title"
+  shopify_snapshot publish
+  meta git_tag "$SHOPIFY_SNAPSHOT_TAG"
+  shopify_stream theme pull --store "$STORE" --theme "$prev_id" --path "$BK/live-theme" >/dev/null || shopify_fail "$SHOPIFY_LAST" "Back-up van het live thema mislukt; er is niets gepubliceerd."
+  ok "Live thema bewaard in $BK/live-theme (git-tag $SHOPIFY_SNAPSHOT_TAG)"
+  echo "BACKUP=$(basename "$BK")"
+
+  step "Stap 4/6: editorbestanden van de klant vergelijken"
+  shopify_editor_diff "$prev_id" "$id"
+  if [ -z "$SHOPIFY_DRIFT" ]; then ok "Live en het preview-thema hebben dezelfde editorbestanden"
+  else
+    warn "De klant (of iemand anders) heeft sinds de preview iets aangepast in de editor van het live thema:"
+    printf '%s\n' "$SHOPIFY_DRIFT" | sed 's/^/    ! /' >&2
+    echo "PUBLISH_DRIFT=$(printf '%s\n' "$SHOPIFY_DRIFT" | sed '/^$/d' | wc -l | tr -d ' ')"
+    case "$mode" in
+      sync)
+        note "De live-versie van die bestanden wordt overgenomen in het preview-thema, zodat er niets van de klant verloren gaat"
+        shopify_pull_files "$prev_id" 0
+        local args=(); local pat
+        while IFS= read -r pat; do args+=(--only "$pat"); done < <(shopify_editor_patterns)
+        shopify_stream theme push --store "$STORE" --path "$SPROJ" --theme "$id" "${args[@]}" >/dev/null || shopify_fail "$SHOPIFY_LAST" "De editorbestanden naar het preview-thema zetten is mislukt; er is niets gepubliceerd."
+        ok "Editorbestanden van live staan nu ook in '$title'";;
+      keep) warn "Je koos ervoor de preview-versie te houden: die wijzigingen van de klant gaan verloren (ze staan wel in de back-up).";;
+      *) die "Live en het preview-thema verschillen. Kies: de live-versie overnemen (--sync-editor-files, aanbevolen) of bewust de preview-versie houden (--keep-editor-files). Er is niets gepubliceerd.";;
+    esac
+  fi
+
+  step "Stap 5/6: publiceren"
+  shopify_stream theme publish --store "$STORE" --theme "$id" --force || shopify_fail "$SHOPIFY_LAST" "Publiceren is mislukt. Het live thema is niet veranderd."
+
+  step "Stap 6/6: controleren"
+  shopify_list_themes
+  row=$(shopify_pick id "$id")
+  if [ "${row##*$'\t'}" = live ]; then ok "'$title' is nu live in $STORE"; else warn "Het thema lijkt nog niet live te staan; controleer de themalijst."; fi
+  local before="$SHOPIFY_SNAPSHOT_TAG"
+  # wat nu live staat is de werkmap zoals hij was bij het publiceren (na het overnemen van de editorbestanden)
+  shopify_snapshot published
+  sg tag -f deployed "$SHOPIFY_SNAPSHOT_COMMIT" >/dev/null
+  shopify_record "$SSTATE/last-publish" "new_id=$id" "new_name=$title" "previous_id=$prev_id" "previous_name=$prev_name" "at=$(date -Is)" "backup=$(basename "$BK")" "snapshot=$before" "store=$STORE"
+  ok "Terugdraaien kan met: wpopen shopify rollback $NAME"
+}
+cmd_shopify_rollback() {
+  local name="${1:-}" f row
+  [ -n "$name" ] || die "Gebruik: wpopen shopify rollback <naam> --yes"
+  sget "$name"; shift
+  f="$SSTATE/last-publish"
+  [ -f "$f" ] && [ -z "$(shopify_kv "$f" rolled_back_at)" ] || die "Er is geen publicatie om terug te draaien."
+  shopify_need
+  step "Thema's van $STORE ophalen"
+  shopify_list_themes; shopify_live_theme
+  local new_id new_name prev_id prev_name
+  new_id=$(shopify_kv "$f" new_id); new_name=$(shopify_kv "$f" new_name); prev_id=$(shopify_kv "$f" previous_id); prev_name=$(shopify_kv "$f" previous_name)
+  [ "$SHOPIFY_LIVE_ID" = "$new_id" ] || die "Het live thema is sinds de laatste publicatie veranderd ($SHOPIFY_LIVE_NAME); automatisch terugdraaien kan niet meer."
+  row=$(shopify_pick id "$prev_id"); [ -n "$row" ] || die "Het vorige live thema '$prev_name' bestaat niet meer in $STORE."
+  [ "${row##*$'\t'}" = unpublished ] || die "Het vorige live thema '$prev_name' is niet meer beschikbaar als niet-gepubliceerd thema."
+  echo "ROLLBACK_STORE=$STORE"; echo "ROLLBACK_CURRENT=$new_name ($new_id)"; echo "ROLLBACK_TO=$prev_name ($prev_id)"
+  note "Winkel: $STORE"; note "Nu live: $new_name ($new_id)"; note "Terug naar: $prev_name ($prev_id)"
+  confirm "$prev_name weer live zetten in $STORE?" || die "Afgebroken."
+  shopify_stream theme publish --store "$STORE" --theme "$prev_id" --force || shopify_fail "$SHOPIFY_LAST" "Terugdraaien is mislukt. Het live thema is niet veranderd."
+  printf 'rolled_back_at=%s\n' "$(date -Is)" >> "$f"
+  ok "'$prev_name' is weer live in $STORE; '$new_name' staat nog als niet-gepubliceerd thema in de winkel"
+}
+
+cmd_shopify() {
+  local sub="${1:-}"; [ $# -eq 0 ] || shift
+  case "$sub" in
+    add)      shopify_add "$@";;
+    update)   [ $# -ge 1 ] || die "Gebruik: wpopen shopify update <naam> [--store|--path|--port|--url|--ignore|--sync|--host waarde]"
+              sget "$1"; shift; shopify_update "$@";;
+    dev|start) [ $# -ge 1 ] || die "Gebruik: wpopen shopify dev <naam>"; sget "$1"; shopify_dev_start;;
+    stop)     [ $# -ge 1 ] || die "Gebruik: wpopen shopify stop <naam>"; sget "$1"; shopify_dev_stop;;
+    status)   cmd_shopify_status "$@";;
+    logs)     cmd_shopify_logs "$@";;
+    themes)   cmd_shopify_themes "$@";;
+    pull)     cmd_shopify_pull "$@";;
+    check)    cmd_shopify_check "$@";;
+    push)     cmd_shopify_push "$@";;
+    publish)  cmd_shopify_publish "$@";;
+    rollback) cmd_shopify_rollback "$@";;
+    test)     [ $# -ge 1 ] || die "Gebruik: wpopen shopify test <naam> [--json]"; sget "$1"; shopify_test "$([ "${2:-}" = --json ] && echo 1 || echo 0)";;
+    *) die "Gebruik: wpopen shopify add|update|dev|stop|status|logs|themes|pull|check|push|publish|rollback|test <naam> …";;
+  esac
+}
+
 # ───────────── start ─────────────
 # algemene vlaggen weghalen; niet bij `wp`, daar horen ze bij WP-CLI zelf
 if [ "${1:-}" != wp ] && [ "${1:-}" != artisan ]; then
@@ -4115,5 +5045,6 @@ case "${1:-}" in
   ssh)      shift; cmd_ssh "$@";;
   share)    shift; cmd_share "$@";;
   mailpit)  shift; cmd_mailpit "$@";;
+  shopify)  shift; cmd_shopify "$@";;
   *)        cmd_open "$@";;
 esac

@@ -60,7 +60,7 @@ class Edit extends Component
     public function render(): View
     {
         return view('livewire.sites.edit', [
-            'providers' => SiteProvider::cases(),
+            'providers' => SiteProvider::hosting(),
             'modes' => SiteMode::remote(),
         ])->title(__(':site bewerken', ['site' => $this->site->name]));
     }

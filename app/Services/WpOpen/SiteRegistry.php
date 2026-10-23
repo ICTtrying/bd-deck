@@ -75,6 +75,26 @@ final class SiteRegistry
     }
 
     /**
+     * Thema's van de winkel zoals de Shopify CLI ze net teruggaf.
+     *
+     * @param  list<array{id: int, name: string, role: string, preview_url: string, editor_url: string}>  $themes
+     */
+    public function recordThemes(Site $site, array $themes): void
+    {
+        $site->update(['shopify_state' => [...($site->shopify_state ?? []), 'themes' => array_values($themes), 'themes_at' => now()->toIso8601String()]]);
+    }
+
+    /**
+     * Uitkomst van "shopify theme check": aantallen en de gevonden punten.
+     *
+     * @param  array<string, mixed>  $result
+     */
+    public function recordShopifyCheck(Site $site, array $result): void
+    {
+        $site->update(['shopify_state' => [...($site->shopify_state ?? []), 'check' => $result, 'check_at' => now()->toIso8601String()]]);
+    }
+
+    /**
      * @param  list<array{key: string, status: string, label: string, detail: string}>  $checks
      */
     public function recordGoLive(Site $site, array $checks): void

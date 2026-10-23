@@ -7,6 +7,9 @@
     $liveHealth = collect($site->health ?? [])->firstWhere('key', 'http');
     $monitored = $site->isMonitored();
     $local = match (true) {
+        $site->isShopify() && ! $site->isBuilt() => ['label' => __('Map ontbreekt'), 'dot' => 'bg-danger'],
+        $site->isShopify() && $site->isRunning() => ['label' => __('Dev server draait'), 'dot' => 'bg-success'],
+        $site->isShopify() => ['label' => __('Dev server uit'), 'dot' => 'bg-faint'],
         ! $site->isBuilt() => ['label' => __('Nog niet gebouwd'), 'dot' => 'bg-faint'],
         $site->isRunning() => ['label' => __('Draait'), 'dot' => 'bg-success'],
         default => ['label' => __('Gestopt'), 'dot' => 'bg-faint'],
@@ -38,7 +41,9 @@
         <div class="grid min-w-0 gap-0.5">
             <div class="flex min-w-0 flex-wrap items-center gap-1.5">
                 <a href="{{ route('sites.show', $site) }}" wire:navigate class="truncate text-[0.9375rem] font-semibold tracking-[-0.005em] hover:text-local-ink">{{ $site->name }}</a>
-                @if ($site->isLocalOnly())
+                @if ($site->isShopify())
+                    <x-badge tone="info"><x-icon name="shopify" :size="11" />Shopify</x-badge>
+                @elseif ($site->isLocalOnly())
                     <x-badge tone="local">{{ __('Alleen lokaal') }}</x-badge>
                 @else
                     @if ($site->isLaravel())
@@ -59,7 +64,7 @@
                     <x-badge tone="danger">{{ __('Verbinding mislukt') }}</x-badge>
                 @endif
             </div>
-            <p class="truncate font-mono text-xs text-faint">{{ $site->isLocalOnly() ? $site->localUrl() : ($site->data('live_host') ?: $site->data('target')) }}</p>
+            <p class="truncate font-mono text-xs text-faint">{{ $site->isShopify() ? $site->shopifyStore().($site->isRunning() ? ' · :'.$site->devPort() : '') : ($site->isLocalOnly() ? $site->localUrl() : ($site->data('live_host') ?: $site->data('target'))) }}</p>
         </div>
     </div>
 
@@ -70,7 +75,22 @@
                 <x-slot:trigger>
                     <x-icon name="laptop" :size="13" /><span class="size-1.5 shrink-0 rounded-full {{ $local['dot'] }}"></span><span class="truncate">{{ $local['label'] }}</span><x-icon name="chevron-down" :size="12" class="ml-auto opacity-60" />
                 </x-slot:trigger>
-                @if ($site->isBuilt())
+                @if ($site->isShopify())
+                    @if ($site->isBuilt())
+                        <x-menu-item icon="globe" wire:click="launch({{ $site->id }}, 'local-site')" :description="$site->isRunning() ? null : __('Start de dev server en opent daarna de preview.')">{{ __('Preview openen') }}</x-menu-item>
+                        <x-menu-item icon="pencil" wire:click="launch({{ $site->id }}, 'local-admin')">{{ __('Theme editor') }}</x-menu-item>
+                        @if ($site->devShareUrl())
+                            <x-menu-item icon="share" wire:click="launch({{ $site->id }}, 'share')">{{ __('Deelbare link openen') }}</x-menu-item>
+                        @endif
+                        <x-menu-item icon="code" wire:click="launch({{ $site->id }}, 'editor')">{{ __('Openen in editor') }}</x-menu-item>
+                        <x-menu-item icon="terminal" wire:click="launch({{ $site->id }}, 'terminal')">{{ __('Terminal in projectmap') }}</x-menu-item>
+                        <x-menu-item icon="folder" wire:click="launch({{ $site->id }}, 'folder')">{{ __('Map openen') }}</x-menu-item>
+                        <div class="my-1 h-px bg-line"></div>
+                        <x-menu-item :icon="$site->isRunning() ? 'square' : 'play'" wire:click="runQuick({{ $site->id }}, '{{ $site->isRunning() ? 'stop' : 'start' }}')">{{ $site->isRunning() ? __('Dev server stoppen') : __('Dev server starten') }}</x-menu-item>
+                    @else
+                        <x-menu-item icon="pencil" :href="route('sites.show', ['site' => $site, 'tab' => 'instellingen'])" wire:navigate :description="__('De themamap is niet gevonden.')">{{ __('Pad aanpassen') }}</x-menu-item>
+                    @endif
+                @elseif ($site->isBuilt())
                     @php $startHint = $site->isRunning() ? null : __('Start eerst de lokale site (±15 seconden).'); @endphp
                     @unless ($site->isLaravel())
                         <x-menu-item icon="wordpress" wire:click="launch({{ $site->id }}, 'local-admin')" :description="$startHint">{{ __('WP-admin lokaal') }}</x-menu-item>
@@ -102,12 +122,16 @@
                     <x-slot:trigger>
                         <x-icon name="globe" :size="13" /><span class="size-1.5 shrink-0 rounded-full {{ $live['dot'] }}"></span><span class="truncate">{{ $live['label'] }}</span><x-icon name="chevron-down" :size="12" class="ml-auto opacity-60" />
                     </x-slot:trigger>
-                    <x-menu-item icon="globe" wire:click="launch({{ $site->id }}, 'live-site')">{{ __('Live website openen') }}</x-menu-item>
-                    @unless ($site->isLaravel())
-                        <x-menu-item icon="wordpress" wire:click="launch({{ $site->id }}, 'live-admin')" x-on:click="{{ $opening }}">{{ __('WP-admin live') }}</x-menu-item>
-                    @endunless
-                    <x-menu-item icon="server" wire:click="launch({{ $site->id }}, 'ssh')">{{ $site->mode->hasShell() ? __('SSH-sessie') : __('SFTP-sessie') }}</x-menu-item>
-                    @if ($site->providerType->dashboardUrl())
+                    <x-menu-item icon="globe" wire:click="launch({{ $site->id }}, 'live-site')">{{ $site->isShopify() ? __('Live winkel openen') : __('Live website openen') }}</x-menu-item>
+                    @if ($site->isShopify())
+                        <x-menu-item icon="shopify" wire:click="launch({{ $site->id }}, 'hosting')">{{ __('Shopify-admin openen') }}</x-menu-item>
+                    @else
+                        @unless ($site->isLaravel())
+                            <x-menu-item icon="wordpress" wire:click="launch({{ $site->id }}, 'live-admin')" x-on:click="{{ $opening }}">{{ __('WP-admin live') }}</x-menu-item>
+                        @endunless
+                        <x-menu-item icon="server" wire:click="launch({{ $site->id }}, 'ssh')">{{ $site->mode->hasShell() ? __('SSH-sessie') : __('SFTP-sessie') }}</x-menu-item>
+                    @endif
+                    @if (! $site->isShopify() && $site->providerType->dashboardUrl())
                         <x-menu-item icon="external" wire:click="launch({{ $site->id }}, 'hosting')">{{ __(':provider openen', ['provider' => $site->providerType->label()]) }}</x-menu-item>
                     @endif
                     <div class="my-1 h-px bg-line"></div>
@@ -121,8 +145,10 @@
     <div class="ml-auto flex items-center justify-end gap-1.5">
         @if ($site->isLocalOnly())
             <x-button size="sm" variant="live" icon="rocket" :href="route('sites.migrate', $site)" wire:navigate>{{ __('Live zetten') }}</x-button>
-        @elseif (! $site->isBuilt())
+        @elseif (! $site->isBuilt() && ! $site->isShopify())
             <x-button size="sm" variant="primary" icon="hammer" wire:click="runQuick({{ $site->id }}, 'build')">{{ __('Lokaal bouwen') }}</x-button>
+        @elseif ($site->isShopify() && ! $site->isRunning() && $site->isBuilt())
+            <x-button size="sm" variant="primary" icon="play" wire:click="launch({{ $site->id }}, 'local-site')">{{ __('Start & preview') }}</x-button>
         @else
             <x-button size="sm" :href="route('sites.show', $site)" wire:navigate>{{ __('Openen') }}</x-button>
         @endif
@@ -130,10 +156,12 @@
         <x-dropdown width="w-56" class="grid size-8 place-items-center rounded-lg text-muted transition-colors hover:bg-raised hover:text-ink" :label="__('Meer')">
             <x-slot:trigger><x-icon name="more" /><span class="sr-only">{{ __('Meer') }}</span></x-slot:trigger>
             <x-menu-item icon="grid" :href="route('sites.show', $site)" wire:navigate>{{ __('Site openen') }}</x-menu-item>
-            @unless ($site->isLocalOnly())
+            @if ($site->isShopify())
+                <x-menu-item icon="pencil" :href="route('sites.show', ['site' => $site, 'tab' => 'instellingen'])" wire:navigate>{{ __('Instellingen') }}</x-menu-item>
+            @elseif (! $site->isLocalOnly())
                 <x-menu-item icon="pencil" :href="route('sites.edit', $site)" wire:navigate>{{ __('Gegevens bewerken') }}</x-menu-item>
-            @endunless
-            @unless ($site->isLaravel())
+            @endif
+            @unless ($site->isLaravel() || $site->isShopify())
                 <x-menu-item icon="rocket" :href="route('sites.migrate', $site)" wire:navigate>{{ $site->isLocalOnly() ? __('Live zetten') : __('Verhuizen naar nieuwe server') }}</x-menu-item>
             @endunless
             <div class="my-1 h-px bg-line"></div>

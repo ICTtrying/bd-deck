@@ -37,6 +37,15 @@ enum WpOpenAction: string
     case GoLive = 'go-live';
     case Share = 'share';
     case ImportSites = 'import-sites';
+    case ShopifyAdd = 'shopify-add';
+    case ShopifyDevStart = 'shopify-dev-start';
+    case ShopifyDevStop = 'shopify-dev-stop';
+    case ShopifyThemes = 'shopify-themes';
+    case ShopifyPull = 'shopify-pull';
+    case ShopifyCheck = 'shopify-check';
+    case ShopifyPush = 'shopify-push';
+    case ShopifyPublish = 'shopify-publish';
+    case ShopifyRollback = 'shopify-rollback';
 
     public function label(): string
     {
@@ -74,6 +83,15 @@ enum WpOpenAction: string
             self::GoLive => __('Go-live-checklist'),
             self::Share => __('Lokale site delen'),
             self::ImportSites => __('Sitelijst importeren'),
+            self::ShopifyAdd => __('Shopify-project toevoegen'),
+            self::ShopifyDevStart => __('Dev server starten'),
+            self::ShopifyDevStop => __('Dev server stoppen'),
+            self::ShopifyThemes => __('Thema\'s ophalen'),
+            self::ShopifyPull => __('Live thema ophalen'),
+            self::ShopifyCheck => __('Thema controleren'),
+            self::ShopifyPush => __('Naar preview-thema pushen'),
+            self::ShopifyPublish => __('Thema publiceren'),
+            self::ShopifyRollback => __('Publicatie terugdraaien'),
         };
     }
 
@@ -98,18 +116,27 @@ enum WpOpenAction: string
             self::Share => 'share',
             self::CacheLocal, self::CacheLive => 'zap',
             self::WpCli, self::Artisan => 'terminal',
-            self::AddSite, self::Import, self::NewSite, self::ImportSites => 'plus',
+            self::AddSite, self::Import, self::NewSite, self::ImportSites, self::ShopifyAdd => 'plus',
+            self::ShopifyDevStart => 'play',
+            self::ShopifyDevStop => 'square',
+            self::ShopifyThemes => 'list',
+            self::ShopifyPull => 'download',
+            self::ShopifyCheck => 'shield',
+            self::ShopifyPush => 'upload',
+            self::ShopifyPublish => 'rocket',
+            self::ShopifyRollback => 'rotate-ccw',
             self::RemoveSite => 'trash',
             self::InstallScript, self::Setup => 'settings',
         };
     }
 
     /**
-     * Acties die de lokale site of live wijzigen mogen per site niet tegelijk lopen.
+     * Acties die de lokale site of live wijzigen mogen per site niet tegelijk lopen. De dev server start en stopt
+     * los van de rest (net als delen) en wacht soms minutenlang op een login, dus die krijgt de snelle wachtrij.
      */
     public function locksSite(): bool
     {
-        return ! in_array($this, [self::Test, self::Updates, self::PushPreview, self::CacheLive, self::CacheLocal, self::WpCli, self::Artisan, self::GoLive, self::Share], true);
+        return ! in_array($this, [self::Test, self::Updates, self::PushPreview, self::CacheLive, self::CacheLocal, self::WpCli, self::Artisan, self::GoLive, self::Share, self::ShopifyDevStart, self::ShopifyDevStop, self::ShopifyThemes, self::ShopifyCheck], true);
     }
 
     /**
@@ -125,7 +152,7 @@ enum WpOpenAction: string
      */
     public function changesSiteList(): bool
     {
-        return in_array($this, [self::AddSite, self::Import, self::InstallScript, self::NewSite, self::Migrate, self::RemoveSite, self::ImportSites], true);
+        return in_array($this, [self::AddSite, self::Import, self::InstallScript, self::NewSite, self::Migrate, self::RemoveSite, self::ImportSites, self::ShopifyAdd], true);
     }
 
     /**
@@ -133,6 +160,6 @@ enum WpOpenAction: string
      */
     public function refreshesSite(): bool
     {
-        return ! in_array($this, [self::Test, self::Updates, self::PushPreview, self::CacheLive, self::CacheLocal, self::Setup, self::GoLive], true);
+        return ! in_array($this, [self::Test, self::Updates, self::PushPreview, self::CacheLive, self::CacheLocal, self::Setup, self::GoLive, self::ShopifyThemes, self::ShopifyCheck], true);
     }
 }

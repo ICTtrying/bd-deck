@@ -24,6 +24,7 @@ final class AppSettings
 
         return [
             'sites_directory' => $home.'/wp-sites',
+            'shopify_directory' => $home.'/Projects/shopify',
             'script_path' => $home.'/.local/bin/wpopen',
             'editor' => 'code',
             'terminal' => TerminalApp::GnomeTerminal->value,
@@ -126,6 +127,14 @@ final class AppSettings
     public function sitesDirectory(): string
     {
         return $this->expand((string) $this->get('sites_directory'));
+    }
+
+    /**
+     * Map waarin elk Shopify-project een eigen themamap heeft (één per winkel).
+     */
+    public function shopifyDirectory(): string
+    {
+        return $this->expand((string) $this->get('shopify_directory'));
     }
 
     /**

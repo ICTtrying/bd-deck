@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Enums\CredentialKind;
 use App\Enums\SiteMode;
 use App\Enums\SiteProvider;
 use App\Enums\SiteType;
@@ -25,7 +26,7 @@ use Illuminate\Support\Carbon;
     'name', 'is_favorite', 'notes', 'live_login_user', 'snapshot', 'health', 'health_checked_at',
     'updates', 'updates_checked_at', 'last_activity_at', 'synced_at',
     'uptime_enabled', 'uptime_status', 'uptime_failures', 'uptime_status_since', 'uptime_checked_at',
-    'go_live', 'go_live_checked_at',
+    'go_live', 'go_live_checked_at', 'shopify_state',
 ])]
 class Site extends Model
 {
@@ -52,6 +53,7 @@ class Site extends Model
             'uptime_checked_at' => 'datetime',
             'go_live' => 'array',
             'go_live_checked_at' => 'datetime',
+            'shopify_state' => 'array',
         ];
     }
 
@@ -161,6 +163,14 @@ class Site extends Model
     }
 
     /**
+     * Een Shopify-thema beheer je met de Shopify CLI: dev server, preview-thema's en bewust publiceren.
+     */
+    public function isShopify(): bool
+    {
+        return $this->type === SiteType::Shopify;
+    }
+
+    /**
      * Gemaakt met "Nieuwe lokale site": er is (nog) geen live-server.
      */
     public function isLocalOnly(): bool
@@ -178,7 +188,7 @@ class Site extends Model
      */
     public function supportsMultisite(): bool
     {
-        return $this->isLocalOnly() && ! $this->isLaravel();
+        return $this->isLocalOnly() && ! $this->isLaravel() && ! $this->isShopify();
     }
 
     public function isMultisite(): bool
@@ -201,7 +211,7 @@ class Site extends Model
 
     public function isRunning(): bool
     {
-        return $this->data('ddev_status') === 'running';
+        return $this->isShopify() ? $this->isDevServerRunning() : $this->data('ddev_status') === 'running';
     }
 
     /**
@@ -317,7 +327,7 @@ class Site extends Model
      */
     public function supportsUpdateCheck(): bool
     {
-        return ! $this->isLocalOnly() && ($this->isLaravel() ? $this->isBuilt() : true);
+        return ! $this->isShopify() && ! $this->isLocalOnly() && ($this->isLaravel() ? $this->isBuilt() : true);
     }
 
     public function isOffline(): bool
@@ -406,5 +416,120 @@ class Site extends Model
     public function goLivePassed(): int
     {
         return collect($this->goLiveChecks())->where('status', 'ok')->count();
+    }
+
+    /**
+     * Winkel in de vorm naam.myshopify.com; de CLI en alle links gebruiken die, niet het eigen domein.
+     */
+    public function shopifyStore(): string
+    {
+        return (string) $this->data('shopify.store');
+    }
+
+    public function shopifyAdminUrl(string $path = ''): string
+    {
+        return rtrim((string) $this->data('shopify.admin_url', 'https://admin.shopify.com/'), '/').$path;
+    }
+
+    public function devPort(): int
+    {
+        return (int) $this->data('shopify.port', 9292);
+    }
+
+    public function isDevServerRunning(): bool
+    {
+        return $this->data('shopify.dev') !== null;
+    }
+
+    public function devPreviewUrl(): ?string
+    {
+        return $this->isDevServerRunning() ? $this->data('shopify.dev.url') : null;
+    }
+
+    /**
+     * Deelbare previewlink van de dev server (https://winkel.myshopify.com/?preview_theme_id=…).
+     */
+    public function devShareUrl(): ?string
+    {
+        return $this->isDevServerRunning() ? $this->data('shopify.dev.share_url') : null;
+    }
+
+    public function devEditorUrl(): ?string
+    {
+        return $this->isDevServerRunning() ? $this->data('shopify.dev.editor_url') : null;
+    }
+
+    /**
+     * Bestanden die klanten zelf in de theme editor aanpassen en die een push dus nooit overschrijft.
+     *
+     * @return list<string>
+     */
+    public function protectedPatterns(): array
+    {
+        return array_values((array) $this->data('shopify.ignore', []));
+    }
+
+    /**
+     * @return array{theme_id: string, theme_name: string, preview_url: string, editor_url: string, at: string, snapshot: ?string}|null
+     */
+    public function lastPush(): ?array
+    {
+        return $this->data('shopify.last_push');
+    }
+
+    /**
+     * @return array{new_id: string, new_name: string, previous_id: string, previous_name: string, at: string, backup: ?string, snapshot: ?string, rolled_back_at: ?string}|null
+     */
+    public function lastPublish(): ?array
+    {
+        return $this->data('shopify.last_publish');
+    }
+
+    /**
+     * Terugdraaien kan zolang de laatste publicatie niet al teruggedraaid is.
+     */
+    public function canRollbackPublish(): bool
+    {
+        return $this->lastPublish() !== null && empty($this->lastPublish()['rolled_back_at']);
+    }
+
+    /**
+     * Thema's zoals ze bij de laatste keer ophalen in de winkel stonden.
+     *
+     * @return list<array{id: int, name: string, role: string, preview_url: string, editor_url: string}>
+     */
+    public function shopifyThemes(): array
+    {
+        return array_values((array) Arr::get($this->shopify_state ?? [], 'themes', []));
+    }
+
+    public function shopifyThemesCheckedAt(): ?Carbon
+    {
+        $at = Arr::get($this->shopify_state ?? [], 'themes_at');
+
+        return is_string($at) ? Carbon::parse($at) : null;
+    }
+
+    /**
+     * @return array{errors: int, warnings: int, info: int, new_errors: int, offenses: list<array{file: string, line: int, check: string, severity: string, message: string}>}|null
+     */
+    public function shopifyCheck(): ?array
+    {
+        return Arr::get($this->shopify_state ?? [], 'check');
+    }
+
+    public function shopifyCheckedAt(): ?Carbon
+    {
+        $at = Arr::get($this->shopify_state ?? [], 'check_at');
+
+        return is_string($at) ? Carbon::parse($at) : null;
+    }
+
+    /**
+     * Het storefront-wachtwoord van de winkel, als dat in de kluis staat.
+     */
+    public function storePasswordCredential(): ?Credential
+    {
+        return $this->credentials()->where('kind', CredentialKind::ShopifyStorePassword)->latest('id')->first();
     }
 }

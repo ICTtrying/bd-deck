@@ -7,6 +7,7 @@ use App\Models\Site;
 use App\Services\AppSettings;
 use App\Services\DesktopLauncher;
 use App\Services\SiteLinks;
+use App\Services\WpOpen\CommandRunner;
 use App\Services\WpOpen\WpOpen;
 use Illuminate\View\View;
 use Livewire\Attributes\Computed;
@@ -33,22 +34,30 @@ class CommandPalette extends Component
         $items = [];
 
         foreach ($sites as $site) {
-            $items[] = ['type' => 'url', 'label' => $site->name, 'hint' => (string) $site->data('live_host'), 'icon' => 'globe', 'url' => route('sites.show', $site)];
+            $items[] = ['type' => 'url', 'label' => $site->name, 'hint' => (string) $site->data('live_host'), 'icon' => $site->isShopify() ? 'shopify' : 'globe', 'url' => route('sites.show', $site)];
         }
 
         // snelacties alleen voor de beste treffer: dat is bijna altijd de site die je zoekt
         if ($this->query !== '' && ($first = $sites->first())) {
-            if ($first->isBuilt() && ! $first->isLaravel()) {
+            if ($first->isShopify()) {
+                $items[] = ['type' => 'launch', 'label' => $first->isRunning() ? __('Preview openen') : __('Dev server starten en preview openen'), 'hint' => $first->name, 'icon' => 'play', 'site' => $first->id, 'target' => 'local-site'];
+                $items[] = ['type' => 'launch', 'label' => __('Theme editor openen'), 'hint' => $first->name, 'icon' => 'pencil', 'site' => $first->id, 'target' => 'local-admin'];
+                $items[] = ['type' => 'launch', 'label' => __('Openen in editor'), 'hint' => $first->name, 'icon' => 'code', 'site' => $first->id, 'target' => 'editor'];
+                $items[] = ['type' => 'launch', 'label' => __('Live winkel openen'), 'hint' => $first->name, 'icon' => 'globe', 'site' => $first->id, 'target' => 'live-site'];
+                $items[] = ['type' => 'launch', 'label' => __('Shopify-admin openen'), 'hint' => $first->name, 'icon' => 'shopify', 'site' => $first->id, 'target' => 'hosting'];
+            } elseif ($first->isBuilt() && ! $first->isLaravel()) {
                 $items[] = ['type' => 'launch', 'label' => __('WP-admin lokaal'), 'hint' => $first->name, 'icon' => 'wordpress', 'site' => $first->id, 'target' => 'local-admin'];
             }
-            if ($first->isBuilt()) {
+            if ($first->isBuilt() && ! $first->isShopify()) {
                 $items[] = ['type' => 'launch', 'label' => __('Openen in editor'), 'hint' => $first->name, 'icon' => 'code', 'site' => $first->id, 'target' => 'editor'];
             }
-            if (! $first->isLaravel()) {
+            if (! $first->isLaravel() && ! $first->isShopify()) {
                 $items[] = ['type' => 'launch', 'label' => __('WP-admin live'), 'hint' => $first->name, 'icon' => 'external', 'site' => $first->id, 'target' => 'live-admin'];
             }
-            $items[] = ['type' => 'launch', 'label' => __('Live website openen'), 'hint' => $first->name, 'icon' => 'globe', 'site' => $first->id, 'target' => 'live-site'];
-            $items[] = ['type' => 'launch', 'label' => __('SSH-sessie'), 'hint' => $first->name, 'icon' => 'server', 'site' => $first->id, 'target' => 'ssh'];
+            if (! $first->isShopify()) {
+                $items[] = ['type' => 'launch', 'label' => __('Live website openen'), 'hint' => $first->name, 'icon' => 'globe', 'site' => $first->id, 'target' => 'live-site'];
+                $items[] = ['type' => 'launch', 'label' => __('SSH-sessie'), 'hint' => $first->name, 'icon' => 'server', 'site' => $first->id, 'target' => 'ssh'];
+            }
         }
 
         $pages = [
@@ -69,7 +78,7 @@ class CommandPalette extends Component
         return $items;
     }
 
-    public function choose(int $index, DesktopLauncher $launcher, AppSettings $settings, WpOpen $wpopen, SiteLinks $links): void
+    public function choose(int $index, DesktopLauncher $launcher, AppSettings $settings, WpOpen $wpopen, SiteLinks $links, CommandRunner $runner): void
     {
         $item = $this->results[$index] ?? null;
 
@@ -86,7 +95,7 @@ class CommandPalette extends Component
             return;
         }
 
-        $this->launch($item['site'], $item['target'], $launcher, $settings, $wpopen, $links);
+        $this->launch($item['site'], $item['target'], $launcher, $settings, $wpopen, $links, $runner);
     }
 
     public function render(): View

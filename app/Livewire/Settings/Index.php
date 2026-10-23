@@ -27,6 +27,8 @@ class Index extends Component
 
     public string $sitesDirectory = '';
 
+    public string $shopifyDirectory = '';
+
     public string $scriptPath = '';
 
     public string $editor = 'code';
@@ -66,6 +68,7 @@ class Index extends Component
             'locale' => $settings->locale(),
             'theme' => $settings->theme()->value,
             'sitesDirectory' => $settings->sitesDirectory(),
+            'shopifyDirectory' => $settings->shopifyDirectory(),
             'scriptPath' => $settings->scriptPath(),
             'editor' => $settings->editor(),
             'terminal' => $settings->terminal()->value,
@@ -86,6 +89,7 @@ class Index extends Component
             'locale' => ['required', Rule::in(['nl', 'en'])],
             'theme' => ['required', Rule::enum(ThemePreference::class)],
             'sitesDirectory' => ['required', 'string', 'max:500', 'starts_with:/,~'],
+            'shopifyDirectory' => ['required', 'string', 'max:500', 'starts_with:/,~', 'not_regex:/[|\n\r]/'],
             'scriptPath' => ['required', 'string', 'max:500', 'starts_with:/,~'],
             'editor' => ['required', 'string', 'max:200', 'regex:/^[\w.\/~ -]+$/'],
             'terminal' => ['required', Rule::enum(TerminalApp::class)],
@@ -107,6 +111,7 @@ class Index extends Component
             'locale' => $validated['locale'],
             'theme' => $validated['theme'],
             'sites_directory' => $validated['sitesDirectory'],
+            'shopify_directory' => $validated['shopifyDirectory'],
             'script_path' => $validated['scriptPath'],
             'editor' => $validated['editor'],
             'terminal' => $validated['terminal'],

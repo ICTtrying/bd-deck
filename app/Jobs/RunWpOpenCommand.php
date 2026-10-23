@@ -6,6 +6,7 @@ use App\Enums\RunStatus;
 use App\Enums\WpOpenAction;
 use App\Models\CommandRun;
 use App\Models\Site;
+use App\Services\DesktopLauncher;
 use App\Services\DesktopNotifier;
 use App\Services\WpOpen\CommandRunner;
 use App\Services\WpOpen\SiteRegistry;
@@ -16,6 +17,7 @@ use Illuminate\Contracts\Queue\ShouldBeEncrypted;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Queue\Middleware\WithoutOverlapping;
+use Illuminate\Support\Facades\Cache;
 use Throwable;
 
 class RunWpOpenCommand implements ShouldBeEncrypted, ShouldQueue
@@ -74,7 +76,7 @@ class RunWpOpenCommand implements ShouldBeEncrypted, ShouldQueue
             $process = $wpopen->pending($this->secretEnvironment)
                 ->timeout($this->timeout - 60)
                 ->start($wpopen->command($run->arguments, $this->script), function (string $type, string $output) use (&$buffer): void {
-                    $buffer .= $output;
+                    $buffer .= $this->withoutSecrets($output);
                 });
 
             $run->markRunning((int) $process->id());
@@ -109,7 +111,7 @@ class RunWpOpenCommand implements ShouldBeEncrypted, ShouldQueue
             $this->syncSiteList($run, $registry);
             $run->finish((int) $result->exitCode(), $cancelled);
         } catch (Throwable $exception) {
-            $run->appendOutput(($buffer !== '' ? $buffer : '')."\n✗ ".$exception->getMessage()."\n");
+            $run->appendOutput(($buffer !== '' ? $buffer : '')."\n✗ ".$this->withoutSecrets($exception->getMessage())."\n");
             $this->syncSiteList($run, $registry);
             $run->finish(1);
         }
@@ -126,6 +128,20 @@ class RunWpOpenCommand implements ShouldBeEncrypted, ShouldQueue
         if ($run->action->changesSiteList()) {
             rescue(fn (): int => $registry->sync(), report: false);
         }
+    }
+
+    /**
+     * Wachtwoorden die als omgeving meegingen (SSH-wachtwoord, storefront-wachtwoord) komen nooit in het logboek.
+     */
+    private function withoutSecrets(string $text): string
+    {
+        foreach ($this->secretEnvironment as $secret) {
+            if (strlen($secret) >= 3) {
+                $text = str_replace($secret, '••••', $text);
+            }
+        }
+
+        return $text;
     }
 
     private function afterRun(CommandRun $run, SiteRegistry $registry, DesktopNotifier $notifier): void
@@ -149,13 +165,40 @@ class RunWpOpenCommand implements ShouldBeEncrypted, ShouldQueue
                     WpOpenAction::GoLive => $this->recordGoLive($run, $site, $registry, $notifier),
                     // na een verhuizing of nieuw domein meteen nalopen; een melding volgt alleen bij problemen
                     WpOpenAction::Migrate, WpOpenAction::ChangeDomain => app(CommandRunner::class)->queue(WpOpenCommand::goLive($site), notify: false),
+                    WpOpenAction::ShopifyThemes => $registry->recordThemes($site, (array) WpOpen::decode((string) $run->output)),
+                    // de themalijst in de winkel is veranderd: stilletjes opnieuw ophalen
+                    WpOpenAction::ShopifyPush, WpOpenAction::ShopifyPublish, WpOpenAction::ShopifyRollback => app(CommandRunner::class)->queue(WpOpenCommand::shopifyThemes($site), notify: false),
+                    WpOpenAction::ShopifyDevStart => $this->openAfterDevStart($run),
                     default => null,
                 };
             }, report: false);
         }
 
+        // fouten laten de actie mislukken, maar de uitkomst is dan juist wat je wilt zien
+        if ($run->action === WpOpenAction::ShopifyCheck && $run->status !== RunStatus::Cancelled) {
+            rescue(fn () => $registry->recordShopifyCheck($site, (array) WpOpen::decode((string) $run->output)), report: false);
+        }
+
         if ($run->action->refreshesSite()) {
             rescue(fn () => $registry->refresh($site), report: false);
+        }
+    }
+
+    /**
+     * "Openen" op een gestopte Shopify-site start de dev server; zodra hij klaar is opent de gevraagde pagina.
+     */
+    private function openAfterDevStart(CommandRun $run): void
+    {
+        $target = Cache::pull('shopify-open-after-start:'.$run->id);
+
+        $url = match ($target) {
+            'preview' => $run->reported('PREVIEW_URL'),
+            'editor' => $run->reported('EDITOR_URL'),
+            default => null,
+        };
+
+        if ($url !== null) {
+            app(DesktopLauncher::class)->openUrl($url);
         }
     }
 

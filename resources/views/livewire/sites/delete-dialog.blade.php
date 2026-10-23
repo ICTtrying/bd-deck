@@ -3,7 +3,9 @@
     <x-modal name="delete-site" :title="$site ? __(':site verwijderen', ['site' => $site->name]) : __('Site verwijderen')" tone="danger">
         @if ($site)
             <div class="grid gap-4">
-                @if ($site->isLocalOnly())
+                @if ($site->isShopify())
+                    <p class="text-muted">{{ __('Het project verdwijnt uit BD Deck. De themamap :path blijft staan en de winkel verandert niet.', ['path' => $site->projectDirectory()]) }}</p>
+                @elseif ($site->isLocalOnly())
                     <p class="text-muted">{{ __('Deze site bestaat alleen op je computer. De map :path en de DDEV-database worden weggegooid; er wordt eerst een back-up gemaakt.', ['path' => $site->projectDirectory()]) }}</p>
                 @else
                     <p class="text-muted">{{ __('De site verdwijnt uit BD Deck en wpopen. De live site blijft altijd onaangetast.') }}</p>
