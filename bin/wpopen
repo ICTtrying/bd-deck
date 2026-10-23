@@ -74,7 +74,7 @@
 #
 #   Algemeen: --yes slaat bevestigingsvragen over (de app vraagt zelf om bevestiging).
 set -euo pipefail
-WPO_VERSION="2.14.1"
+WPO_VERSION="2.14.2"
 DB="${WPO_DB:-$HOME/.config/wpsites/sites}"; mkdir -p "$(dirname "$DB")"; touch "$DB"
 BASE="${WP_SITES_DIR:-$HOME/wp-sites}"
 BACKUPS="${WPO_BACKUP_DIR:-$BASE/.wpopen-backups}"
@@ -4196,15 +4196,24 @@ sget() {  # naam — leest een Shopify-project
 }
 
 # ── de CLI ──
-shopify_cli() {  # zorgt dat `shopify` (en node ernaast) in PATH staat, ook als de app zonder npm-paden start
-  command -v shopify >/dev/null && return 0
-  local c="" d
-  while IFS= read -r d; do
-    if [ -x "$d/shopify" ]; then c="$d"; break; fi
-  done < <({ ls -d "$HOME"/.nvm/versions/node/*/bin 2>/dev/null | sort -rV || true
-             printf '%s\n' "$HOME/.local/share/pnpm" "$HOME/.npm-global/bin" "$HOME/.volta/bin" /usr/local/bin /opt/homebrew/bin; })
+shopify_cli() {  # zorgt dat `shopify` (en een bruikbare node ernaast) vooraan in PATH staat, ook als de app zonder npm-paden start
+  local c="" d bin
+  # de CLI start via `#!/usr/bin/env node`: staat shopify achteraan in PATH, dan wint anders de (oude) systeem-node
+  if bin=$(command -v shopify 2>/dev/null); then
+    c=$(dirname "$bin")
+  else
+    while IFS= read -r d; do
+      if [ -x "$d/shopify" ]; then c="$d"; break; fi
+    done < <({ ls -d "$HOME"/.nvm/versions/node/*/bin 2>/dev/null | sort -rV || true
+               printf '%s\n' "$HOME/.local/share/pnpm" "$HOME/.npm-global/bin" "$HOME/.volta/bin" /usr/local/bin /opt/homebrew/bin; })
+  fi
   [ -n "$c" ] || die "De Shopify CLI ontbreekt. Installeer hem met: npm install -g @shopify/cli"
   PATH="$c:$PATH"; export PATH
+  # de Shopify CLI gebruikt node:module enableCompileCache (Node 22.1+)
+  local v; v=$(node -p 'process.versions.node' 2>/dev/null || true)
+  if [ -z "$v" ] || ! node -e 'const [a,b]=process.versions.node.split(".").map(Number); process.exit(a>22||(a===22&&b>=1)?0:1)' 2>/dev/null; then
+    die "De Shopify CLI heeft Node 22.1 of nieuwer nodig, maar BD Deck vond Node ${v:-onbekend} ($(command -v node || echo geen)). Installeer een nieuwere Node, bijvoorbeeld: nvm install --lts"
+  fi
 }
 # het storefront-wachtwoord staat alleen in de omgeving; mocht de CLI het ooit uitschrijven, dan komt het nooit in een log.
 # Zuiver bash en regel voor regel: awk (mawk) buffert een pipe en zou het log tot het einde leeg laten.
