@@ -765,6 +765,24 @@ describe('Shopify CLI zoeken', function (): void {
         expect($themes->successful())->toBeTrue($themes->errorOutput())->and(($this->lastLine)($themes->output()))->toHaveCount(2);
     });
 
+    it('gebruikt de node naast de CLI, ook als een oudere node eerder in PATH staat', function (): void {
+        $this->shopify->addProject('demo');
+        [$old, $new] = shopifyNodeDirs($this->shopify, '18.20.8', '24.0.0');
+
+        $themes = $this->shopify->run(['shopify', 'themes', 'demo', '--json'], ['PATH' => "{$old}:/usr/local/bin:/usr/bin:/bin:{$new}"]);
+
+        expect($themes->successful())->toBeTrue($themes->errorOutput())->and(($this->lastLine)($themes->output()))->toHaveCount(2);
+    });
+
+    it('meldt een te oude node in plaats van de CLI te laten crashen', function (): void {
+        $this->shopify->addProject('demo');
+        [, $new] = shopifyNodeDirs($this->shopify, '18.20.8', '18.20.8');
+
+        $themes = $this->shopify->run(['shopify', 'themes', 'demo', '--json'], ['PATH' => "/usr/local/bin:/usr/bin:/bin:{$new}"]);
+
+        expect($themes->failed())->toBeTrue()->and($themes->errorOutput())->toContain('Node 22.1 of nieuwer')->and($themes->errorOutput())->toContain('18.20.8');
+    });
+
     it('legt uit hoe je de CLI installeert als hij nergens staat', function (): void {
         $this->shopify->addProject('demo');
         unlink($this->shopify->bin.'/shopify');
@@ -774,3 +792,35 @@ describe('Shopify CLI zoeken', function (): void {
         expect($themes->failed())->toBeTrue()->and($themes->errorOutput())->toContain('npm install -g @shopify/cli');
     });
 });
+
+/**
+ * Twee mappen met een nep-node (die meldt een versie en voert verder bash uit) en in de tweede een shopify met een node-shebang.
+ *
+ * @return array{0: string, 1: string}
+ */
+function shopifyNodeDirs(FakeShopify $shopify, string $oldVersion, string $newVersion): array
+{
+    $fakeNode = fn (string $version): string => <<<SH
+        #!/bin/sh
+        case "\$1" in
+          -p) echo {$version} ;;
+          -e) [ "{$version}" != "18.20.8" ] ;;
+          *) exec bash "\$@" ;;
+        esac
+        SH;
+    $cli = file_get_contents($shopify->bin.'/shopify');
+    unlink($shopify->bin.'/shopify');
+
+    $old = $shopify->home.'/old/bin';
+    $new = $shopify->home.'/new/bin';
+    mkdir($old, 0755, true);
+    mkdir($new, 0755, true);
+    file_put_contents($old.'/node', $fakeNode($oldVersion)."\n");
+    file_put_contents($new.'/node', $fakeNode($newVersion)."\n");
+    file_put_contents($new.'/shopify', preg_replace('/^#!.*\n/', "#!/usr/bin/env node\n", $cli));
+    chmod($old.'/node', 0755);
+    chmod($new.'/node', 0755);
+    chmod($new.'/shopify', 0755);
+
+    return [$old, $new];
+}

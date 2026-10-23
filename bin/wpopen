@@ -4209,7 +4209,8 @@ shopify_cli() {  # zorgt dat `shopify` (en een bruikbare node ernaast) vooraan i
   fi
   [ -n "$c" ] || die "De Shopify CLI ontbreekt. Installeer hem met: npm install -g @shopify/cli"
   PATH="$c:$PATH"; export PATH
-  # de Shopify CLI gebruikt node:module enableCompileCache (Node 22.1+)
+  # de Shopify CLI gebruikt node:module enableCompileCache (Node 22.1+); alleen relevant als `shopify` een node-script is
+  head -n1 "$(command -v shopify)" 2>/dev/null | grep -q node || return 0
   local v; v=$(node -p 'process.versions.node' 2>/dev/null || true)
   if [ -z "$v" ] || ! node -e 'const [a,b]=process.versions.node.split(".").map(Number); process.exit(a>22||(a===22&&b>=1)?0:1)' 2>/dev/null; then
     die "De Shopify CLI heeft Node 22.1 of nieuwer nodig, maar BD Deck vond Node ${v:-onbekend} ($(command -v node || echo geen)). Installeer een nieuwere Node, bijvoorbeeld: nvm install --lts"
