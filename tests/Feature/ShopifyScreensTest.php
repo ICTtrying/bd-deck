@@ -13,6 +13,7 @@ use App\Models\CommandRun;
 use App\Models\Credential;
 use App\Models\Site;
 use App\Models\User;
+use App\Services\AppSettings;
 use App\Services\ShopifyDevLog;
 use App\Services\Vault;
 use Illuminate\Support\Facades\Cache;
@@ -419,6 +420,17 @@ describe('instellingen', function (): void {
 });
 
 describe('project toevoegen', function (): void {
+    beforeEach(function (): void {
+        // een eigen projectenmap: de test hangt zo niet af van wat er in ~/Projects/shopify staat
+        $this->projects = sys_get_temp_dir().'/bd-deck-projecten-'.bin2hex(random_bytes(4));
+        mkdir($this->projects);
+        app(AppSettings::class)->update(['shopify_directory' => $this->projects]);
+    });
+
+    afterEach(function (): void {
+        exec('rm -rf '.escapeshellarg($this->projects));
+    });
+
     it('koppelt een bestaande themamap', function (): void {
         $dir = sys_get_temp_dir().'/bd-deck-shopify-'.bin2hex(random_bytes(4));
         mkdir($dir.'/layout', 0755, true);
@@ -443,7 +455,7 @@ describe('project toevoegen', function (): void {
             ->set('shopName', 'nieuw-project')
             ->set('shopStore', 'nieuw')
             ->set('shopLiveUrl', 'https://nieuw.nl/')
-            ->assertSee('het live thema wordt opgehaald')
+            ->assertSee('het live thema van nieuw.myshopify.com wordt opgehaald')
             ->call('createShopify')
             ->assertHasNoErrors();
 
@@ -451,8 +463,33 @@ describe('project toevoegen', function (): void {
             $arguments = $job->run->arguments;
 
             return in_array('--create', $arguments, true) && in_array('nieuw.myshopify.com', $arguments, true) && in_array('https://nieuw.nl', $arguments, true)
-                && str_ends_with($arguments[array_search('--path', $arguments, true) + 1], '/Projects/shopify/nieuw-project');
+                && $arguments[array_search('--path', $arguments, true) + 1] === $this->projects.'/nieuw-project';
         });
+    });
+
+    it('heeft aan een naam genoeg: de winkel is dan naam.myshopify.com en het live thema wordt opgehaald', function (): void {
+        Livewire::withQueryParams(['soort' => 'shopify'])->test(Create::class)
+            ->set('shopName', 'fenix-tallow')
+            ->assertSet('shopStore', '')
+            ->assertSee('Leeg laten: fenix-tallow.myshopify.com')
+            ->assertSee('het live thema van fenix-tallow.myshopify.com wordt opgehaald')
+            ->call('createShopify')
+            ->assertHasNoErrors();
+
+        Queue::assertPushed(RunWpOpenCommand::class, function (RunWpOpenCommand $job): bool {
+            $arguments = $job->run->arguments;
+
+            return array_slice($arguments, 0, 5) === ['shopify', 'add', 'fenix-tallow', '--store', 'fenix-tallow.myshopify.com'] && in_array('--create', $arguments, true);
+        });
+    });
+
+    it('vraagt de winkel als de naam er geen kan zijn', function (): void {
+        Livewire::withQueryParams(['soort' => 'shopify'])->test(Create::class)
+            ->set('shopName', 'klant.nl_v2')
+            ->call('createShopify')
+            ->assertHasErrors('shopStore');
+
+        Queue::assertNothingPushed();
     });
 
     it('weigert een eigen domein als winkel, een dubbele naam en rare tekens', function (): void {

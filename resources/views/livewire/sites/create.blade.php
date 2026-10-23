@@ -27,8 +27,8 @@
                     <x-field :label="__('Naam')" for="shop-name" error="shopName" :hint="__('Meestal de klantnaam; ook de mapnaam.')">
                         <x-input id="shop-name" wire:model.live.debounce.300ms="shopName" mono autocomplete="off" spellcheck="false" placeholder="klantnaam" />
                     </x-field>
-                    <x-field :label="__('Winkel (.myshopify.com)')" for="shop-store" error="shopStore" :hint="__('De myshopify.com-naam, niet het eigen domein.')">
-                        <x-input id="shop-store" wire:model="shopStore" mono autocomplete="off" spellcheck="false" placeholder="winkel.myshopify.com" />
+                    <x-field :label="__('Winkel (optioneel)')" for="shop-store" error="shopStore" :hint="__('Leeg laten: :store. Een andere winkel vul je in als myshopify.com-naam, niet als eigen domein.', ['store' => $this->shopifyStoreName])">
+                        <x-input id="shop-store" wire:model.live.debounce.300ms="shopStore" mono autocomplete="off" spellcheck="false" :placeholder="$this->shopifyStoreName" />
                     </x-field>
                     <x-field :label="__('Map (optioneel)')" for="shop-path" error="shopPath" class="sm:col-span-2">
                         <x-input id="shop-path" wire:model.live.debounce.300ms="shopPath" mono autocomplete="off" :placeholder="$this->shopifyProjectPath" />
@@ -41,7 +41,7 @@
                     <x-icon :name="$this->shopifyPathExists ? 'link' : 'download'" :size="15" class="mt-0.5 shrink-0 text-local-ink" />
                     <span>
                         <span class="font-mono text-xs">{{ $this->shopifyProjectPath }}</span><br>
-                        {{ $this->shopifyPathExists ? __('Deze map bestaat al en wordt gekoppeld. De bestanden blijven zoals ze zijn.') : __('Deze map bestaat nog niet: het live thema wordt opgehaald. De eerste keer vraagt Shopify om in te loggen; de link verschijnt dan bij de activiteit.') }}
+                        {{ $this->shopifyPathExists ? __('Deze map bestaat al en wordt gekoppeld. De bestanden blijven zoals ze zijn.') : __('Deze map bestaat nog niet: het live thema van :store wordt opgehaald. De eerste keer vraagt Shopify om in te loggen; de link verschijnt dan bij de activiteit.', ['store' => $this->shopifyStoreName]) }}
                     </span>
                 </p>
                 <p class="mt-3 text-[0.8125rem] text-muted">{{ __('Heeft de winkel een wachtwoordpagina? Het storefront-wachtwoord sla je daarna op bij de instellingen van het project; het komt in de kluis.') }}</p>

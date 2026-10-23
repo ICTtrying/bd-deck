@@ -16,6 +16,7 @@ use Illuminate\Support\Collection;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Illuminate\View\View;
+use InvalidArgumentException;
 use Livewire\Attributes\Computed;
 use Livewire\Attributes\Title;
 use Livewire\Attributes\Url;
@@ -60,6 +61,9 @@ class Create extends Component
 
     public string $shopName = '';
 
+    /**
+     * Leeg: de projectnaam met .myshopify.com erachter.
+     */
     public string $shopStore = '';
 
     /**
@@ -260,6 +264,21 @@ class Create extends Component
     }
 
     /**
+     * De winkel waar dit project bij hoort: wat is ingevuld, anders de naam van het project.
+     */
+    #[Computed]
+    public function shopifyStoreName(): string
+    {
+        $store = trim($this->shopStore);
+
+        try {
+            return WpOpenCommand::normalizeStore($store !== '' ? $store : ($this->shopName !== '' ? $this->shopName : 'naam'));
+        } catch (InvalidArgumentException) {
+            return $store !== '' ? $store : $this->shopName;
+        }
+    }
+
+    /**
      * Staat er al een themamap, dan wordt die gekoppeld; anders haalt BD Deck het live thema op.
      */
     #[Computed]
@@ -272,7 +291,7 @@ class Create extends Component
     {
         $this->validate([
             'shopName' => ['required', 'string', 'max:60', 'regex:/^[A-Za-z0-9._-]+$/', Rule::unique('sites', 'name')],
-            'shopStore' => ['required', 'string', 'max:120'],
+            'shopStore' => ['nullable', 'string', 'max:120'],
             'shopPath' => ['nullable', 'string', 'max:500', 'starts_with:/', 'not_regex:/[|\n\r]|\.\./'],
             'shopLiveUrl' => ['nullable', 'url:https,http', 'max:255'],
         ], [
@@ -287,10 +306,16 @@ class Create extends Component
             'shopLiveUrl' => __('eigen domein'),
         ]);
 
+        if (trim($this->shopStore) === '' && preg_match('/^[A-Za-z0-9][A-Za-z0-9-]*$/', $this->shopName) !== 1) {
+            $this->addError('shopStore', __('Een naam met punt of underscore is geen winkelnaam. Vul de winkel (.myshopify.com) zelf in.'));
+
+            return;
+        }
+
         $this->attempt(function () use ($runner): void {
             $command = WpOpenCommand::shopifyAdd(
                 name: $this->shopName,
-                store: $this->shopStore,
+                store: trim($this->shopStore) !== '' ? $this->shopStore : $this->shopName,
                 path: $this->shopifyProjectPath,
                 create: ! $this->shopifyPathExists,
                 liveUrl: trim($this->shopLiveUrl) !== '' ? rtrim(trim($this->shopLiveUrl), '/') : null,

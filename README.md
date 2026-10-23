@@ -131,7 +131,7 @@ Een Shopify-project is een themamap (standaard `~/Projects/shopify/<naam>`, inst
 
 **Sneltoetsen op de projectpagina:** `d` dev server starten/stoppen, `p` preview (start zo nodig), `e` theme editor, `s` deelbare link, `c` themacontrole, `l` logboek. In het menu: Ctrl+Shift+N voor *Shopify-project toevoegen*; de snelzoeker (Ctrl+K) kent de Shopify-acties.
 
-Een project verwijderen haalt het alleen uit BD Deck; de themamap blijft altijd staan. Shopify-projecten doen niet mee aan updates controleren, back-ups en cache legen op het dashboard, en ook niet aan het delen van de sitelijst (de projectmap is persoonlijk). Uptime-bewaking werkt wel, op het eigen domein of de myshopify.com-naam.
+Shopify gebruik je alleen via de app; de opdrachten die de app daarvoor aan `wpopen` geeft zijn niet bedoeld voor de terminal en staan niet in `wpopen help`. Een project verwijderen haalt het alleen uit BD Deck; de themamap blijft altijd staan. Shopify-projecten doen niet mee aan updates controleren, back-ups en cache legen op het dashboard, en ook niet aan het delen van de sitelijst (de projectmap is persoonlijk). Uptime-bewaking werkt wel, op het eigen domein of de myshopify.com-naam.
 
 ## Verhuizen en live zetten
 
@@ -273,13 +273,6 @@ wpopen migrate <naam> [-p poort] user@host --url https://nieuw [--remote pad]
 wpopen domain <naam> https://klant.nl      live omzetten naar het definitieve domein (SSH)
 
 wpopen test|updates|cache|login|wp|ssh <naam> …
-
-wpopen shopify add <naam> --store winkel.myshopify.com [--path map] [--create] [--port n]
-wpopen shopify dev|stop|status|logs <naam>        (wpopen start|stop <naam> kan ook)
-wpopen shopify themes|pull|check <naam>           thema's, editor-wijzigingen ophalen, theme check
-wpopen shopify push <naam> [--theme "naam"]       naar een niet-gepubliceerd thema
-wpopen shopify publish <naam> --theme "naam of id" [--sync-editor-files | --keep-editor-files]
-wpopen shopify rollback <naam>
 ```
 
 Destructieve commando's vragen in de terminal om bevestiging; `--yes` slaat dat over (de app vraagt zelf en geeft `--yes` mee). `wpopen help` toont alles.

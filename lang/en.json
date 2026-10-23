@@ -1205,10 +1205,8 @@
     "Shopify-thema koppelen": "Link a Shopify theme",
     "Bestaat de map al, dan koppelt BD Deck hem. Bestaat hij nog niet, dan haalt BD Deck het live thema op, maakt er een git-repo van en legt het vast als eerste commit.": "If the folder exists, BD Deck links it. If not, BD Deck fetches the live theme, makes a git repo of it and records it as the first commit.",
     "Meestal de klantnaam; ook de mapnaam.": "Usually the client name; also the folder name.",
-    "De myshopify.com-naam, niet het eigen domein.": "The myshopify.com name, not the own domain.",
     "Map (optioneel)": "Folder (optional)",
     "Deze map bestaat al en wordt gekoppeld. De bestanden blijven zoals ze zijn.": "This folder already exists and will be linked. The files stay as they are.",
-    "Deze map bestaat nog niet: het live thema wordt opgehaald. De eerste keer vraagt Shopify om in te loggen; de link verschijnt dan bij de activiteit.": "This folder does not exist yet: the live theme will be fetched. The first time, Shopify asks you to log in; the link then appears under activity.",
     "Heeft de winkel een wachtwoordpagina? Het storefront-wachtwoord sla je daarna op bij de instellingen van het project; het komt in de kluis.": "Does the store have a password page? Save the storefront password afterwards in the project settings; it goes into the vault.",
     "Project toevoegen": "Add project",
     "Het project verdwijnt uit BD Deck. De themamap :path blijft staan en de winkel verandert niet.": "The project disappears from BD Deck. The theme folder :path stays and the store does not change.",
@@ -1297,5 +1295,9 @@
     "De link toont het dev-thema van jou, zolang de dev server draait. Heeft de winkel een wachtwoordpagina, dan moet de klant dat wachtwoord ook weten.": "The link shows your dev theme as long as the dev server is running. If the store has a password page, the client also needs to know that password.",
     "Dev-log": "Dev log",
     "Het wachtwoord wordt nooit getoond": "The password is never shown",
-    "Nog geen log: dat verschijnt zodra je de dev server start.": "No log yet: it appears as soon as you start the dev server."
+    "Nog geen log: dat verschijnt zodra je de dev server start.": "No log yet: it appears as soon as you start the dev server.",
+    "Winkel (optioneel)": "Store (optional)",
+    "Leeg laten: :store. Een andere winkel vul je in als myshopify.com-naam, niet als eigen domein.": "Leave empty: :store. Enter another store as its myshopify.com name, not its own domain.",
+    "Deze map bestaat nog niet: het live thema van :store wordt opgehaald. De eerste keer vraagt Shopify om in te loggen; de link verschijnt dan bij de activiteit.": "This folder does not exist yet: the live theme of :store will be fetched. The first time, Shopify asks you to log in; the link then appears under activity.",
+    "Een naam met punt of underscore is geen winkelnaam. Vul de winkel (.myshopify.com) zelf in.": "A name with a dot or underscore is not a store name. Enter the store (.myshopify.com) yourself."
 }
