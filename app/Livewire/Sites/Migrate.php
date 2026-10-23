@@ -199,7 +199,7 @@ class Migrate extends Component
     public function render(): View
     {
         return view('livewire.sites.migrate', [
-            'providers' => SiteProvider::cases(),
+            'providers' => SiteProvider::hosting(),
             'modes' => SiteMode::remote(),
         ])->title($this->site->isLocalOnly()
             ? __(':site live zetten', ['site' => $this->site->name])

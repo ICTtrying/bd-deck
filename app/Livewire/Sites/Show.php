@@ -8,8 +8,12 @@ use App\Livewire\Concerns\InteractsWithSites;
 use App\Models\CommandRun;
 use App\Models\Site;
 use App\Models\UptimeCheck;
+use App\Services\AppSettings;
+use App\Services\DesktopLauncher;
+use App\Services\SiteLinks;
 use App\Services\WpOpen\CommandRunner;
 use App\Services\WpOpen\SiteRegistry;
+use App\Services\WpOpen\WpOpen;
 use App\Services\WpOpen\WpOpenCommand;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
@@ -46,6 +50,11 @@ class Show extends Component
     public bool $upgradeLive = false;
 
     public bool $upgradeMajor = false;
+
+    /**
+     * Run waarvoor de inlogpagina van Shopify al in de browser is geopend; één keer per run is genoeg.
+     */
+    public ?int $openedLoginRun = null;
 
     /**
      * Aangevinkte pakketten uit de lijst, als 'composer:naam' of 'npm:naam'.
@@ -255,6 +264,45 @@ class Show extends Component
         $this->dispatch('toast', title: __('Wordt gestopt'), message: $run->label, tone: 'info');
     }
 
+    /**
+     * Sneltoetsen op de Shopify-pagina (zie shopifyShortcuts in app.ts): d dev server, p preview, e theme editor,
+     * s deelbare link, c themacontrole, l logboek.
+     */
+    public function shortcut(string $action, CommandRunner $runner, DesktopLauncher $launcher, AppSettings $settings, WpOpen $wpopen, SiteLinks $links): void
+    {
+        if (! $this->site->isShopify()) {
+            return;
+        }
+
+        match ($action) {
+            'toggle-dev' => $this->activeRun === null ? $this->attempt(fn () => $this->queueCommand($runner, $this->site->isRunning() ? WpOpenCommand::stop($this->site) : WpOpenCommand::start($this->site))) : null,
+            'preview' => $this->launch($this->site->id, 'local-site', $launcher, $settings, $wpopen, $links, $runner),
+            'editor' => $this->launch($this->site->id, 'local-admin', $launcher, $settings, $wpopen, $links, $runner),
+            'share' => $this->launch($this->site->id, 'share', $launcher, $settings, $wpopen, $links, $runner),
+            'check' => $this->runQuick($this->site->id, 'shopify-check', $runner),
+            'log' => $this->tab = 'logboek',
+            default => null,
+        };
+
+        unset($this->activeRun);
+    }
+
+    /**
+     * De CLI vraagt om in te loggen: de pagina van Shopify opent één keer vanzelf, de link blijft ook zichtbaar.
+     */
+    public function openLogin(int $runId, bool $again, DesktopLauncher $launcher): void
+    {
+        $run = $this->site->runs()->active()->find($runId);
+        $login = $run?->shopifyLogin();
+
+        if ($login === null || (! $again && $this->openedLoginRun === $runId)) {
+            return;
+        }
+
+        $this->openedLoginRun = $runId;
+        $this->attempt(fn () => $launcher->openUrl($login['url']));
+    }
+
     public function saveNotes(): void
     {
         $this->validate(['notes' => ['nullable', 'string', 'max:5000']]);
@@ -345,6 +393,6 @@ class Show extends Component
 
     public function render(): View
     {
-        return view('livewire.sites.show')->title($this->site->name);
+        return view($this->site->isShopify() ? 'livewire.sites.shopify' : 'livewire.sites.show')->title($this->site->name);
     }
 }

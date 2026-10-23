@@ -205,9 +205,9 @@ final class SiteListExchange
             }],
             'remote' => ['required', ...$text, 'max:500'],
             'mode' => ['required', Rule::enum(SiteMode::class)->only(SiteMode::remote())],
-            'provider' => ['required', Rule::enum(SiteProvider::class)],
+            'provider' => ['required', Rule::enum(SiteProvider::class)->only(SiteProvider::hosting())],
             'live_url' => [...$text, 'max:255', 'regex:#^https?://[A-Za-z0-9.-]+(/[^|\s]*)?$#'],
-            'type' => ['nullable', 'string', Rule::enum(SiteType::class)],
+            'type' => ['nullable', 'string', Rule::enum(SiteType::class)->except(SiteType::Shopify)],
             'public_dir' => [...$text, 'max:500', Rule::prohibitedIf(($entry['type'] ?? null) !== SiteType::Laravel->value)],
             'notes' => ['nullable', 'string', 'max:5000'],
         ], [

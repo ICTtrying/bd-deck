@@ -73,6 +73,7 @@ class NativeAppServiceProvider implements ProvidesPhpIni
             )->label('BD Deck'),
             Menu::make(
                 Menu::route('sites.create', __('Site toevoegen'), 'CmdOrCtrl+N'),
+                Menu::link(route('sites.create', ['soort' => 'shopify']), __('Shopify-project toevoegen'), 'CmdOrCtrl+Shift+N'),
                 Menu::route('dashboard', __('Alle sites')),
             )->label(__('Sites')),
             Menu::edit(__('Bewerken')),
@@ -86,6 +87,7 @@ class NativeAppServiceProvider implements ProvidesPhpIni
                 Menu::separator(),
                 Menu::link('https://borgmandigital.nl', 'borgmandigital.nl')->openInBrowser(),
                 Menu::link('https://wpmudev.com/hub2/', 'WPMU DEV Hub')->openInBrowser(),
+                Menu::link('https://shopify.dev/docs/storefronts/themes/tools/cli', __('Shopify CLI-documentatie'))->openInBrowser(),
                 Menu::link('https://hpanel.hostinger.com/', 'Hostinger hPanel')->openInBrowser(),
                 Menu::link('https://ddev.readthedocs.io/', __('DDEV-documentatie'))->openInBrowser(),
             )->label(__('Help')),
@@ -110,6 +112,7 @@ class NativeAppServiceProvider implements ProvidesPhpIni
             $items,
             Menu::separator(),
             Menu::label(__('Site toevoegen'))->id('new-site'),
+            Menu::label(__('Shopify-project toevoegen'))->id('new-shopify'),
             Menu::label(__('Vergrendelen'))->id('lock'),
             Menu::separator(),
             Menu::quit(__('Afsluiten')),

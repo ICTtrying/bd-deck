@@ -1,5 +1,5 @@
 <div class="grid max-w-3xl gap-6">
-    <x-page-header :title="__('Site toevoegen')" :description="__('Koppel een bestaande WordPress- of Laravel-site bij WPMU DEV, Hostinger of elders, of begin met een nieuwe WordPress-site op je eigen computer en zet hem later live.')" :back="route('dashboard')">
+    <x-page-header :title="__('Site toevoegen')" :description="__('Koppel een bestaande WordPress- of Laravel-site bij WPMU DEV, Hostinger of elders, begin met een nieuwe WordPress-site op je eigen computer, of koppel een Shopify-thema.')" :back="route('dashboard')">
         <x-slot:actions>
             @if ($kind === 'bestaand')
                 <x-button icon="search" wire:click="import">{{ __('Bestaande verbindingen zoeken') }}</x-button>
@@ -7,8 +7,8 @@
         </x-slot:actions>
     </x-page-header>
 
-    <div class="grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label="{{ __('Soort site') }}">
-        @foreach (['bestaand' => ['globe', __('Bestaande site koppelen'), __('De site staat al online. BD Deck haalt hem op en bouwt hem lokaal na.')], 'lokaal' => ['laptop', __('Nieuwe lokale site'), __('Een lege WordPress-site op je computer. Als hij af is, zet je hem met één knop live.')]] as $value => [$icon, $label, $text])
+    <div class="grid gap-2 sm:grid-cols-3" role="radiogroup" aria-label="{{ __('Soort site') }}">
+        @foreach (['bestaand' => ['globe', __('Bestaande site koppelen'), __('De site staat al online. BD Deck haalt hem op en bouwt hem lokaal na.')], 'lokaal' => ['laptop', __('Nieuwe lokale site'), __('Een lege WordPress-site op je computer. Als hij af is, zet je hem met één knop live.')], 'shopify' => ['shopify', __('Shopify-thema'), __('Een themamap bij een winkel: dev server, preview en veilig live zetten.')]] as $value => [$icon, $label, $text])
             <button type="button" wire:click="$set('kind', '{{ $value }}')" role="radio" aria-checked="{{ $kind === $value ? 'true' : 'false' }}" @class([
                 'grid gap-1 rounded-xl border p-4 text-left transition-colors',
                 'border-local bg-local-soft' => $kind === $value,
@@ -20,7 +20,38 @@
         @endforeach
     </div>
 
-    @if ($kind === 'lokaal')
+    @if ($kind === 'shopify')
+        <form wire:submit="createShopify" class="grid gap-6">
+            <x-panel :title="__('Shopify-thema koppelen')" :description="__('Bestaat de map al, dan koppelt BD Deck hem. Bestaat hij nog niet, dan haalt BD Deck het live thema op, maakt er een git-repo van en legt het vast als eerste commit.')">
+                <div class="grid gap-4 sm:grid-cols-2">
+                    <x-field :label="__('Naam')" for="shop-name" error="shopName" :hint="__('Meestal de klantnaam; ook de mapnaam.')">
+                        <x-input id="shop-name" wire:model.live.debounce.300ms="shopName" mono autocomplete="off" spellcheck="false" placeholder="klantnaam" />
+                    </x-field>
+                    <x-field :label="__('Winkel (.myshopify.com)')" for="shop-store" error="shopStore" :hint="__('De myshopify.com-naam, niet het eigen domein.')">
+                        <x-input id="shop-store" wire:model="shopStore" mono autocomplete="off" spellcheck="false" placeholder="winkel.myshopify.com" />
+                    </x-field>
+                    <x-field :label="__('Map (optioneel)')" for="shop-path" error="shopPath" class="sm:col-span-2">
+                        <x-input id="shop-path" wire:model.live.debounce.300ms="shopPath" mono autocomplete="off" :placeholder="$this->shopifyProjectPath" />
+                    </x-field>
+                    <x-field :label="__('Eigen domein (optioneel)')" for="shop-url" error="shopLiveUrl" class="sm:col-span-2">
+                        <x-input id="shop-url" wire:model="shopLiveUrl" mono autocomplete="off" placeholder="https://klant.nl" />
+                    </x-field>
+                </div>
+                <p class="mt-4 flex items-start gap-2 rounded-lg border border-line bg-raised px-3 py-2.5 text-[0.8125rem]">
+                    <x-icon :name="$this->shopifyPathExists ? 'link' : 'download'" :size="15" class="mt-0.5 shrink-0 text-local-ink" />
+                    <span>
+                        <span class="font-mono text-xs">{{ $this->shopifyProjectPath }}</span><br>
+                        {{ $this->shopifyPathExists ? __('Deze map bestaat al en wordt gekoppeld. De bestanden blijven zoals ze zijn.') : __('Deze map bestaat nog niet: het live thema wordt opgehaald. De eerste keer vraagt Shopify om in te loggen; de link verschijnt dan bij de activiteit.') }}
+                    </span>
+                </p>
+                <p class="mt-3 text-[0.8125rem] text-muted">{{ __('Heeft de winkel een wachtwoordpagina? Het storefront-wachtwoord sla je daarna op bij de instellingen van het project; het komt in de kluis.') }}</p>
+            </x-panel>
+            <div class="flex items-center justify-end gap-2">
+                <x-button :href="route('dashboard')" wire:navigate variant="ghost">{{ __('Annuleren') }}</x-button>
+                <x-button type="submit" variant="primary" icon="plus" wire:loading.attr="disabled">{{ __('Project toevoegen') }}</x-button>
+            </div>
+        </form>
+    @elseif ($kind === 'lokaal')
         <form wire:submit="createLocal" class="grid gap-6">
             <x-panel :title="__('Nieuwe lokale site')" :description="__('BD Deck maakt een DDEV-omgeving met de nieuwste WordPress (Nederlands), permalinks op berichtnaam en git voor je thema en plugins. Inloggen: dev / dev.')">
                 <div class="grid gap-4 sm:grid-cols-2">

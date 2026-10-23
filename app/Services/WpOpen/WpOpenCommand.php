@@ -103,14 +103,21 @@ final readonly class WpOpenCommand
         return new self(WpOpenAction::Fix, array_values(array_filter(['fix', $site->name, $disableEnvironmentPlugins ? '--plugins' : null])), $site);
     }
 
+    /**
+     * Bij een Shopify-project is "starten" de dev server (shopify theme dev).
+     */
     public static function start(Site $site): self
     {
-        return new self(WpOpenAction::Start, ['start', $site->name], $site);
+        return $site->isShopify()
+            ? new self(WpOpenAction::ShopifyDevStart, ['shopify', 'dev', $site->name], $site)
+            : new self(WpOpenAction::Start, ['start', $site->name], $site);
     }
 
     public static function stop(Site $site): self
     {
-        return new self(WpOpenAction::Stop, ['stop', $site->name], $site);
+        return $site->isShopify()
+            ? new self(WpOpenAction::ShopifyDevStop, ['shopify', 'stop', $site->name], $site)
+            : new self(WpOpenAction::Stop, ['stop', $site->name], $site);
     }
 
     /**
@@ -505,7 +512,10 @@ final readonly class WpOpenCommand
 
     public static function removeSite(Site $site, bool $purgeLocal = false): self
     {
-        return new self(WpOpenAction::RemoveSite, array_values(array_filter(['remove', $site->name, '--yes', $purgeLocal ? '--purge' : null])), $site);
+        // de themamap van een Shopify-project is de repo van de klant: die gooit BD Deck nooit weg
+        $purge = $purgeLocal && ! $site->isShopify();
+
+        return new self(WpOpenAction::RemoveSite, array_values(array_filter(['remove', $site->name, '--yes', $purge ? '--purge' : null])), $site);
     }
 
     public static function import(): self
@@ -551,6 +561,216 @@ final readonly class WpOpenCommand
     public static function install(string $bundledScript): self
     {
         return new self(WpOpenAction::InstallScript, ['install'], script: $bundledScript);
+    }
+
+    /**
+     * De winkel als naam.myshopify.com; ook een adres of alleen het voorvoegsel is goed. Een eigen domein niet:
+     * de Shopify CLI en alle previewlinks werken met de myshopify.com-naam.
+     */
+    public static function normalizeStore(string $store): string
+    {
+        $store = Str::of($store)->trim()->lower()->after('://')->before('/')->toString();
+
+        if (preg_match('/^[a-z0-9][a-z0-9-]*$/', $store) === 1) {
+            $store .= '.myshopify.com';
+        }
+
+        if (preg_match('/^[a-z0-9][a-z0-9-]*\.myshopify\.com$/', $store) !== 1) {
+            throw new InvalidArgumentException(__('Gebruik de .myshopify.com-naam van de winkel (bijvoorbeeld winkel.myshopify.com), niet het eigen domein.'));
+        }
+
+        return $store;
+    }
+
+    /**
+     * @param  list<string>|null  $ignore  null = standaard (editorbestanden van de klant), [] = geen bescherming
+     * @return list<string>
+     */
+    private static function shopifyOptions(?string $path, ?int $port, ?string $liveUrl, ?array $ignore, ?string $host): array
+    {
+        $arguments = [];
+
+        if ($path !== null) {
+            if (! str_starts_with($path, '/') || str_contains($path, '..') || preg_match('/[|\x00-\x1f]/', $path) === 1) {
+                throw new InvalidArgumentException(__('Gebruik een volledig pad naar de themamap.'));
+            }
+
+            array_push($arguments, '--path', $path);
+        }
+
+        if ($port !== null) {
+            if ($port < 1024 || $port > 65535) {
+                throw new InvalidArgumentException(__('De poort moet tussen 1024 en 65535 liggen.'));
+            }
+
+            array_push($arguments, '--port', (string) $port);
+        }
+
+        if ($liveUrl !== null) {
+            if ($liveUrl !== '' && preg_match('#^https?://[A-Za-z0-9.-]+/?$#', $liveUrl) !== 1) {
+                throw new InvalidArgumentException(__('Gebruik een volledig adres zonder pad, bijvoorbeeld https://klant.nl'));
+            }
+
+            array_push($arguments, '--url', $liveUrl);
+        }
+
+        if ($ignore !== null) {
+            foreach ($ignore === [] ? ['none'] : $ignore as $pattern) {
+                if ($pattern !== 'none' && (preg_match('#^[A-Za-z0-9._*?/-]+$#', $pattern) !== 1 || str_starts_with($pattern, '/') || str_contains($pattern, '..'))) {
+                    throw new InvalidArgumentException(__('Ongeldig patroon: :pattern', ['pattern' => $pattern]));
+                }
+
+                array_push($arguments, '--ignore', $pattern);
+            }
+        }
+
+        if ($host !== null) {
+            if (! in_array($host, ['127.0.0.1', '0.0.0.0'], true)) {
+                throw new InvalidArgumentException(__('Kies 127.0.0.1 (alleen deze computer) of 0.0.0.0 (hele netwerk).'));
+            }
+
+            array_push($arguments, '--host', $host);
+        }
+
+        return $arguments;
+    }
+
+    /**
+     * Shopify-project koppelen aan een bestaande themamap, of (met $create) een nieuwe map vanaf het live thema maken.
+     *
+     * @param  list<string>|null  $ignore
+     */
+    public static function shopifyAdd(
+        string $name,
+        string $store,
+        ?string $path = null,
+        bool $create = false,
+        ?int $port = null,
+        ?string $liveUrl = null,
+        ?array $ignore = null,
+        bool $themeEditorSync = false,
+        string $host = '127.0.0.1',
+    ): self {
+        if (preg_match('/^[A-Za-z0-9._-]+$/', $name) !== 1) {
+            throw new InvalidArgumentException(__('Gebruik alleen letters, cijfers, punt, - en _.'));
+        }
+
+        $arguments = [
+            'shopify', 'add', $name, '--store', self::normalizeStore($store),
+            ...self::shopifyOptions($path, $port, $liveUrl !== null && $liveUrl !== '' ? $liveUrl : null, $ignore, $host === '127.0.0.1' ? null : $host),
+        ];
+
+        if ($create) {
+            $arguments[] = '--create';
+        }
+
+        if ($themeEditorSync) {
+            $arguments[] = '--sync';
+        }
+
+        return new self(WpOpenAction::ShopifyAdd, $arguments);
+    }
+
+    /**
+     * Instellingen van een Shopify-project; alleen wat is opgegeven verandert. $liveUrl '' haalt het eigen domein weg.
+     *
+     * @param  list<string>|null  $ignore
+     * @return list<string>
+     */
+    public static function shopifyUpdate(
+        Site $site,
+        ?string $store = null,
+        ?string $path = null,
+        ?int $port = null,
+        ?string $liveUrl = null,
+        ?array $ignore = null,
+        ?bool $themeEditorSync = null,
+        ?string $host = null,
+    ): array {
+        if (! $site->isShopify()) {
+            throw new InvalidArgumentException(__('Dit is geen Shopify-project.'));
+        }
+
+        $arguments = ['shopify', 'update', $site->name, ...self::shopifyOptions($path, $port, $liveUrl, $ignore, $host)];
+
+        if ($store !== null) {
+            array_push($arguments, '--store', self::normalizeStore($store));
+        }
+
+        if ($themeEditorSync !== null) {
+            array_push($arguments, '--sync', $themeEditorSync ? '1' : '0');
+        }
+
+        return $arguments;
+    }
+
+    private static function shopifyAction(Site $site, WpOpenAction $action, string $command, string ...$extra): self
+    {
+        if (! $site->isShopify()) {
+            throw new InvalidArgumentException(__('Dit is geen Shopify-project.'));
+        }
+
+        return new self($action, ['shopify', $command, $site->name, ...$extra], $site);
+    }
+
+    public static function shopifyThemes(Site $site): self
+    {
+        return self::shopifyAction($site, WpOpenAction::ShopifyThemes, 'themes', '--json');
+    }
+
+    /**
+     * Standaard alleen wat de klant in de editor aanpast; met $all het hele live thema.
+     */
+    public static function shopifyPull(Site $site, bool $all = false): self
+    {
+        return $all
+            ? self::shopifyAction($site, WpOpenAction::ShopifyPull, 'pull', '--all')
+            : self::shopifyAction($site, WpOpenAction::ShopifyPull, 'pull');
+    }
+
+    public static function shopifyCheck(Site $site): self
+    {
+        return self::shopifyAction($site, WpOpenAction::ShopifyCheck, 'check', '--json');
+    }
+
+    /**
+     * Nooit naar het live thema: de CLI maakt een nieuw niet-gepubliceerd thema, of werkt een bestaand preview-thema bij.
+     */
+    public static function shopifyPush(Site $site, ?string $themeName = null, bool $pullFirst = true, bool $check = true, bool $allowCheckErrors = false): self
+    {
+        $themeName = $themeName === null ? null : trim($themeName);
+
+        if ($themeName !== null && $themeName !== '' && (mb_strlen($themeName) > 60 || preg_match('/[|\x00-\x1f\x7f]/u', $themeName) === 1)) {
+            throw new InvalidArgumentException(__('Een themanaam mag maximaal 60 tekens zijn en geen | of enters bevatten.'));
+        }
+
+        $arguments = $themeName === null || $themeName === '' ? [] : ['--theme', $themeName];
+
+        foreach (['--no-pull' => ! $pullFirst, '--no-check' => ! $check, '--allow-check-errors' => $allowCheckErrors] as $flag => $enabled) {
+            if ($enabled) {
+                $arguments[] = $flag;
+            }
+        }
+
+        return self::shopifyAction($site, WpOpenAction::ShopifyPush, 'push', ...[...$arguments, '--yes']);
+    }
+
+    /**
+     * Een bestaand niet-gepubliceerd thema live zetten. Met $syncEditorFiles neemt het script eerst de bestanden over die
+     * de klant op live in de editor aanpaste, zodat die niet verloren gaan.
+     */
+    public static function shopifyPublish(Site $site, int $themeId, bool $syncEditorFiles = true): self
+    {
+        if ($themeId < 1) {
+            throw new InvalidArgumentException(__('Kies het thema dat live moet.'));
+        }
+
+        return self::shopifyAction($site, WpOpenAction::ShopifyPublish, 'publish', '--theme', (string) $themeId, $syncEditorFiles ? '--sync-editor-files' : '--keep-editor-files', '--yes');
+    }
+
+    public static function shopifyRollback(Site $site): self
+    {
+        return self::shopifyAction($site, WpOpenAction::ShopifyRollback, 'rollback', '--yes');
     }
 
     public function label(): string

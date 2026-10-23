@@ -49,6 +49,9 @@
                 <x-field :label="__('Map met lokale sites')" for="sites-dir" error="sitesDirectory" :hint="__('Hier bouwt wpopen elke site in een eigen map. Back-ups komen in .wpopen-backups daarbinnen.')">
                     <x-input id="sites-dir" wire:model="sitesDirectory" mono />
                 </x-field>
+                <x-field :label="__('Map met Shopify-projecten')" for="shopify-dir" error="shopifyDirectory" :hint="__('Elk Shopify-project is een eigen themamap in deze map, één per winkel. Nieuwe projecten komen hier standaard terecht.')">
+                    <x-input id="shopify-dir" wire:model="shopifyDirectory" mono />
+                </x-field>
                 <div class="grid gap-4 sm:grid-cols-2">
                     <x-field :label="__('Editor')" for="editor" error="editor" :hint="__('Commando, bijvoorbeeld code, cursor of phpstorm.')">
                         <x-input id="editor" wire:model="editor" mono />

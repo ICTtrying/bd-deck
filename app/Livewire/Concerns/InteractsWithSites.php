@@ -14,6 +14,7 @@ use App\Services\SiteLinks;
 use App\Services\WpOpen\CommandRunner;
 use App\Services\WpOpen\WpOpen;
 use App\Services\WpOpen\WpOpenCommand;
+use Illuminate\Support\Facades\Cache;
 use InvalidArgumentException;
 
 /**
@@ -21,11 +22,15 @@ use InvalidArgumentException;
  */
 trait InteractsWithSites
 {
-    public function launch(int $siteId, string $target, DesktopLauncher $launcher, AppSettings $settings, WpOpen $wpopen, SiteLinks $links): void
+    public function launch(int $siteId, string $target, DesktopLauncher $launcher, AppSettings $settings, WpOpen $wpopen, SiteLinks $links, CommandRunner $runner): void
     {
         $site = Site::query()->findOrFail($siteId);
 
-        $this->attempt(function () use ($site, $target, $launcher, $settings, $wpopen, $links): void {
+        $this->attempt(function () use ($site, $target, $launcher, $settings, $wpopen, $links, $runner): void {
+            if ($site->isShopify() && $this->launchShopify($site, $target, $launcher, $runner)) {
+                return;
+            }
+
             if (in_array($target, ['local-site', 'local-admin', 'mailpit'], true)) {
                 $this->requireBuilt($site);
 
@@ -56,6 +61,44 @@ trait InteractsWithSites
     }
 
     /**
+     * Shopify heeft geen DDEV en geen WP-admin: "lokaal" is de dev server, "beheer" de theme editor, "live" de winkel.
+     * Geeft false voor doelen die gewoon werken zoals bij andere sites (editor, terminal, map, live website).
+     */
+    private function launchShopify(Site $site, string $target, DesktopLauncher $launcher, CommandRunner $runner): bool
+    {
+        if (! in_array($target, ['local-site', 'local-admin', 'share', 'live-admin', 'hosting'], true)) {
+            return false;
+        }
+
+        match ($target) {
+            'local-site', 'local-admin' => $this->openShopifyDev($site, $target === 'local-admin' ? 'editor' : 'preview', $launcher, $runner),
+            'share' => $launcher->openUrl($site->devShareUrl() ?? throw new InvalidArgumentException(__('De dev server draait niet, dus er is geen deelbare link.'))),
+            default => $launcher->openUrl($site->shopifyAdminUrl()),
+        };
+
+        return true;
+    }
+
+    /**
+     * Draait de dev server al, dan opent de pagina meteen; anders start hij eerst en opent de pagina zodra hij klaar is.
+     */
+    private function openShopifyDev(Site $site, string $page, DesktopLauncher $launcher, CommandRunner $runner): void
+    {
+        $this->requireBuilt($site);
+
+        $url = $page === 'editor' ? $site->devEditorUrl() : $site->devPreviewUrl();
+
+        if ($url !== null) {
+            $launcher->openUrl($url);
+
+            return;
+        }
+
+        $run = $this->queueCommand($runner, WpOpenCommand::start($site));
+        Cache::put('shopify-open-after-start:'.$run->id, $page, now()->addMinutes(15));
+    }
+
+    /**
      * Starten duurt even; de browser opent daarna vanzelf (zie OpenLocalSite).
      */
     private function openAfterStart(Site $site, string $target): void
@@ -69,7 +112,12 @@ trait InteractsWithSites
     {
         $site = Site::query()->findOrFail($siteId);
 
-        $command = match ($action) {
+        $this->attempt(fn (): CommandRun => $this->queueCommand($runner, $this->quickCommand($site, $action)));
+    }
+
+    private function quickCommand(Site $site, string $action): WpOpenCommand
+    {
+        return match ($action) {
             'build' => WpOpenCommand::build($site),
             'start' => WpOpenCommand::start($site),
             'stop' => WpOpenCommand::stop($site),
@@ -79,10 +127,11 @@ trait InteractsWithSites
             'cache-live' => WpOpenCommand::cache($site, live: true),
             'pull-code' => WpOpenCommand::pullCode($site),
             'fix' => WpOpenCommand::fix($site),
+            'shopify-themes' => WpOpenCommand::shopifyThemes($site),
+            'shopify-check' => WpOpenCommand::shopifyCheck($site),
+            'shopify-pull' => WpOpenCommand::shopifyPull($site),
             default => throw new InvalidArgumentException(__('Onbekende actie.')),
         };
-
-        $this->queueCommand($runner, $command);
     }
 
     /**

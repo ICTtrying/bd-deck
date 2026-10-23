@@ -157,7 +157,7 @@ class Dashboard extends Component
     {
         return CommandRun::query()
             ->active()
-            ->whereIn('action', [WpOpenAction::AddSite, WpOpenAction::NewSite, WpOpenAction::RemoveSite, WpOpenAction::Import])
+            ->whereIn('action', [WpOpenAction::AddSite, WpOpenAction::NewSite, WpOpenAction::RemoveSite, WpOpenAction::Import, WpOpenAction::ShopifyAdd])
             ->latestFirst()
             ->get();
     }
@@ -217,6 +217,10 @@ class Dashboard extends Component
     {
         // net als de controle op de achtergrond: alleen een melding als er iets nieuws is
         $this->queueForSites($runner, WpOpenAction::Updates, $this->selectedSites, function (Site $site): WpOpenCommand|string {
+            if ($site->isShopify()) {
+                return __('Shopify-project');
+            }
+
             if (($site->isLocalOnly() || $site->isLaravel()) && ! $site->isBuilt()) {
                 return __('nog niet gebouwd');
             }
@@ -228,7 +232,7 @@ class Dashboard extends Component
     public function bulkCache(string $where, CommandRunner $runner): void
     {
         if ($where === 'live') {
-            $sites = $this->selectedSites->reject->isLocalOnly();
+            $sites = $this->selectedSites->reject->isLocalOnly()->reject->isShopify();
 
             // live voor meerdere sites tegelijk: eerst laten zien welke het zijn
             if ($sites->count() > 1) {
@@ -269,6 +273,11 @@ class Dashboard extends Component
         }
 
         $this->queueForSites($runner, WpOpenAction::Backup, $this->selectedSites, function (Site $site): WpOpenCommand|string {
+            if ($site->isShopify()) {
+                // een Shopify-project is een git-repo; een publicatie maakt zelf een back-up van het live thema
+                return __('Shopify-project');
+            }
+
             $local = $this->backupLocal && $site->isBuilt();
             $live = ! $site->isLocalOnly();
 
@@ -288,6 +297,7 @@ class Dashboard extends Component
     {
         $this->queueForSites($runner, $live ? WpOpenAction::CacheLive : WpOpenAction::CacheLocal, $sites, function (Site $site) use ($live): WpOpenCommand|string {
             return match (true) {
+                $site->isShopify() => __('Shopify-project'),
                 $live && $site->isLocalOnly() => __('geen live-server'),
                 ! $live && ! $site->isBuilt() => __('nog niet gebouwd'),
                 default => WpOpenCommand::cache($site, live: $live),

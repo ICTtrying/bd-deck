@@ -74,7 +74,7 @@ class SiteForm extends Form
             'discover' => ['boolean'],
             'remotePath' => [Rule::requiredIf(! $this->discover), 'nullable', 'string', 'max:500', 'not_regex:/[|\n\r]/'],
             'mode' => ['required', Rule::enum(SiteMode::class)->only(SiteMode::remote())],
-            'provider' => ['required', Rule::enum(SiteProvider::class)],
+            'provider' => ['required', Rule::enum(SiteProvider::class)->only(SiteProvider::hosting())],
             'liveUrl' => ['nullable', 'url:https', 'max:255'],
             'liveLoginUser' => ['nullable', 'string', 'max:60', 'regex:/^[A-Za-z0-9._@-]+$/'],
             'password' => ['nullable', 'string', 'max:255'],

@@ -53,10 +53,21 @@ class Create extends Component
     public string $connection = '';
 
     /**
-     * bestaand: een live-site koppelen; lokaal: een nieuwe WordPress-site zonder server.
+     * bestaand: een live-site koppelen; lokaal: een nieuwe WordPress-site zonder server; shopify: een themamap bij een winkel.
      */
     #[Url(as: 'soort', except: 'bestaand')]
     public string $kind = 'bestaand';
+
+    public string $shopName = '';
+
+    public string $shopStore = '';
+
+    /**
+     * Leeg: de projectenmap uit Instellingen met de projectnaam erachter.
+     */
+    public string $shopPath = '';
+
+    public string $shopLiveUrl = '';
 
     public string $localName = '';
 
@@ -237,6 +248,65 @@ class Create extends Component
         });
     }
 
+    /**
+     * De map waar het project komt te staan.
+     */
+    #[Computed]
+    public function shopifyProjectPath(): string
+    {
+        $path = trim($this->shopPath);
+
+        return $path !== '' ? $path : rtrim($this->settings->shopifyDirectory(), '/').'/'.Str::slug($this->shopName !== '' ? $this->shopName : 'naam');
+    }
+
+    /**
+     * Staat er al een themamap, dan wordt die gekoppeld; anders haalt BD Deck het live thema op.
+     */
+    #[Computed]
+    public function shopifyPathExists(): bool
+    {
+        return is_dir($this->shopifyProjectPath) && count(array_diff(scandir($this->shopifyProjectPath) ?: [], ['.', '..'])) > 0;
+    }
+
+    public function createShopify(CommandRunner $runner): void
+    {
+        $this->validate([
+            'shopName' => ['required', 'string', 'max:60', 'regex:/^[A-Za-z0-9._-]+$/', Rule::unique('sites', 'name')],
+            'shopStore' => ['required', 'string', 'max:120'],
+            'shopPath' => ['nullable', 'string', 'max:500', 'starts_with:/', 'not_regex:/[|\n\r]|\.\./'],
+            'shopLiveUrl' => ['nullable', 'url:https,http', 'max:255'],
+        ], [
+            'shopName.regex' => __('Gebruik alleen letters, cijfers, punt, - en _.'),
+            'shopName.unique' => __('Er bestaat al een site met deze naam.'),
+            'shopPath.starts_with' => __('Gebruik een volledig pad, beginnend met /'),
+            'shopLiveUrl.url' => __('Gebruik een volledig adres, bijvoorbeeld https://klant.nl'),
+        ], [
+            'shopName' => __('naam'),
+            'shopStore' => __('winkel'),
+            'shopPath' => __('map'),
+            'shopLiveUrl' => __('eigen domein'),
+        ]);
+
+        $this->attempt(function () use ($runner): void {
+            $command = WpOpenCommand::shopifyAdd(
+                name: $this->shopName,
+                store: $this->shopStore,
+                path: $this->shopifyProjectPath,
+                create: ! $this->shopifyPathExists,
+                liveUrl: trim($this->shopLiveUrl) !== '' ? rtrim(trim($this->shopLiveUrl), '/') : null,
+            );
+
+            $this->queueCommand($runner, $command);
+
+            session()->flash('toast', [
+                'title' => __('Project wordt toegevoegd'),
+                'message' => $this->shopifyPathExists ? __('Hij verschijnt in de lijst zodra de map gekoppeld is.') : __('BD Deck haalt het live thema op. Moet je daarvoor inloggen bij Shopify, dan zie je de link bij de activiteit.'),
+                'tone' => 'info',
+            ]);
+            $this->redirectRoute('dashboard', navigate: true);
+        });
+    }
+
     public function import(CommandRunner $runner): void
     {
         $run = $this->queueCommand($runner, WpOpenCommand::import());
@@ -246,7 +316,7 @@ class Create extends Component
     public function render(): View
     {
         return view('livewire.sites.create', [
-            'providers' => SiteProvider::cases(),
+            'providers' => SiteProvider::hosting(),
             'modes' => SiteMode::remote(),
             'suggestedPlugins' => config('wordpress.suggested_plugins'),
         ]);

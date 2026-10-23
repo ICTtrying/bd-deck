@@ -45,6 +45,7 @@ final class WpOpen
             'HOME' => $home,
             'PATH' => implode(':', $path),
             'WP_SITES_DIR' => $this->settings->sitesDirectory(),
+            'WPO_SHOPIFY_DIR' => $this->settings->shopifyDirectory(),
             'WPO_SSH_KEY' => $this->settings->sshKeyPath(),
             'WPO_NONINTERACTIVE' => '1',
             'LC_ALL' => 'C.UTF-8',

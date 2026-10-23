@@ -71,6 +71,46 @@ document.addEventListener('alpine:init', () => {
     }));
 });
 
+interface ShopifyShortcutContext {
+    $wire: { shortcut: (action: string) => Promise<void> };
+}
+
+const SHOPIFY_SHORTCUTS: Record<string, string> = {
+    d: 'toggle-dev',
+    p: 'preview',
+    e: 'editor',
+    s: 'share',
+    c: 'check',
+    l: 'log',
+};
+
+// Sneltoetsen op de Shopify-projectpagina; ze doen niets zolang je typt of een venster open staat
+document.addEventListener('alpine:init', () => {
+    window.Alpine?.data('shopifyShortcuts', () => ({
+        handle(this: ShopifyShortcutContext, event: KeyboardEvent): void {
+            if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey || event.repeat) {
+                return;
+            }
+
+            const target = event.target as HTMLElement | null;
+
+            if (target?.closest('input, textarea, select, [contenteditable="true"]')) {
+                return;
+            }
+
+            const modalOpen = Array.from(document.querySelectorAll<HTMLElement>('[role="dialog"]')).some((dialog) => getComputedStyle(dialog).display !== 'none');
+            const action = SHOPIFY_SHORTCUTS[event.key.toLowerCase()];
+
+            if (modalOpen || action === undefined) {
+                return;
+            }
+
+            event.preventDefault();
+            void this.$wire.shortcut(action);
+        },
+    }));
+});
+
 // Ctrl/Cmd+K opent de snelzoeker, ook als de focus in een veld staat
 document.addEventListener('keydown', (event: KeyboardEvent) => {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {

@@ -18,6 +18,7 @@ class HandleNativeMenuClick
         $url = match (true) {
             $id === 'open' => null,
             $id === 'new-site' => route('sites.create'),
+            $id === 'new-shopify' => route('sites.create', ['soort' => 'shopify']),
             $id === 'lock' => route('lock'),
             Str::startsWith($id, 'site:') => route('sites.show', Str::after($id, 'site:')),
             default => false,

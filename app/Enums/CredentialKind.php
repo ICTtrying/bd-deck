@@ -9,6 +9,7 @@ enum CredentialKind: string
     case Database = 'database';
     case ApiKey = 'api-key';
     case HostingPanel = 'hosting-panel';
+    case ShopifyStorePassword = 'shopify-store-password';
     case Other = 'other';
 
     public function label(): string
@@ -19,6 +20,7 @@ enum CredentialKind: string
             self::Database => __('Database'),
             self::ApiKey => __('API-sleutel'),
             self::HostingPanel => __('Hostingpaneel'),
+            self::ShopifyStorePassword => __('Shopify-winkelwachtwoord'),
             self::Other => __('Overig'),
         };
     }
@@ -31,6 +33,7 @@ enum CredentialKind: string
             self::Database => 'database',
             self::ApiKey => 'key',
             self::HostingPanel => 'server',
+            self::ShopifyStorePassword => 'shopify',
             self::Other => 'lock',
         };
     }

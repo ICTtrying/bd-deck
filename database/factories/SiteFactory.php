@@ -41,10 +41,13 @@ class SiteFactory extends Factory
                 return;
             }
 
-            // een lokale site heeft geen server: alleen de lokale velden afleiden van de naam
-            $keys = ($site->snapshot['local_only'] ?? false)
-                ? ['name', 'slug', 'local_url', 'project_dir', 'wp_content_dir']
-                : ['name', 'slug', 'target', 'host', 'live_host', 'live_site_url', 'local_url', 'project_dir', 'wp_content_dir'];
+            // een lokale site heeft geen server: alleen de lokale velden afleiden van de naam; bij Shopify horen
+            // winkel en map niet bij de naam van het project
+            $keys = match (true) {
+                ($site->snapshot['type'] ?? null) === SiteType::Shopify->value => ['name', 'slug'],
+                (bool) ($site->snapshot['local_only'] ?? false) => ['name', 'slug', 'local_url', 'project_dir', 'wp_content_dir'],
+                default => ['name', 'slug', 'target', 'host', 'live_host', 'live_site_url', 'local_url', 'project_dir', 'wp_content_dir'],
+            };
             $derived = array_intersect_key($this->snapshot($site->name), array_flip($keys));
 
             $site->snapshot = array_replace($site->snapshot ?? [], $derived);
@@ -89,6 +92,73 @@ class SiteFactory extends Factory
     public function laravel(): static
     {
         return $this->snapshotState(['type' => SiteType::Laravel->value, 'remote' => '/home/u1/shop', 'root' => '/home/u1/shop']);
+    }
+
+    /**
+     * Een Shopify-project: themamap met git, een winkel en een dev server die niet draait.
+     */
+    public function shopify(): static
+    {
+        return $this->snapshotState([
+            'type' => SiteType::Shopify->value,
+            'mode' => 'shopify',
+            'provider' => SiteProvider::Shopify->value,
+            'target' => '', 'user' => '', 'host' => '', 'remote' => '', 'root' => '.',
+            'live_host' => 'demo-winkel.myshopify.com',
+            'live_site_url' => 'https://demo-winkel.myshopify.com',
+            'local_url' => 'http://127.0.0.1:9292',
+            'project_dir' => '/home/wesley/Projects/shopify/demo',
+            'wp_content_dir' => '/home/wesley/Projects/shopify/demo',
+            'built' => true,
+            'ddev_status' => 'stopped',
+            'git' => [
+                'branch' => 'main', 'dirty' => 0, 'pending_files' => 0, 'unpushed_commits' => 0,
+                'last_commit' => ['hash' => 'abc1234', 'subject' => 'Live thema, uitgangspunt', 'date' => now()->toIso8601String()],
+                'last_deploy' => null, 'remote' => null,
+            ],
+            'shopify' => [
+                'store' => 'demo-winkel.myshopify.com',
+                'store_url' => 'https://demo-winkel.myshopify.com',
+                'admin_url' => 'https://admin.shopify.com/store/demo-winkel/themes',
+                'port' => 9292, 'host' => '127.0.0.1', 'theme_editor_sync' => false,
+                'ignore' => ['config/settings_data.json', 'templates/*.json', 'sections/*.json'],
+                'ignore_is_default' => true, 'protection_disabled' => false,
+                'dev' => null, 'last_push' => null, 'last_publish' => null,
+            ],
+        ]);
+    }
+
+    /**
+     * Dev server aan: preview, deelbare link en theme editor staan klaar.
+     */
+    public function devRunning(): static
+    {
+        return $this->shopify()->snapshotState([
+            'ddev_status' => 'running',
+            'local_url' => 'http://127.0.0.1:9292',
+            'shopify' => ['dev' => [
+                'pid' => 4242, 'url' => 'http://127.0.0.1:9292',
+                'share_url' => 'https://demo-winkel.myshopify.com/?preview_theme_id=555',
+                'editor_url' => 'https://demo-winkel.myshopify.com/admin/themes/555/editor?hr=9292',
+                'theme_id' => 555, 'started_at' => now()->subMinutes(5)->toIso8601String(),
+            ]],
+        ]);
+    }
+
+    /**
+     * Thema's van de winkel zoals de laatste themalijst ze gaf.
+     *
+     * @param  list<array{id: int, name: string, role: string}>|null  $themes
+     */
+    public function withThemes(?array $themes = null): static
+    {
+        $themes ??= [['id' => 100, 'name' => 'Live thema', 'role' => 'live'], ['id' => 200, 'name' => 'Preview 1', 'role' => 'unpublished']];
+
+        return $this->state(['shopify_state' => ['themes' => array_map(fn (array $theme): array => [
+            ...$theme,
+            'preview_url' => 'https://demo-winkel.myshopify.com/?preview_theme_id='.$theme['id'],
+            'editor_url' => 'https://demo-winkel.myshopify.com/admin/themes/'.$theme['id'].'/editor',
+        ], $themes), 'themes_at' => now()->toIso8601String()]]);
     }
 
     public function built(): static
