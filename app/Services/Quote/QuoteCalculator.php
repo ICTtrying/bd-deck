@@ -20,14 +20,11 @@ final class QuoteCalculator
             QuoteProjectType::Website => $this->website($input),
             QuoteProjectType::Webshop => $this->webshop($input),
             QuoteProjectType::WebApp => $this->webApp($input),
+            QuoteProjectType::Other => $this->other($input),
         };
 
         if ($input->type->usesPackages()) {
             $lines = [...$lines, ...$this->contentExtras($input)];
-        }
-
-        if ($input->otherHours > 0) {
-            $lines[] = QuoteLine::hourly('Overig werk', null, round($input->otherHours, 2));
         }
 
         return new Quote(
@@ -132,6 +129,19 @@ final class QuoteCalculator
         }
 
         return [$lines, $notes];
+    }
+
+    /**
+     * Losse uren tegen het gekozen uurtarief, met een omschrijving die in de offertetekst komt.
+     *
+     * @return array{0: list<QuoteLine>, 1: list<string>}
+     */
+    private function other(QuoteInput $input): array
+    {
+        $hours = round($input->otherHours, 2);
+        $label = mb_substr(trim($input->otherDescription), 0, 120) ?: 'Overig werk';
+
+        return [$hours > 0 ? [QuoteLine::hourly($label, null, $hours)] : [], []];
     }
 
     /**
@@ -260,6 +270,10 @@ final class QuoteCalculator
      */
     private function recurring(QuoteInput $input): array
     {
+        if ($input->type === QuoteProjectType::Other) {
+            return [];
+        }
+
         if ($input->type === QuoteProjectType::WebApp) {
             return $input->webAppHosting
                 ? [new RecurringLine('Hosting en onderhoud Laravel', 'Eigen server, updates, back-ups en 1 uur onderhoud per maand (vanaf)', (int) config('quote.webapp.hosting_price'))]
@@ -299,7 +313,7 @@ final class QuoteCalculator
      */
     private function excluded(QuoteInput $input): array
     {
-        if ($input->type === QuoteProjectType::WebApp) {
+        if (in_array($input->type, [QuoteProjectType::WebApp, QuoteProjectType::Other], true)) {
             return [];
         }
 
@@ -326,6 +340,7 @@ final class QuoteCalculator
             QuoteProjectType::Website => 'WordPress-website',
             QuoteProjectType::Webshop => 'Webshop in '.$input->platform->label(),
             QuoteProjectType::WebApp => 'Webapplicatie in Laravel',
+            QuoteProjectType::Other => 'Overig werk',
         };
     }
 }

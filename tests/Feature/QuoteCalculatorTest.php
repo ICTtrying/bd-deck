@@ -56,15 +56,14 @@ it('telt meerwerk op tegen de prijzen van de site', function (): void {
         contentPages: 3,
         replaceLogo: true,
         explanationHalfHours: 2,
-        otherHours: 2,
     ));
 
-    expect($quote->totalCents(QuoteTariff::Standard))->toBe(44900 + 5000 + 10000 + 7500 + 2500 + 5000 + 10000)
-        ->and($quote->totalCents(QuoteTariff::Friend))->toBe(31500 + 3500 + 7000 + 5250 + 1750 + 3500 + 7000);
+    expect($quote->totalCents(QuoteTariff::Standard))->toBe(44900 + 5000 + 10000 + 7500 + 2500 + 5000)
+        ->and($quote->totalCents(QuoteTariff::Friend))->toBe(31500 + 3500 + 7000 + 5250 + 1750 + 3500);
 });
 
 it('negeert negatieve invoer', function (): void {
-    $quote = quote(new QuoteInput(QuoteProjectType::Website, pages: -4, extraForms: -1, extraRounds: -2, otherHours: -3));
+    $quote = quote(new QuoteInput(QuoteProjectType::Website, pages: -4, extraForms: -1, extraRounds: -2));
 
     expect($quote->totalCents(QuoteTariff::Standard))->toBe(44900);
 });
@@ -161,6 +160,35 @@ it('maakt een offertetekst met totalen, beheer en wat niet inbegrepen is', funct
         ->toContain('- Beheer Basis: € 29')
         ->toContain('Enfold-licentie')
         ->not->toContain('Hosting en domeinnaam');
+});
+
+it('rekent overig werk als losse uren op het gekozen tarief', function (): void {
+    $quote = quote(new QuoteInput(QuoteProjectType::Other, otherHours: 3, otherDescription: '  Site verhuizen  '));
+
+    expect($quote->lines)->toHaveCount(1)
+        ->and($quote->lines[0]->label)->toBe('Site verhuizen')
+        ->and($quote->totalCents(QuoteTariff::Standard))->toBe(15000)
+        ->and($quote->totalCents(QuoteTariff::Friend))->toBe(10500)
+        ->and($quote->recurring)->toBe([])
+        ->and($quote->excluded)->toBe([])
+        ->and($quote->toText(QuoteTariff::Friend))->toContain('Offerte: Overig werk')->toContain('- Site verhuizen: € 105');
+});
+
+it('noemt overig werk zo zonder omschrijving en laat het bij 0 uur of negatieve uren weg', function (): void {
+    expect(quote(new QuoteInput(QuoteProjectType::Other, otherHours: 1.5))->lines[0]->label)->toBe('Overig werk')
+        ->and(quote(new QuoteInput(QuoteProjectType::Other, otherHours: 1.5))->totalCents(QuoteTariff::Standard))->toBe(7500)
+        ->and(quote(new QuoteInput(QuoteProjectType::Other))->isEmpty())->toBeTrue()
+        ->and(quote(new QuoteInput(QuoteProjectType::Other, otherHours: -2))->isEmpty())->toBeTrue();
+});
+
+it('kapt een te lange omschrijving van overig werk af', function (): void {
+    $quote = quote(new QuoteInput(QuoteProjectType::Other, otherHours: 1, otherDescription: str_repeat('a', 300)));
+
+    expect(mb_strlen($quote->lines[0]->label))->toBe(120);
+});
+
+it('telt uren voor overig werk niet mee bij een website, webshop of webapplicatie', function (): void {
+    expect(quote(new QuoteInput(QuoteProjectType::Website, otherHours: 5))->totalCents(QuoteTariff::Standard))->toBe(44900);
 });
 
 it('formatteert eurocenten', function (): void {

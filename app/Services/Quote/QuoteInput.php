@@ -22,6 +22,7 @@ final readonly class QuoteInput
         public bool $replaceLogo = false,
         public int $explanationHalfHours = 0,
         public float $otherHours = 0,
+        public string $otherDescription = '',
         public QuotePlatform $platform = QuotePlatform::WooCommerce,
         public int $products = 0,
         public bool $hasVariants = false,

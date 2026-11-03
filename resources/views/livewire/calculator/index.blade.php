@@ -17,7 +17,7 @@
 <div class="grid gap-6">
     <x-page-header :title="__('Calculator')" :description="__('Stel een offerte samen met de prijzen van borgmandigital.nl. Kies de soort opdracht, vul in wat de klant wil en kopieer het resultaat als offertetekst.')" />
 
-    <div class="grid gap-2 sm:grid-cols-3" role="radiogroup" aria-label="{{ __('Soort opdracht') }}">
+    <div class="grid gap-2 sm:grid-cols-2 lg:grid-cols-4" role="radiogroup" aria-label="{{ __('Soort opdracht') }}">
         @foreach ($projectTypes as $option)
             <button type="button" wire:click="selectType('{{ $option->value }}')" role="radio" aria-checked="{{ $type === $option ? 'true' : 'false' }}" @class([
                 'grid gap-1 rounded-xl border p-4 text-left transition-colors',
@@ -74,7 +74,7 @@
                         </div>
                     </div>
                 </x-panel>
-            @else
+            @elseif ($type === QuoteProjectType::WebApp)
                 <x-panel :title="__('Webapplicatie')" :description="__('Eerst een intake voor een vaste prijs, optioneel een prototype, daarna de bouw.')">
                     <div class="grid gap-4">
                         <div class="grid gap-1 divide-y divide-line">
@@ -84,6 +84,20 @@
                         <x-field :label="__('Geschatte bouwuren')" for="build-hours" :hint="__('Leeg of 0 laat de bouw weg: die krijgt na de intake een vaste prijs. Standaardtarief heeft een minimum van € 2.500.')">
                             <div class="flex items-center gap-2">
                                 <x-input id="build-hours" type="number" min="0" step="1" wire:model.live.debounce.300ms="buildHours" class="w-24" />
+                                <span class="text-muted">{{ __('uur') }}</span>
+                            </div>
+                        </x-field>
+                    </div>
+                </x-panel>
+            @elseif ($type === QuoteProjectType::Other)
+                <x-panel :title="__('Overig werk')" :description="__('Losse uren tegen het tarief dat je rechts bovenaan kiest.')">
+                    <div class="grid gap-4 sm:grid-cols-2">
+                        <x-field :label="__('Omschrijving (optioneel)')" for="other-description" :hint="__('Komt in de offertetekst te staan, bijvoorbeeld: Site verhuizen naar een nieuwe host.')" class="sm:col-span-2">
+                            <x-input id="other-description" maxlength="120" wire:model.live.debounce.300ms="otherDescription" />
+                        </x-field>
+                        <x-field :label="__('Aantal uren')" for="other-hours" :hint="__('Halve uren mag, bijvoorbeeld 1,5.')">
+                            <div class="flex items-center gap-2">
+                                <x-input id="other-hours" type="number" min="0" step="0.5" wire:model.live.debounce.300ms="otherHours" class="w-24" />
                                 <span class="text-muted">{{ __('uur') }}</span>
                             </div>
                         </x-field>
@@ -113,27 +127,20 @@
                 </x-panel>
             @endif
 
-            <x-panel :title="__('Overig werk')">
-                <x-field :label="__('Uren tegen het gekozen uurtarief')" for="other-hours" :hint="__('Voor alles wat nergens anders in past.')">
-                    <div class="flex items-center gap-2">
-                        <x-input id="other-hours" type="number" min="0" step="0.5" wire:model.live.debounce.300ms="otherHours" class="w-24" />
-                        <span class="text-muted">{{ __('uur') }}</span>
-                    </div>
-                </x-field>
-            </x-panel>
-
-            <x-panel :title="__('Maandelijkse kosten')" :description="__('Vast geprijsd, dus zonder vriendenkorting.')">
-                @if ($type === QuoteProjectType::WebApp)
-                    <x-toggle :label="__('Hosting en onderhoud Laravel')" :description="__('Vanaf € 75 per maand, met 1 uur onderhoud.')" wire:model.live="webAppHosting" />
-                @else
-                    <div class="grid gap-4">
-                        <x-segmented :label="__('Beheer')" property="management" :value="$management->value" :options="collect(QuoteManagement::cases())->mapWithKeys(fn ($option) => [$option->value => $option->label()])->all()" />
-                        @if ($management !== QuoteManagement::None)
-                            <x-toggle :label="__('Jaarlijks vooraf betalen')" :description="__('De klant betaalt 11 maanden in plaats van 12.')" wire:model.live="yearlyBilling" />
-                        @endif
-                    </div>
-                @endif
-            </x-panel>
+            @if ($type !== QuoteProjectType::Other)
+                <x-panel :title="__('Maandelijkse kosten')" :description="__('Vast geprijsd, dus zonder vriendenkorting.')">
+                    @if ($type === QuoteProjectType::WebApp)
+                        <x-toggle :label="__('Hosting en onderhoud Laravel')" :description="__('Vanaf € 75 per maand, met 1 uur onderhoud.')" wire:model.live="webAppHosting" />
+                    @else
+                        <div class="grid gap-4">
+                            <x-segmented :label="__('Beheer')" property="management" :value="$management->value" :options="collect(QuoteManagement::cases())->mapWithKeys(fn ($option) => [$option->value => $option->label()])->all()" />
+                            @if ($management !== QuoteManagement::None)
+                                <x-toggle :label="__('Jaarlijks vooraf betalen')" :description="__('De klant betaalt 11 maanden in plaats van 12.')" wire:model.live="yearlyBilling" />
+                            @endif
+                        </div>
+                    @endif
+                </x-panel>
+            @endif
         </div>
 
         <aside class="grid gap-4 lg:sticky lg:top-6" aria-label="{{ __('Offerte') }}">

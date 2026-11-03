@@ -1344,8 +1344,6 @@
     "Uitleg (per half uur)": "Explanation (per half hour)",
     "Logo en favicon plaatsen": "Place logo and favicon",
     "Overig werk": "Other work",
-    "Uren tegen het gekozen uurtarief": "Hours at the chosen hourly rate",
-    "Voor alles wat nergens anders in past.": "For anything that fits nowhere else.",
     "Maandelijkse kosten": "Monthly costs",
     "Vast geprijsd, dus zonder vriendenkorting.": "Fixed price, so no friends discount.",
     "Hosting en onderhoud Laravel": "Laravel hosting and maintenance",
@@ -1363,5 +1361,11 @@
     "Ongeveer :hours uur werk.": "About :hours hours of work.",
     "Scheelt :amount t.o.v. standaardtarief.": "Saves :amount compared to the standard rate.",
     "Vriendenprijs: :amount.": "Friends rate: :amount.",
-    "Kopieer offertetekst": "Copy quote text"
+    "Kopieer offertetekst": "Copy quote text",
+    "Losse uren voor werk dat nergens anders bij past.": "Loose hours for work that fits nowhere else.",
+    "Losse uren tegen het tarief dat je rechts bovenaan kiest.": "Loose hours at the rate you pick at the top right.",
+    "Omschrijving (optioneel)": "Description (optional)",
+    "Komt in de offertetekst te staan, bijvoorbeeld: Site verhuizen naar een nieuwe host.": "Appears in the quote text, for example: Move the site to a new host.",
+    "Aantal uren": "Number of hours",
+    "Halve uren mag, bijvoorbeeld 1,5.": "Half hours are fine, for example 1.5."
 }

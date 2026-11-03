@@ -40,6 +40,8 @@ class Index extends Component
 
     public ?float $otherHours = 0;
 
+    public string $otherDescription = '';
+
     public QuotePlatform $platform = QuotePlatform::WooCommerce;
 
     public ?int $products = 20;
@@ -77,6 +79,7 @@ class Index extends Component
             replaceLogo: $this->replaceLogo,
             explanationHalfHours: $this->explanationHalfHours ?? 0,
             otherHours: $this->otherHours ?? 0,
+            otherDescription: $this->otherDescription,
             platform: $this->platform,
             products: $this->products ?? 0,
             hasVariants: $this->hasVariants,

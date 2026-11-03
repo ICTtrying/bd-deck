@@ -52,6 +52,20 @@ it('wisselt van soort opdracht en vult de bouwuren van een webapp', function ():
         ->assertSet('type', QuoteProjectType::WebApp);
 });
 
+it('toont overig werk als eigen tegel met losse uren', function (): void {
+    Livewire::test(Index::class)
+        ->call('selectType', 'other')
+        ->assertSet('type', QuoteProjectType::Other)
+        ->assertSee('Nog niets om te berekenen.')
+        ->assertDontSee('Maandelijkse kosten')
+        ->set('otherDescription', 'Site verhuizen')
+        ->set('otherHours', 3)
+        ->assertSee('Site verhuizen')
+        ->assertSee('€ 150')
+        ->set('tariff', QuoteTariff::Friend->value)
+        ->assertSee('€ 105');
+});
+
 it('rekent door als een getalveld leeg wordt gelaten', function (): void {
     Livewire::test(Index::class)
         ->set('pages', '')
