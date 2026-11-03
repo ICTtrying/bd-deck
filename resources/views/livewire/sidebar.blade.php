@@ -5,6 +5,7 @@
         ['route' => 'activity.index', 'match' => ['activity.*'], 'icon' => 'history', 'label' => __('Activiteit')],
     ];
     $manage = [
+        ['route' => 'calculator.index', 'match' => ['calculator.*'], 'icon' => 'calculator', 'label' => __('Calculator')],
         ['route' => 'keys.index', 'match' => ['keys.*'], 'icon' => 'key', 'label' => __('SSH-sleutels')],
         ['route' => 'vault.index', 'match' => ['vault.*'], 'icon' => 'shield', 'label' => __('Kluis')],
         ['route' => 'settings.index', 'match' => ['settings.*'], 'icon' => 'settings', 'label' => __('Instellingen')],

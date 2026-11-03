@@ -64,6 +64,7 @@ class CommandPalette extends Component
             ['label' => __('Site toevoegen'), 'icon' => 'plus', 'url' => route('sites.create')],
             ['label' => __('Uptime & onderhoud'), 'icon' => 'activity', 'url' => route('maintenance.index')],
             ['label' => __('Activiteit'), 'icon' => 'history', 'url' => route('activity.index')],
+            ['label' => __('Calculator'), 'icon' => 'calculator', 'url' => route('calculator.index')],
             ['label' => __('SSH-sleutels'), 'icon' => 'key', 'url' => route('keys.index')],
             ['label' => __('Kluis'), 'icon' => 'shield', 'url' => route('vault.index')],
             ['label' => __('Instellingen'), 'icon' => 'settings', 'url' => route('settings.index')],

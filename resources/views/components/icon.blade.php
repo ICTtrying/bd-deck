@@ -8,6 +8,7 @@
         'archive' => '<rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/>',
         'arrow-left' => '<path d="m12 19-7-7 7-7"/><path d="M19 12H5"/>',
         'arrow-right' => '<path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>',
+        'calculator' => '<rect width="16" height="20" x="4" y="2" rx="2"/><line x1="8" x2="16" y1="6" y2="6"/><line x1="16" x2="16" y1="14" y2="18"/><path d="M16 10h.01"/><path d="M12 10h.01"/><path d="M8 10h.01"/><path d="M12 14h.01"/><path d="M8 14h.01"/><path d="M12 18h.01"/><path d="M8 18h.01"/>',
         'check' => '<path d="M20 6 9 17l-5-5"/>',
         'chevron-down' => '<path d="m6 9 6 6 6-6"/>',
         'chevron-right' => '<path d="m9 18 6-6-6-6"/>',

@@ -4,6 +4,7 @@ use App\Http\Controllers\LockController;
 use App\Livewire\Activity;
 use App\Livewire\Auth\Login;
 use App\Livewire\Auth\Setup;
+use App\Livewire\Calculator;
 use App\Livewire\Dashboard;
 use App\Livewire\Keys;
 use App\Livewire\Maintenance;
@@ -32,6 +33,8 @@ Route::middleware(['owner', 'auth'])->group(function (): void {
 
     Route::livewire('/activiteit', Activity\Index::class)->name('activity.index');
     Route::livewire('/activiteit/{run}', Activity\Show::class)->name('activity.show');
+
+    Route::livewire('/calculator', Calculator\Index::class)->name('calculator.index');
 
     Route::livewire('/ssh-sleutels', Keys\Index::class)->name('keys.index');
     Route::livewire('/kluis', Vault\Index::class)->name('vault.index');

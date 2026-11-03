@@ -65,6 +65,7 @@ class NativeAppServiceProvider implements ProvidesPhpIni
                 Menu::route('activity.index', __('Activiteit'), 'CmdOrCtrl+3'),
                 Menu::route('keys.index', __('SSH-sleutels'), 'CmdOrCtrl+4'),
                 Menu::route('vault.index', __('Kluis'), 'CmdOrCtrl+5'),
+                Menu::route('calculator.index', __('Calculator'), 'CmdOrCtrl+6'),
                 Menu::separator(),
                 Menu::route('settings.index', __('Instellingen'), 'CmdOrCtrl+,'),
                 Menu::route('lock', __('Vergrendelen'), 'CmdOrCtrl+L'),
