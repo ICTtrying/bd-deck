@@ -45,15 +45,20 @@ final class FakeServer
 
         $server->stub('ssh', <<<'BASH'
             #!/usr/bin/env bash
+            identity=''
             while [ $# -gt 0 ]; do
               case "$1" in
-                -o|-p|-i|-l) shift 2;;
+                -i) identity="$2"; shift 2;;
+                -o|-p|-l) shift 2;;
                 -*) shift;;
                 *) break;;
               esac
             done
             target="$1"; shift
             echo "ssh $target $*" >> "$FAKE_LOG"
+            if [ -n "${FAKE_REQUIRED_SSH_KEY:-}" ] && [ "$identity" != "$FAKE_REQUIRED_SSH_KEY" ]; then
+              echo 'Permission denied (publickey)' >&2; exit 255
+            fi
             [ $# -eq 0 ] && exit 0
             exec bash -c "$*"
             BASH);
@@ -98,10 +103,14 @@ final class FakeServer
             case "$*" in
               *"core version"*) echo "6.8.1";;
               *"core is-installed"*) exit 0;;
+              *"config get table_prefix --type=variable"*) echo "${FAKE_REMOTE_PREFIX:-live_}";;
               *"config get table_prefix"*) echo "${FAKE_REMOTE_PREFIX:-wp_}";;
               *"db export"*)
                 [ "${FAKE_DB_EXPORT:-ok}" != fail ] || { echo 'mysqldump: export mislukt' >&2; exit 2; }
                 [ "${FAKE_DB_EXPORT:-ok}" != empty ] || exit 0
+                if [ "${FAKE_DB_EXPORT:-ok}" = shared ]; then
+                  printf 'CREATE TABLE `archief_options` (option_name varchar(191));\nINSERT INTO `archief_options` VALUES (\x27lange waarde uit een andere installatie\x27);\n'
+                fi
                 printf 'CREATE TABLE `live_options` (option_name varchar(191));\nINSERT INTO `live_options` VALUES (\x27siteurl\x27);\n';;
               *"db import"*) cat > "$FAKE_IMPORTED";;
               *"option get home"*domains/tweede.test*) echo "https://tweede.test";;
@@ -134,7 +143,7 @@ final class FakeServer
               *"wp config set table_prefix"*) printf "\$table_prefix = '%s';\n" "$5" >> wp-config.php;;
               *"wp config create"*)
                 for a in "$@"; do case "$a" in --dbprefix=*) printf "<?php \$table_prefix = '%s';\n" "${a#--dbprefix=}" > wp-config.php;; esac; done;;
-              *"option get siteurl"*) echo 'https://demo.ddev.site';;
+              *"option get siteurl"*) echo "${FAKE_LOCAL_SITE_URL:-https://demo.ddev.site}";;
               # multisite: omzetten schrijft de constante, de test bepaalt de sitelijst en het nieuwe id
               *"multisite-convert"*) echo "define( 'MULTISITE', true );" >> wp-config.php;;
               *"site list"*) printf '%b' "${FAKE_SITE_LIST:-blog_id,domain\n1,nieuw.ddev.site\n}";;
@@ -142,6 +151,7 @@ final class FakeServer
               *"option get stylesheet"*) echo "enfold";;
               *"plugin list --status=active"*) printf 'forminator\nwpmudev-updates\n';;
               *"search-replace"*)
+                [ "${FAKE_URL_REWRITE_FAIL:-0}" != 1 ] || { echo 'WP-CLI search-replace mislukt' >&2; exit 1; }
                 for a in "$@"; do case "$a" in --export=*) printf 'DROP TABLE IF EXISTS `lokaal_options`;\nINSERT INTO `lokaal_options` VALUES (1,\x27siteurl\x27,\x27https://nieuw.example.test\x27);\n' > "${a#--export=}";; esac; done;;
               # pakketbeheer: de test bepaalt via de omgeving wat er "verandert" of mislukt
               *"composer outdated"*) printf '%s' "${FAKE_COMPOSER_OUTDATED:-}";;

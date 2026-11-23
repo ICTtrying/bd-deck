@@ -103,6 +103,89 @@ describe('WordPress-database ophalen', function (): void {
         expect($result->errorOutput())->toContain('Database ophalen via SFTP mislukt');
         expect($this->server->calls())->not->toContain('ddev import-db');
     });
+
+    it('gebruikt de ingestelde SSH-sleutel bij een database-export', function (): void {
+        $this->server->buildLocalSite();
+        $key = $this->server->root.'/sleutel met spaties';
+        file_put_contents($key, 'fictieve sleutel');
+
+        $result = $this->server->run(['pull', 'demo', '--db'], ['WPO_SSH_KEY' => $key, 'FAKE_REQUIRED_SSH_KEY' => $key]);
+
+        expect($result->successful())->toBeTrue($result->output().$result->errorOutput());
+        expect($this->server->imported())->toContain('live_options');
+    });
+
+    it('gebruikt het subpad en de sitesleutel voor de SFTP-export', function (): void {
+        $this->server->buildLocalSite();
+        $this->server->useSftp();
+        $this->server->fakeWeb([]);
+        $sites = $this->server->home.'/.config/wpsites/sites';
+        file_put_contents($sites, str_replace(['demo.test||', 'https://demo.test'], ['demo.test|-p 2200 -i /tmp/demo-key|', 'https://demo.test/blog/'], $this->server->sitesFile()));
+
+        $result = $this->server->run(['pull', 'demo', '--db'], ['FAKE_LIVE_PHP' => 'CREATE TABLE `wp_options` (id int);']);
+
+        expect($result->successful())->toBeTrue($result->errorOutput());
+        expect($this->server->calls())->toContain('curl https://demo.test/blog/wpo-', '-i /tmp/demo-key', 'open -u');
+    });
+
+    it('kiest de live tabelprefix als meerdere WordPress-sites dezelfde database gebruiken', function (): void {
+        $config = dirname($this->server->buildLocalSite()).'/wp-config.php';
+        file_put_contents($config, "<?php\n\$table_prefix = 'wp_';\n");
+
+        $result = $this->server->run(['pull', 'demo', '--db'], ['FAKE_DB_EXPORT' => 'shared', 'FAKE_REMOTE_PREFIX' => 'live_']);
+
+        expect($result->successful())->toBeTrue($result->errorOutput());
+        expect(file_get_contents($config))->toContain("\$table_prefix = 'live_';")->not->toContain("\$table_prefix = 'archief_';");
+    });
+
+    it('importeert geen andere installatie als de live options-tabel ontbreekt', function (): void {
+        $this->server->buildLocalSite();
+
+        $result = $this->server->run(['pull', 'demo', '--db'], ['FAKE_DB_EXPORT' => 'shared', 'FAKE_REMOTE_PREFIX' => 'missend_']);
+
+        expect($result->failed())->toBeTrue();
+        expect($result->errorOutput())->toContain("Tabel 'missend_options' ontbreekt");
+        expect($this->server->imported())->toBeNull();
+    });
+
+    it('meldt een mislukte expliciete database-export bij de eerste SFTP-build', function (): void {
+        $this->server->useSftp();
+        $this->server->fakeWeb([]);
+
+        $result = $this->server->run(['build', 'demo', '--dbpull'], ['FAKE_LIVE_PHP_EXIT' => '18']);
+
+        expect($result->failed())->toBeTrue();
+        expect($result->errorOutput())->toContain('Database ophalen via SFTP mislukt');
+        expect($this->server->sites.'/demo/.wpopen-ready')->not->toBeFile();
+    });
+
+    it('leest een gzip-export met een hoofdletterextensie en ingesprongen SQL', function (): void {
+        $this->server->buildLocalSite();
+        $dump = $this->server->root.'/dump.SQL.GZ';
+        $sql = "  create table `wp_options` (id int);\n";
+        file_put_contents($dump, gzencode($sql));
+
+        $result = $this->server->run(['build', 'demo', '--db', $dump]);
+
+        expect($result->successful())->toBeTrue($result->errorOutput());
+        expect($this->server->imported())->toBe($sql);
+    });
+
+    it('zet de oude database en configuratie terug als het omzetten van URL’s mislukt', function (): void {
+        $config = dirname($this->server->buildLocalSite()).'/wp-config.php';
+        $original = "<?php\n\$table_prefix = 'wp_';\n";
+        file_put_contents($config, $original);
+
+        $result = $this->server->run(['pull', 'demo', '--db'], [
+            'FAKE_LOCAL_SITE_URL' => 'https://demo.test',
+            'FAKE_URL_REWRITE_FAIL' => '1',
+        ]);
+
+        expect($result->failed())->toBeTrue();
+        expect($result->errorOutput())->toContain('Lokale database teruggezet', 'URL');
+        expect($this->server->imported())->toBe("lokale database\n");
+        expect(file_get_contents($config))->toBe($original);
+    });
 });
 
 describe('sitelijst', function (): void {
@@ -592,6 +675,7 @@ describe('Laravel', function (): void {
         expect($result->failed())->toBeTrue();
         expect($result->errorOutput())->toContain('DDEV kon de Laravel-database niet importeren');
         expect($result->output())->not->toContain('Database lokaal');
+        expect($this->server->imported())->toBe("lokale database\n");
     });
 
     it('herkent een Laravel-project en neemt het adres uit de .env over', function (): void {
@@ -854,13 +938,15 @@ describe('Laravel', function (): void {
     it('maakt een lokale .env met DDEV-database en zonder betaalsleutels van live', function (): void {
         $site = $this->server->laravelSite();
         mkdir($site['local'].'/.ddev');
+        file_put_contents($site['remote'].'/.env', "DB_URL=mysql://db:live-geheim@live.example.test/db\n", FILE_APPEND);
 
         $this->server->run(['fix', 'shop'])->throw();
         $env = file_get_contents($site['local'].'/.env');
 
-        expect($env)->toContain("APP_URL=https://shop.ddev.site\n", "DB_HOST=db\n", "DB_PASSWORD=db\n", "APP_ENV=local\n", "MAIL_MAILER=smtp\n", "MAIL_HOST=127.0.0.1\n", "MAIL_PORT=1025\n", "STRIPE_SECRET=\n")
+        expect($env)->toContain("APP_URL=https://shop.ddev.site\n", "DB_HOST=db\n", "DB_PASSWORD=db\n", "DB_URL=\n", "APP_ENV=local\n", "MAIL_MAILER=smtp\n", "MAIL_HOST=127.0.0.1\n", "MAIL_PORT=1025\n", "STRIPE_SECRET=\n")
             ->not->toContain('sk_live_123')
             ->not->toContain('geheim wachtwoord')
+            ->not->toContain('live-geheim')
             ->and(fileperms($site['local'].'/.env') & 0777)->toBe(0600);
     });
 
