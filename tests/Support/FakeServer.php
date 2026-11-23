@@ -79,6 +79,10 @@ final class FakeServer
               *"core version"*) echo "6.8.1";;
               *"core is-installed"*) exit 0;;
               *"config get table_prefix"*) echo "${FAKE_REMOTE_PREFIX:-wp_}";;
+              *"db export"*)
+                [ "${FAKE_DB_EXPORT:-ok}" != fail ] || { echo 'mysqldump: export mislukt' >&2; exit 2; }
+                [ "${FAKE_DB_EXPORT:-ok}" != empty ] || exit 0
+                printf 'CREATE TABLE `live_options` (option_name varchar(191));\nINSERT INTO `live_options` VALUES (\x27siteurl\x27);\n';;
               *"db import"*) cat > "$FAKE_IMPORTED";;
               *"option get home"*domains/tweede.test*) echo "https://tweede.test";;
               *"option get home"*) echo "https://tijdelijk.example.test";;
@@ -92,6 +96,25 @@ final class FakeServer
             echo "ddev $*" >> "$FAKE_LOG"
             case "$*" in
               *"db prefix"*) echo "lokaal_";;
+              export-db*)
+                [ "${FAKE_LOCAL_BACKUP:-ok}" != fail ] || { echo 'DDEV export mislukt' >&2; exit 1; }
+                for a in "$@"; do
+                  case "$a" in
+                    --file=*.gz) printf 'lokale database\n' | gzip > "${a#--file=}";;
+                    --file=*) printf 'lokale database\n' > "${a#--file=}";;
+                  esac
+                done;;
+              import-db*)
+                case "$2" in
+                  --file=*/local-db.sql.gz) gzip -dc "${2#--file=}" > "$FAKE_IMPORTED";;
+                  --file=*)
+                    [ "${FAKE_LOCAL_IMPORT:-ok}" != fail ] || { echo 'DDEV import mislukt' >&2; exit 1; }
+                    cat "${2#--file=}" > "$FAKE_IMPORTED";;
+                esac;;
+              *"wp config set table_prefix"*) printf "\$table_prefix = '%s';\n" "$5" >> wp-config.php;;
+              *"wp config create"*)
+                for a in "$@"; do case "$a" in --dbprefix=*) printf "<?php \$table_prefix = '%s';\n" "${a#--dbprefix=}" > wp-config.php;; esac; done;;
+              *"option get siteurl"*) echo 'https://demo.ddev.site';;
               # multisite: omzetten schrijft de constante, de test bepaalt de sitelijst en het nieuwe id
               *"multisite-convert"*) echo "define( 'MULTISITE', true );" >> wp-config.php;;
               *"site list"*) printf '%b' "${FAKE_SITE_LIST:-blog_id,domain\n1,nieuw.ddev.site\n}";;
@@ -304,7 +327,7 @@ final class FakeServer
             echo "curl $url" >> "$FAKE_LOG"
             case "$url" in
               *.ddev.site*) printf '%s' "${FAKE_LOCAL_HTTP:-000}"; exit 0;;
-              */wpo-*.php) printf '%s\n-- wpopen-done\n' "${FAKE_LIVE_PHP:-}" > "$out"; printf '200'; exit 0;;
+              */wpo-*.php) printf '%s\n-- wpopen-done\n' "${FAKE_LIVE_PHP:-}" > "$out"; printf '200'; exit "${FAKE_LIVE_PHP_EXIT:-0}";;
             esac
             key=$(printf '%s' "$url" | tr -c 'A-Za-z0-9.-' '_')
             rc=6; code=000; redirects=0; effective="$url"; type=""; message="Could not resolve host"
@@ -454,7 +477,7 @@ final class FakeServer
               export-db*)
                 for a in "$@"; do case "$a" in --file=*) echo "lokale database" | gzip > "${a#--file=}";; esac; done
                 exit 0;;
-              import-db*) echo "ddev $*" >> "$FAKE_LOG"; cat > /dev/null; exit 0;;
+              import-db*) echo "ddev $*" >> "$FAKE_LOG"; exit 0;;
             esac
             exec "$(dirname "$0")/ddev-base" "$@"
             BASH);
@@ -497,7 +520,9 @@ final class FakeServer
             # tijdelijk PHP-bestand van live_php (sites met alleen SFTP)
             if [ $post = 1 ]; then
               name="${url##*/}"
-              { if grep -qs wp_update_plugins "$root/server/public_html/$name"; then cat "$root/updates.json"; echo; else echo "✓ Cache geleegd (0 transients)"; fi
+              { if grep -qs wp_update_plugins "$root/server/public_html/$name"; then cat "$root/updates.json"; echo;
+                elif grep -qs 'SHOW TABLES LIKE' "$root/server/public_html/$name"; then echo 'CREATE TABLE `wp_options` (option_name varchar(191));';
+                else echo "✓ Cache geleegd (0 transients)"; fi
                 echo "-- wpopen-done"; } > "${out:-/dev/stdout}"
               printf 200; exit 0
             fi

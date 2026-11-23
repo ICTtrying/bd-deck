@@ -74,7 +74,7 @@
 #
 #   Algemeen: --yes slaat bevestigingsvragen over (de app vraagt zelf om bevestiging).
 set -euo pipefail
-WPO_VERSION="2.14.2"
+WPO_VERSION="2.14.3"
 DB="${WPO_DB:-$HOME/.config/wpsites/sites}"; mkdir -p "$(dirname "$DB")"; touch "$DB"
 BASE="${WP_SITES_DIR:-$HOME/wp-sites}"
 BACKUPS="${WPO_BACKUP_DIR:-$BASE/.wpopen-backups}"
@@ -209,7 +209,7 @@ lf() {
 # $2 = uitvoerbestand (leeg = stdout), $3 = 1 voor SHORTINIT (alleen database, geen plugins)
 live_php() {
   need lftp curl
-  local body="$1" out="${2:-}" short="${3:-0}" tok name tmp code base
+  local body="$1" out="${2:-}" short="${3:-0}" tok name tmp code base rc=0
   tok=$(rand 24); name="wpo-$(rand 6).php"; tmp=$(mktemp -d)
   {
     cat <<'PHP'
@@ -230,14 +230,18 @@ PHP
   } | sed -e "s/__TOKEN__/$tok/" -e "s/__EXPIRES__/$(( $(date +%s) + 900 ))/" > "$tmp/$name"
   base="${WPO_BASE:-https://${LIVEHOST:-${TARGET#*@}}}"
   lf "put -O '$ROOT' '$tmp/$name'" >/dev/null 2>&1 || { rm -rf "$tmp"; echo "✗ Hulpbestand uploaden mislukt" >&2; return 1; }
-  code=$(curl -sS -L --post301 --post302 --post303 --compressed --max-time 3600 -d "t=$tok" -o "$tmp/out" -w '%{http_code}' "$base/$name" 2>/dev/null || true)
+  code=$(curl -sS -L --post301 --post302 --post303 --compressed --max-time 3600 -d "t=$tok" -o "$tmp/out" -w '%{http_code}' "$base/$name") || rc=$?
   lf "rm -f '$ROOT/$name'" >/dev/null 2>&1 || true
-  if [ "$code" = 200 ] && tail -c 200 "$tmp/out" | grep -q -- '-- wpopen-done'; then
-    if [ -n "$out" ]; then mv "$tmp/out" "$out"; else sed '/^-- wpopen-done$/d' "$tmp/out"; fi
-    rm -rf "$tmp"; return 0
+  if [ "$rc" = 0 ] && [ "$code" = 200 ] && [ "$(tail -c 200 "$tmp/out" 2>/dev/null | tail -n 1)" = '-- wpopen-done' ]; then
+    if [ -n "$out" ]; then mv "$tmp/out" "$out" || rc=$?; else sed '/^-- wpopen-done$/d' "$tmp/out" || rc=$?; fi
+    rm -rf "$tmp"; return "$rc"
   fi
-  echo "✗ Live PHP mislukt (HTTP ${code:-?}). Mogelijk blokkeert de site/firewall het hulpbestand." >&2
-  head -c 300 "$tmp/out" >&2 2>/dev/null || true
+  if [ "$short" = 1 ] && [ "$code" = 200 ]; then
+    warn "De live database-export is onvolledig (HTTP 200)."
+  else
+    warn "Live PHP mislukt (HTTP ${code:-?}). Mogelijk blokkeert de site/firewall het hulpbestand."
+    if [ "$short" != 1 ]; then head -c 300 "$tmp/out" >&2 2>/dev/null || true; fi
+  fi
   rm -rf "$tmp"; return 1
 }
 live_eval()  { if [ "$MODE" = sftp ]; then live_php "$1"; else live_wp eval "$1"; fi; }
@@ -1084,13 +1088,23 @@ PY
 
 # ───────────── back-ups: $BACKUPS/<slug>/<tijd>-<soort>/ ─────────────
 new_backup() {  # soort → zet BK
-  BK="$BACKUPS/$SLUG/$(date +%Y%m%d-%H%M%S)-$1"; mkdir -p "$BK"
+  local parent="$BACKUPS/$SLUG" stamp
+  stamp=$(date +%Y%m%d-%H%M%S); mkdir -p "$parent"
+  BK="$parent/$stamp-$1"
+  if ! mkdir "$BK" 2>/dev/null; then BK=$(mktemp -d "$parent/$stamp-XXXXXX-$1"); fi
   chmod 700 "$BACKUPS" "$BACKUPS/$SLUG" 2>/dev/null || true
   printf 'kind=%s\nsite=%s\ncreated=%s\n' "$1" "$NAME" "$(date -Is)" > "$BK/meta"
 }
 meta() { echo "$1=$2" >> "$BK/meta"; }
 backup_local() {  # lokale database + git-repo (inclusief niet-gecommit werk)
-  (cd "$PROJ" && ddev export-db --file="$BK/local-db.sql.gz" >/dev/null 2>&1) && ok "Lokale database bewaard" || warn "Lokale database kon niet bewaard worden"
+  local dump="$BK/local-db.sql.gz"
+  if (cd "$PROJ" && ddev export-db --file="$dump" >/dev/null) && [ -s "$dump" ]; then
+    ok "Lokale database bewaard"
+  else
+    rm -f "$dump"
+    warn "Lokale database kon niet bewaard worden"
+    [ "${1:-}" != require-db ] || return 1
+  fi
   if [ -d "$LWPC/.git" ]; then
     local wip; wip=$(git -C "$LWPC" stash create 2>/dev/null || true)
     [ -n "$wip" ] && git -C "$LWPC" update-ref refs/wpopen/wip "$wip"
@@ -1273,9 +1287,13 @@ bootstrap() {
   step "Code ophalen…"
   mkdir -p "$LWPC"; rsync -az -e "$SSHE" "${EXC[@]}" "$TARGET:$REMOTE/" "$LWPC/"
   pull_avia
-  step "Database ophalen…"
-  f=$(fetch_db_ssh) || die "Database ophalen mislukt."
-  import_db "$f"; rm -rf "$(dirname "$f")"   # prefix, URL's, uploads-proxy en plugins regelt import_db
+  if [ -n "${DBFILE:-}" ]; then
+    import_db "$DBFILE"
+  else
+    step "Database ophalen…"
+    f=$(fetch_db_ssh) || die "Database ophalen via SSH mislukt."
+    import_db "$f" "" auto
+  fi
   cd "$PROJ"
   init_git
   touch "$PROJ/.wpopen-ready"
@@ -1310,26 +1328,40 @@ init_git() {  # .gitignore automatisch: actief (child)thema + plugins van dezelf
 }
 
 fetch_db_ssh() {   # echo pad naar .sql (SSH-sites: via WP-CLI)
-  local out; out="$(mktemp -d)/db.sql"
-  rssh "wp db export - --single-transaction --path='$ROOT'" > "$out" || return 1
-  echo "$out"
+  local tmp
+  tmp=$(mktemp -d) || return 1
+  if ! live_wp db export - --single-transaction --quick > "$tmp/db.sql"; then
+    rm -rf "$tmp"; return 1
+  fi
+  if [ ! -s "$tmp/db.sql" ]; then
+    warn "WP-CLI leverde een lege database-export op"
+    rm -rf "$tmp"; return 1
+  fi
+  printf '%s\n' "$tmp/db.sql"
 }
 
 fetch_db_sftp() {   # echo pad naar .sql (alleen SFTP): tijdelijk PHP-exportbestand op de site
-  local out; out="$(mktemp -d)/db.sql"
+  local tmp out
+  tmp=$(mktemp -d) || return 1
+  out="$tmp/db.sql"
   echo "↓ Database ophalen via tijdelijk exportbestand…" >&2
   live_php "$(cat <<'PHP'
 global $wpdb;
 $db = $wpdb->dbh;
 $esc = function ($v) use ($db) { return ($db instanceof mysqli) ? mysqli_real_escape_string($db, (string)$v) : addslashes((string)$v); };
 echo "SET NAMES utf8mb4;\nSET FOREIGN_KEY_CHECKS=0;\nSET sql_mode='NO_AUTO_VALUE_ON_ZERO';\n";
-$tables = $wpdb->get_col("SHOW TABLES LIKE '" . $wpdb->esc_like($wpdb->base_prefix) . "%'");
+$wpdb->suppress_errors(true);
+$tables = $wpdb->get_col($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($wpdb->base_prefix) . '%'));
+if ($wpdb->last_error || !$tables) { exit; }
 foreach ($tables as $tb) {
+  $tb = str_replace('`', '``', $tb);
   $c = $wpdb->get_row("SHOW CREATE TABLE `$tb`", ARRAY_N);
+  if ($wpdb->last_error || !isset($c[1])) { exit; }
   echo "DROP TABLE IF EXISTS `$tb`;\n" . $c[1] . ";\n";
   $off = 0; $n = 100;
   do {
     $rows = $wpdb->get_results("SELECT * FROM `$tb` LIMIT $off,$n", ARRAY_A);
+    if ($wpdb->last_error) { exit; }
     if (!$rows) { break; }
     $vals = array();
     foreach ($rows as $r) {
@@ -1344,25 +1376,75 @@ foreach ($tables as $tb) {
 }
 echo "SET FOREIGN_KEY_CHECKS=1;\n";
 PHP
-)" "$out" 1 || { rm -rf "$(dirname "$out")"; return 1; }
+)" "$out" 1 || { rm -rf "$tmp"; return 1; }
   echo "$out"
 }
 
-dbcat() { case "$1" in *.zip) unzip -p "$1";; *) zcat -f "$1";; esac; }
-import_db() {   # bestand (.sql, .sql.gz of .zip) → lokale DDEV-site
-  local f="$1" prefix old
+dbcat() {
+  case "$1" in
+    *.zip)
+      python3 - "$1" <<'PY'
+import shutil, sys, zipfile
+
+with zipfile.ZipFile(sys.argv[1]) as archive:
+    dumps = [entry for entry in archive.infolist() if entry.filename.lower().endswith(('.sql', '.mysql'))]
+    if len(dumps) != 1:
+        sys.exit('Het ZIP-bestand moet één SQL-export bevatten')
+    with archive.open(dumps[0]) as dump:
+        shutil.copyfileobj(dump, sys.stdout.buffer)
+PY
+      ;;
+    *.gz) gzip -dc -- "$1";;
+    *) cat -- "$1";;
+  esac
+}
+
+restore_failed_import() {
+  local backup="$1"
+  if [ -n "$backup" ]; then
+    if ddev import-db --file="$backup" >/dev/null; then
+      warn "Lokale database teruggezet uit de back-up"
+    else
+      warn "Terugzetten mislukt. Herstel met: wpopen restore $NAME $(basename "$(dirname "$backup")") --local-db"
+    fi
+  fi
+}
+
+import_db() (   # bestand (.sql, .sql.gz of .zip) → lokale DDEV-site
+  local f="$1" backup="${2:-}" tmp="" downloaded="" sql prefix old
+  [ "${3:-}" != auto ] || downloaded=$(dirname "$f")
+  trap '[ -z "$tmp" ] || rm -rf "$tmp"; [ -z "$downloaded" ] || rm -rf "$downloaded"' EXIT
   [ -f "$f" ] || die "Databasebestand niet gevonden: $f"
+  tmp=$(mktemp -d) || die "Kon geen tijdelijke map maken voor de database-import."
+  sql="$tmp/db.sql"
+  case "$f" in
+    *.sql) sql="$f";;
+    *) dbcat "$f" > "$sql" || die "Databasebestand kon niet worden gelezen: $f";;
+  esac
+  prefix=$(dump_prefix "$sql") || die "Databasebestand kon niet worden gelezen: $f"
+  [ -n "$prefix" ] || die "Geen WordPress-options-tabel gevonden in de database-export."
+  prefix="${WPO_PREFIX:-${prefix%options}}"
+  [[ "$prefix" =~ ^[A-Za-z0-9_]*$ ]] || die "Ongeldige WordPress-tabelprefix."
   cd "$PROJ"
-  prefix=$(dump_prefix "$f" || true)
-  [ -n "$prefix" ] || prefix=$(dbcat "$f" | grep -m1 -oE 'CREATE TABLE (IF NOT EXISTS )?`[A-Za-z0-9_]*options`' | sed -E 's/.*`(.*)options`/\1/' || true)
-  prefix="${prefix:-wp_}"
-  # tabelprefix van live overnemen: wp-config.php opnieuw schrijven met de juiste prefix (betrouwbaarder dan een regel aanpassen)
-  ddev wp config create --dbname=db --dbuser=db --dbpass=db --dbhost=db --dbprefix="$prefix" --skip-check --force >/dev/null \
-    || die "Kon wp-config.php niet schrijven."
-  grep -qE "table_prefix[[:space:]]*=[[:space:]]*'$prefix'" "$PROJ/wp-config.php" \
-    || die "De prefix '$prefix' staat niet in $PROJ/wp-config.php."
+  if [ -f wp-config.php ]; then cp -p wp-config.php "$tmp/wp-config.php"; fi
   step "Database importeren (prefix $prefix)…"
-  dbcat "$f" | ddev import-db
+  if ! ddev import-db --file="$sql"; then
+    restore_failed_import "$backup"
+    die "DDEV kon de database niet importeren. Zie de melding hierboven."
+  fi
+  if [ -f "$tmp/wp-config.php" ]; then
+    if ! ddev wp config set table_prefix "$prefix" --type=variable >/dev/null \
+      || ! sed -i 's/#ddev-generated: *//' wp-config.php; then
+      cp -p "$tmp/wp-config.php" wp-config.php
+      restore_failed_import "$backup"
+      die "Kon de tabelprefix in wp-config.php niet aanpassen."
+    fi
+  else
+    ddev wp config create --dbname=db --dbuser=db --dbpass=db --dbhost=db --dbprefix="$prefix" --skip-check >/dev/null || {
+      restore_failed_import "$backup"
+      die "Kon wp-config.php niet schrijven."
+    }
+  fi
   # let op: deze stappen draaien zonder plugins/thema, zodat een live plugin de import niet kan laten crashen
   local W="--skip-plugins --skip-themes"
   # shellcheck disable=SC2086
@@ -1371,7 +1453,8 @@ import_db() {   # bestand (.sql, .sql.gz of .zip) → lokale DDEV-site
     echo "✗ WordPress kan de geïmporteerde database niet lezen (prefix '$prefix'). De echte melding:" >&2
     # shellcheck disable=SC2086
     ddev wp option get siteurl $W >&2 || true
-    echo "  Config: $(grep -n 'table_prefix' "$PROJ/wp-config.php" | tr '\n' ' ')" >&2
+    if [ -n "$backup" ] && [ -f "$tmp/wp-config.php" ]; then cp -p "$tmp/wp-config.php" wp-config.php; fi
+    restore_failed_import "$backup"
     die "Importeren afgebroken."
   fi
   old="${old#*//}"; old="${old%%/*}"
@@ -1392,7 +1475,7 @@ import_db() {   # bestand (.sql, .sql.gz of .zip) → lokale DDEV-site
   activate_all_plugins
   fix_site refresh
   ok "Database geïmporteerd — login: dev / dev  (of je eigen live-gebruiker met het live-wachtwoord)"
-}
+)
 
 # Enfold: gegenereerde icon-fonts staan in uploads en worden via PHP include geladen, dus de nginx-proxy volstaat niet
 pull_avia() {
@@ -1598,12 +1681,19 @@ unset( $wpopen_mailers );
 PHP
 }
 
-# prefix met de meeste data in de dump (een dump kan meerdere installs bevatten); WPO_PREFIX forceert een waarde
+# Options-tabel met de meeste data; bij lege tabellen de eerste CREATE TABLE.
 dump_prefix() {
-  [ -n "${WPO_PREFIX:-}" ] && { echo "$WPO_PREFIX"; return; }
-  dbcat "$1" | awk '
-    /^INSERT INTO `[A-Za-z0-9_]*options` / { t=$3; gsub(/`/,"",t); sub(/options$/,"",t); s[t]+=length($0) }
-    END { for (k in s) if (s[k]>m) { m=s[k]; b=k } print b }'
+  awk '
+    match($0, /^(CREATE TABLE( IF NOT EXISTS)?|INSERT INTO)[[:space:]]+`?[A-Za-z0-9_]*options`?[[:space:](]/) {
+      table=substr($0, 1, RLENGTH-1)
+      sub(/^.*[[:space:]]/, "", table); gsub(/`/, "", table)
+      if (!first) first=table
+      if ($1=="INSERT") {
+        size[table]+=length($0)
+        if (size[table]>largest) { largest=size[table]; best=table }
+      }
+    }
+    END { print (best ? best : first) }' "$1"
 }
 
 # prefix van de tabellen die nu echt in de lokale database staan (grootste options-tabel met een siteurl)
@@ -1682,7 +1772,8 @@ heal_fatals() {
     slug=$(grep -iE 'fatal error|uncaught|parse error' <<<"$out" | grep -oE 'wp-content/plugins/[^/ :]+' | sed -n '1s#.*/##p' || true)   # sed i.p.v. head: SIGPIPE + pipefail zou het script stilzetten
     if [ -z "$slug" ]; then
       echo "! WordPress start niet en de oorzaak is geen plugin. Eerste melding:" >&2
-      grep -m3 -iE 'fatal|error' <<<"$out" | cut -c1-300 >&2; return 0
+      grep -m3 -iE 'fatal|error' <<<"$out" | cut -c1-300 >&2 || true
+      return 0
     fi
     # shellcheck disable=SC2086
     ddev wp plugin deactivate "$slug" $W >/dev/null 2>&1 && ok "Plugin '$slug' veroorzaakte een fatale fout en is lokaal uitgezet"
@@ -1752,7 +1843,7 @@ bootstrap_sftp() {   # alleen SFTP: code ophalen, database via tijdelijk exportb
   local auto=0
   if [ -z "${DBFILE:-}" ]; then DBFILE=$(fetch_db_sftp) && auto=1 || DBFILE=""; fi
   if [ -n "${DBFILE:-}" ]; then
-    import_db "$DBFILE"; [ $auto = 1 ] && rm -rf "$(dirname "$DBFILE")"
+    if [ $auto = 1 ]; then import_db "$DBFILE" "" auto; else import_db "$DBFILE"; fi
   else
     note "Database niet automatisch opgehaald: lokale site wordt een lege WordPress. Later: wpopen pull $NAME --db"
     ddev wp core is-installed 2>/dev/null || ddev wp core install --url="https://$SLUG.ddev.site" --title="$NAME" --admin_user=dev --admin_password=dev \
@@ -1786,12 +1877,33 @@ pull_code() {
   gitc merge -q --no-edit main 2>/dev/null || { git merge --abort 2>/dev/null || true; die "dev botst met de nieuwe live-staat. Voeg main handmatig samen met dev (bv. in VS Code)."; }
   ok "Code van live opgehaald (main → dev)"
 }
+replace_wordpress_db() (  # bestaande lokale database vervangen, via live of een bestand
+  local f="${1:-}"
+  mkdir -p "$BACKUPS/$SLUG"
+  exec 9>"$BACKUPS/$SLUG/.local-db.lock"
+  flock 9 || die "Kon de lokale database niet vergrendelen voor import."
+  if [ -n "$f" ]; then new_backup import-db; else new_backup pull-db; fi
+  backup_local require-db || die "Database importeren afgebroken omdat de lokale back-up is mislukt."
+  if [ -n "$f" ]; then
+    import_db "$f" "$BK/local-db.sql.gz"
+    return
+  fi
+  if [ "$MODE" = sftp ]; then
+    f=$(fetch_db_sftp) || die "Database ophalen via SFTP mislukt."
+  else
+    step "Database ophalen…"
+    f=$(fetch_db_ssh) || die "Database ophalen via SSH mislukt."
+  fi
+  import_db "$f" "$BK/local-db.sql.gz" auto
+)
+
 pull_db() {
-  local f
-  new_backup pull-db; backup_local
-  if is_laravel; then laravel_pull_db || die "Database ophalen mislukt."; return 0; fi
-  if [ "$MODE" = sftp ]; then f=$(fetch_db_sftp) || die "Database ophalen mislukt."; else step "Database ophalen…"; f=$(fetch_db_ssh) || die "Database ophalen mislukt."; fi
-  import_db "$f"; rm -rf "$(dirname "$f")"
+  if is_laravel; then
+    new_backup pull-db; backup_local
+    laravel_pull_db || die "Database ophalen mislukt."
+  else
+    replace_wordpress_db
+  fi
 }
 
 cmd_open() {
@@ -1800,6 +1912,7 @@ cmd_open() {
   get "$1"; shift
   local pull=0 live=0 dbpull=0 DBFILE=""
   while [ $# -gt 0 ]; do case "$1" in --pull) pull=1;; --live) live=1;; --dbpull) dbpull=1;; --db) shift; DBFILE="$(readlink -f "${1:-}")";; esac; shift; done
+  if [ -n "$DBFILE" ]; then need_wordpress; fi
   if [ $live = 1 ]; then
     need_live
     [ "$MODE" = sftp ] && die "--live kan niet: $NAME heeft alleen SFTP, geen SSH."
@@ -1814,8 +1927,9 @@ cmd_open() {
     else case "$MODE" in local) bootstrap_local;; sftp) bootstrap_sftp;; *) bootstrap;; esac; fi
   fi
   [ $pull = 1 ] && pull_code
-  cd "$PROJ"; ddev_up >/dev/null; fix_site
-  if [ -n "$DBFILE" ] && [ $built = 0 ]; then new_backup import-db; backup_local; import_db "$DBFILE"; fi
+  cd "$PROJ"; ddev_up >/dev/null
+  if [ $built = 1 ] || { [ -z "$DBFILE" ] && [ $dbpull = 0 ]; }; then fix_site; fi
+  if [ -n "$DBFILE" ] && [ $built = 0 ]; then replace_wordpress_db "$DBFILE"; fi
   [ $dbpull = 1 ] && [ $built = 0 ] && pull_db   # verse database van live (overschrijft de lokale, die eerst bewaard wordt)
   ensure_dev
   if is_laravel; then ok "Branch: dev   |   $LOCALURL"; else ok "Branch: dev   |   login: dev / dev"; fi
@@ -2001,17 +2115,22 @@ mirror --parallel=6 -x '^index\.php\$' -x '^(storage|hot)(/|\$)' ${inproj:+-x '^
     rsync -az -e "$SSHE" --exclude=/index.php --exclude=/storage --exclude=/hot ${inproj:+--exclude="/$inproj"} "$TARGET:$PUBDIR/" "$dest/public/"
   fi
 }
-laravel_pull_db() {  # live → lokale DDEV-database
-  [ "$MODE" = ssh ] || { note "Database niet opgehaald: alleen SFTP. De lokale database blijft leeg; draai zelf migraties: wpopen artisan $NAME migrate"; return 0; }
-  local tmp conn; tmp=$(mktemp -d)
+laravel_pull_db() (  # live → lokale DDEV-database
+  [ "$MODE" = ssh ] || { warn "Voor het ophalen van een Laravel-database is SSH nodig."; return 1; }
+  local tmp conn; tmp=$(mktemp -d) || return 1
+  trap 'rm -rf "$tmp"' EXIT
   step "Database ophalen…"
-  laravel_db_dump > "$tmp/db.sql" || { rm -rf "$tmp"; warn "Database ophalen mislukt"; return 1; }
-  conn=$(grep -m1 '^DB_CONNECTION=' "$PROJ/.env" | cut -d= -f2-)
-  cd "$PROJ"
-  if [ "$conn" = sqlite ]; then mkdir -p database; cp "$tmp/db.sql" database/database.sqlite
-  else ddev import-db --file="$tmp/db.sql" >/dev/null; fi
-  rm -rf "$tmp"; ok "Database lokaal"
-}
+  laravel_db_dump > "$tmp/db.sql" || { warn "Live database exporteren mislukt"; return 1; }
+  [ -s "$tmp/db.sql" ] || { warn "De live database-export is leeg"; return 1; }
+  cd "$PROJ" || return 1
+  conn=$(sed -nE "/^DB_CONNECTION=/ { s/^DB_CONNECTION=[\"']?([[:alnum:]_]+).*/\1/p; q; }" .env) || return 1
+  if [ "$conn" = sqlite ]; then
+    mkdir -p database && cp "$tmp/db.sql" database/database.sqlite || return 1
+  else
+    ddev import-db --file="$tmp/db.sql" >/dev/null || { warn "DDEV kon de Laravel-database niet importeren"; return 1; }
+  fi
+  ok "Database lokaal"
+)
 laravel_init_git() {
   cd "$PROJ"
   git init -q -b main 2>/dev/null || git init -q

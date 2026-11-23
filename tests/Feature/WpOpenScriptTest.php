@@ -12,6 +12,99 @@ afterEach(function (): void {
     $this->server->destroy();
 });
 
+describe('WordPress-database ophalen', function (): void {
+    it('importeert de SSH-dump en behoudt bestaande lokale instellingen', function (): void {
+        $config = dirname($this->server->buildLocalSite()).'/wp-config.php';
+        file_put_contents($config, "<?php\n// #ddev-generated: WordPress settings\ndefine('WP_DEBUG', true);\n");
+
+        $result = $this->server->run(['pull', 'demo', '--db']);
+
+        expect($result->successful())->toBeTrue($result->errorOutput());
+        expect($this->server->imported())->toContain('CREATE TABLE `live_options`');
+        expect(file_get_contents($config))->toContain("define('WP_DEBUG', true);", "\$table_prefix = 'live_';")
+            ->not->toContain('#ddev-generated');
+    });
+
+    it('stopt vóór de import als de live-export faalt of leeg is', function (string $export, string $message): void {
+        $this->server->buildLocalSite();
+
+        $result = $this->server->run(['pull', 'demo', '--db'], ['FAKE_DB_EXPORT' => $export]);
+
+        expect($result->failed())->toBeTrue();
+        expect($result->errorOutput())->toContain($message);
+        expect($this->server->calls())->not->toContain('ddev import-db');
+    })->with([
+        'mislukt' => ['fail', 'mysqldump: export mislukt'],
+        'leeg' => ['empty', 'lege database-export'],
+    ]);
+
+    it('stopt vóór de import als de lokale back-up mislukt', function (): void {
+        $this->server->buildLocalSite();
+
+        $result = $this->server->run(['pull', 'demo', '--db'], ['FAKE_LOCAL_BACKUP' => 'fail']);
+
+        expect($result->failed())->toBeTrue();
+        expect($result->errorOutput())->toContain('DDEV export mislukt');
+        expect($this->server->calls())->not->toContain('ddev import-db');
+    });
+
+    it('zet de lokale database terug en behoudt de configuratie als DDEV de import afbreekt', function (): void {
+        $config = dirname($this->server->buildLocalSite()).'/wp-config.php';
+        $original = "<?php\n\$table_prefix = 'wp_';\n";
+        file_put_contents($config, $original);
+
+        $result = $this->server->run(['pull', 'demo', '--db'], ['FAKE_LOCAL_IMPORT' => 'fail']);
+
+        expect($result->failed())->toBeTrue();
+        expect($result->errorOutput())->toContain('DDEV import mislukt', 'Lokale database teruggezet');
+        expect($this->server->imported())->toBe("lokale database\n");
+        expect(file_get_contents($config))->toBe($original);
+    });
+
+    it('wijst een beschadigd gzip-bestand af vóór DDEV de lokale database vervangt', function (): void {
+        $this->server->buildLocalSite();
+        $dump = $this->server->root.'/dump.sql.gz';
+        file_put_contents($dump, substr(gzencode('CREATE TABLE `wp_options` (id int);'), 0, -5));
+
+        $result = $this->server->run(['build', 'demo', '--db', $dump]);
+
+        expect($result->failed())->toBeTrue();
+        expect($result->errorOutput())->toContain('Databasebestand kon niet worden gelezen');
+        expect($this->server->calls())->not->toContain('ddev import-db');
+    });
+
+    it('importeert één SQL-export uit een ZIP met extra bestanden', function (): void {
+        $this->server->buildLocalSite();
+        $dump = $this->server->root.'/dump.zip';
+        $sql = "CREATE TABLE `zip_options` (id int);\n";
+        $zip = new ZipArchive;
+        $zip->open($dump, ZipArchive::CREATE);
+        $zip->addFromString('lees-mij.txt', 'Extra exportinformatie');
+        $zip->addFromString('backup/database.sql', $sql);
+        $zip->close();
+
+        $result = $this->server->run(['build', 'demo', '--db', $dump]);
+
+        expect($result->successful())->toBeTrue($result->errorOutput());
+        expect($this->server->imported())->toBe($sql);
+    });
+
+    it('stopt vóór de import als de SFTP-export tijdens de download wordt onderbroken', function (): void {
+        $this->server->buildLocalSite();
+        $this->server->useSftp();
+        $this->server->fakeWeb([]);
+
+        $result = $this->server->run(['pull', 'demo', '--db'], [
+            'FAKE_LIVE_PHP' => 'CREATE TABLE `wp_options` (id int);',
+            'FAKE_LIVE_PHP_EXIT' => '18',
+        ]);
+
+        expect($result->failed())->toBeTrue();
+        expect($result->errorOutput())->toContain('Database ophalen via SFTP mislukt');
+        expect($this->server->calls())->not->toContain('ddev import-db');
+    });
+});
+
 describe('sitelijst', function (): void {
     it('vult oude regels aan met modus en provider', function (): void {
         file_put_contents($this->server->home.'/.config/wpsites/sites', "oud|u@site-serverwpmu.tempurl.host||site/public_html/wp-content|sftp\nhost|u@example.com|-p 65002|/home/u/public_html/wp-content\n");
@@ -388,6 +481,17 @@ describe('sites zoeken op een server', function (): void {
 });
 
 describe('Laravel', function (): void {
+    it('meldt een mislukte DDEV-import van de Laravel-database als fout', function (): void {
+        $site = $this->server->laravelSite();
+        file_put_contents($site['local'].'/.env', "DB_CONNECTION=mysql\n");
+
+        $result = $this->server->run(['pull', 'shop', '--db'], ['FAKE_LOCAL_IMPORT' => 'fail']);
+
+        expect($result->failed())->toBeTrue();
+        expect($result->errorOutput())->toContain('DDEV kon de Laravel-database niet importeren');
+        expect($result->output())->not->toContain('Database lokaal');
+    });
+
     it('herkent een Laravel-project en neemt het adres uit de .env over', function (): void {
         $site = $this->server->laravelSite();
         file_put_contents($this->server->home.'/.config/wpsites/sites', "demo|wesley@demo.test||{$this->server->remote}|ssh|other|https://demo.test\n");
