@@ -74,7 +74,7 @@
 #
 #   Algemeen: --yes slaat bevestigingsvragen over (de app vraagt zelf om bevestiging).
 set -euo pipefail
-WPO_VERSION="2.14.3"
+WPO_VERSION="2.14.4"
 DB="${WPO_DB:-$HOME/.config/wpsites/sites}"; mkdir -p "$(dirname "$DB")"; touch "$DB"
 BASE="${WP_SITES_DIR:-$HOME/wp-sites}"
 BACKUPS="${WPO_BACKUP_DIR:-$BASE/.wpopen-backups}"
@@ -83,7 +83,7 @@ KEY="${WPO_SSH_KEY:-$HOME/.ssh/id_ed25519}"
 SEARCH_ROOTS="${WPO_SEARCH_ROOTS:-\"\$HOME\" /var/www /srv}"
 EXC=(--exclude=uploads --exclude=cache --exclude=upgrade --exclude='/*backup*' --exclude=updraft
      --exclude=ai1wm-backups --exclude=wflogs --exclude=debug.log
-     --exclude=object-cache.php --exclude=advanced-cache.php)
+     --exclude=.git --exclude=object-cache.php --exclude=advanced-cache.php)
 die()  { echo "✗ $*" >&2; exit 1; }
 step() { echo "→ $*"; }
 ok()   { echo "✓ $*"; }
@@ -204,6 +204,7 @@ lf() {
     echo "set net:max-retries 2"; echo "open -u '${TARGET%@*},' ${port}sftp://${TARGET#*@}"; printf '%s\n' "$1"; } > "$f"
   lftp -f "$f" || rc=$?; rm -f "$f"; return $rc
 }
+lf_strict() { lf $'set cmd:fail-exit yes\n'"$1"; }
 
 # PHP tijdelijk op de live site draaien (voor sites zonder SSH): $1 = code na het laden van WordPress,
 # $2 = uitvoerbestand (leeg = stdout), $3 = 1 voor SHORTINIT (alleen database, geen plugins)
@@ -1087,6 +1088,13 @@ PY
 }
 
 # ───────────── back-ups: $BACKUPS/<slug>/<tijd>-<soort>/ ─────────────
+lock_site_sync() {
+  [ "${SYNC_LOCKED_SITE:-}" != "$SLUG" ] || return 0
+  mkdir -p "$BACKUPS/$SLUG"
+  exec {SYNC_LOCK_FD}>"$BACKUPS/$SLUG/.sync.lock"
+  flock -n "$SYNC_LOCK_FD" || die "Er loopt al een overdracht of herstelactie voor $NAME."
+  SYNC_LOCKED_SITE="$SLUG"
+}
 new_backup() {  # soort → zet BK
   local parent="$BACKUPS/$SLUG" stamp
   stamp=$(date +%Y%m%d-%H%M%S); mkdir -p "$parent"
@@ -1113,18 +1121,26 @@ backup_local() {  # lokale database + git-repo (inclusief niet-gecommit werk)
   fi
   return 0
 }
-backup_live_db() {
+backup_live_db() (
+  local tmp f
+  tmp=$(mktemp -d "$BK/.live-db.XXXXXX") || return 1
+  trap 'rm -rf "$tmp"; if [ -n "${f:-}" ]; then rm -rf "$(dirname "$f")"; fi' EXIT
   step "Back-up van de live database…"
   if is_laravel; then
-    laravel_db_dump | gzip > "$BK/live-db.sql.gz" || { rm -f "$BK/live-db.sql.gz"; return 1; }
+    laravel_db_dump > "$tmp/db.sql" || return 1
+    [ -s "$tmp/db.sql" ] || { warn "De live database-export is leeg"; return 1; }
   elif [ "$MODE" = sftp ]; then
-    local f; f=$(fetch_db_sftp) || return 1
-    gzip -c "$f" > "$BK/live-db.sql.gz"; rm -rf "$(dirname "$f")"
+    f=$(fetch_db_sftp) || return 1
   else
-    rssh "wp db export - --single-transaction --path='$ROOT'" | gzip > "$BK/live-db.sql.gz" || { rm -f "$BK/live-db.sql.gz"; return 1; }
+    f=$(fetch_db_ssh) || return 1
   fi
+  if [ "${1:-}" != allow-partial ] && [ -n "${f:-}" ] && [ -z "$(dump_prefix "$f")" ]; then
+    warn "De live database-export bevat geen WordPress-options-tabel."; return 1
+  fi
+  gzip -c -- "${f:-$tmp/db.sql}" > "$tmp/live-db.sql.gz" || return 1
+  mv -- "$tmp/live-db.sql.gz" "$BK/live-db.sql.gz" || return 1
   ok "Live database bewaard ($(du -h "$BK/live-db.sql.gz" | cut -f1))"
-}
+)
 # ── losse bestanden tussen een lokale map en live; paden in de lijst zijn relatief ──
 put_files() {  # lokale-map live-map lijstbestand
   local lb="$1" rb="$2" list="$3" rc=0
@@ -1133,38 +1149,60 @@ put_files() {  # lokale-map live-map lijstbestand
     local cmds="" d f
     while IFS= read -r d; do cmds+="mkdir -p -f '$rb/$d'"$'\n'; done < <(xargs -d '\n' -n1 dirname < "$list" | sort -u)
     while IFS= read -r f; do [ -n "$f" ] && cmds+="put -O '$rb/$(dirname "$f")' '$f'"$'\n'; done < "$list"
-    lf "lcd '$lb'"$'\n'"$cmds" >/dev/null || rc=$?
+    lf_strict "lcd '$lb'"$'\n'"$cmds" >/dev/null || rc=$?
   else
     need rsync
     local rlog; rlog=$(mktemp)
-    (cd "$lb" && rsync -az -e "$SSHE" --files-from="$list" ./ "$TARGET:$rb/") > "$rlog" 2>&1 || rc=$?
+    (cd "$lb" && rsync -az --ignore-times -e "$SSHE" --files-from="$list" ./ "$TARGET:$rb/") > "$rlog" 2>&1 || rc=$?
     cat "$rlog" >&2; rm -f "$rlog"
   fi
   return $rc
 }
+sftp_list_dir() {  # get_files bewaart de directorylijsten per back-up in entries
+  local dir="$1" parent name
+  [[ -v 'entries[$dir]' ]] && return 0
+  if [ "$dir" != . ]; then
+    parent=$(dirname -- "$dir"); name=$(basename -- "$dir")
+    sftp_list_dir "$parent" || return 1
+    if ! grep -Fxq -- "$name/" <<<"${entries[$parent]}"; then
+      if grep -Fxq -- "$name" <<<"${entries[$parent]}"; then
+        warn "Live-pad is geen map: $rb/$dir"; return 1
+      fi
+      entries[$dir]=''; return 0
+    fi
+  fi
+  entries[$dir]=$(lf_strict "cls -1aB '$rb/$dir/'")
+}
 get_files() {  # lokale-map live-map lijstbestand (ontbrekende bestanden op live zijn geen fout)
-  local lb="$1" rb="$2" list="$3" f
-  mkdir -p "$lb"
+  local lb="$1" rb="$2" list="$3" f dir name cmds=''
+  mkdir -p "$lb" || return 1
   if [ "$MODE" = sftp ]; then
-    local cmds="set cmd:fail-exit no"$'\n'
+    local -A entries=()
+    sftp_list_dir . || return 1
     while IFS= read -r f; do
       [ -n "$f" ] || continue
-      mkdir -p "$lb/$(dirname "$f")"
-      cmds+="get -O '$lb/$(dirname "$f")' '$rb/$f'"$'\n'
+      dir=$(dirname -- "$f"); name=$(basename -- "$f")
+      sftp_list_dir "$dir" || return 1
+      if grep -Fxq -- "$name/" <<<"${entries[$dir]}"; then
+        warn "Live-pad is een map: $rb/$f"; return 1
+      fi
+      grep -Fxq -- "$name" <<<"${entries[$dir]}" || continue
+      mkdir -p "$lb/$dir" || return 1
+      cmds+="get -O '$lb/$dir' '$rb/$f'"$'\n'
     done < "$list"
-    lf "$cmds" >/dev/null 2>&1 || true
+    [ -z "$cmds" ] || lf_strict "$cmds" >/dev/null
   else
-    rsync -az -e "$SSHE" --files-from="$list" --ignore-missing-args "$TARGET:$rb/" "$lb/" 2>/dev/null || true
+    rsync -az -e "$SSHE" --files-from="$list" --ignore-missing-args "$TARGET:$rb/" "$lb/"
   fi
 }
 rm_files() {  # lokale-map live-map lijstbestand (de lokale map telt hier niet mee)
   local rb="$2" list="$3" f
   if [ "$MODE" = sftp ]; then
-    local cmds="set cmd:fail-exit no"$'\n'
+    local cmds=''
     while IFS= read -r f; do [ -n "$f" ] && cmds+="rm -f '$rb/$f'"$'\n'; done < "$list"
-    lf "$cmds" >/dev/null 2>&1 || true
+    lf_strict "$cmds" >/dev/null
   else
-    rssh_in "cd '$rb' && xargs -d '\\n' rm -f --" < "$list" 2>/dev/null || true
+    rssh_in "cd '$rb' && xargs -d '\\n' rm -f --" < "$list"
   fi
 }
 # Laravel met een losse webmap op live: public/<pad> staat daar, de rest in de projectmap.
@@ -1181,9 +1219,15 @@ by_root() {  # functie lokale-map lijstbestand — roept functie aan per live-ma
 }
 backup_live_files() {  # lijstbestand met paden t.o.v. wp-content (of de Laravel-projectmap)
   local list="$1" f
-  by_root get_files "$BK/live-files" "$list"
+  by_root get_files "$BK/live-files" "$list" || { rm -rf "$BK/live-files"; return 1; }
   # bestanden die live nog niet bestonden: die haalt een rollback weer weg
-  while IFS= read -r f; do [ -n "$f" ] && [ ! -e "$BK/live-files/$f" ] && echo "$f"; done < "$list" > "$BK/new-files"
+  while IFS= read -r f; do
+    if [ -d "$BK/live-files/$f" ] && [ ! -L "$BK/live-files/$f" ] && [ -n "$f" ]; then
+      warn "Live-pad is een map: $f"
+      rm -rf "$BK/live-files"; rm -f "$BK/new-files"; return 1
+    fi
+    if [ -n "$f" ] && [ ! -e "$BK/live-files/$f" ] && [ ! -L "$BK/live-files/$f" ]; then printf '%s\n' "$f"; fi
+  done < "$list" > "$BK/new-files" || { rm -rf "$BK/live-files"; return 1; }
   ok "Live-versies van $(($(grep -c . "$list") - $(grep -c . "$BK/new-files" || true))) bestand(en) bewaard"
 }
 cmd_backup() {
@@ -1195,7 +1239,7 @@ cmd_backup() {
   [ $ldb = 0 ] && [ $lfiles = 0 ] || need_live
   new_backup manual
   if [ $loc = 1 ]; then built; (cd "$PROJ" && ddev_up >/dev/null 2>&1); backup_local; fi
-  [ $ldb = 1 ] && { backup_live_db || warn "Live database niet bewaard"; }
+  [ $ldb = 1 ] && { backup_live_db || die "Live database niet bewaard."; }
   [ $lfiles = 1 ] && backup_live_full
   ok "Back-up klaar: $(basename "$BK")"
 }
@@ -1237,22 +1281,27 @@ cmd_restore() {
   [ -d "$src" ] || die "Back-up '$id' niet gevonden."
   while [ $# -gt 0 ]; do case "$1" in --local-db) ldb=1;; --live-db) livedb=1;; --live-files) lfiles=1;; *) die "Onbekende optie: $1";; esac; shift; done
   [ $((ldb + livedb + lfiles)) -gt 0 ] || die "Kies wat je wilt terugzetten: --local-db, --live-db en/of --live-files"
+  lock_site_sync
   if [ $ldb = 1 ]; then
     [ -f "$src/local-db.sql.gz" ] || die "Deze back-up bevat geen lokale database."
     built; cd "$PROJ"; ddev_up >/dev/null 2>&1
-    new_backup pre-restore; backup_local
+    new_backup pre-restore
+    backup_local require-db || die "Kon de huidige lokale database niet bewaren. Terugzetten afgebroken."
     step "Lokale database terugzetten…"
-    ddev import-db --file="$src/local-db.sql.gz" >/dev/null && fix_site && ok "Lokale database teruggezet"
+    ddev import-db --file="$src/local-db.sql.gz" >/dev/null || die "Lokale database terugzetten mislukt."
+    fix_site; ok "Lokale database teruggezet"
   fi
   [ $livedb = 0 ] && [ $lfiles = 0 ] || need_live
   if [ $livedb = 1 ]; then
     [ -f "$src/live-db.sql.gz" ] || die "Deze back-up bevat geen live database."
     [ "$MODE" != sftp ] || die "Database terugzetten op live kan alleen bij SSH-sites."
+    gzip -t -- "$src/live-db.sql.gz" || die "De back-up van de live database is beschadigd."
     confirm "De live database van $LIVEHOST overschrijven met $id?" || die "Afgebroken."
-    new_backup pre-restore; backup_live_db || die "Kon eerst geen back-up van live maken; niets veranderd."
+    new_backup pre-restore; backup_live_db allow-partial || die "Kon eerst geen back-up van live maken; niets veranderd."
     step "Live database terugzetten…"
-    if is_laravel; then gunzip -c "$src/live-db.sql.gz" | laravel_db_import >/dev/null && ok "Live database teruggezet"
-    else gunzip -c "$src/live-db.sql.gz" | rssh_in "wp db import - --path='$ROOT'" >/dev/null && ok "Live database teruggezet"; fi
+    if is_laravel; then gunzip -c "$src/live-db.sql.gz" | laravel_db_import >/dev/null || die "Live database terugzetten mislukt."
+    else gunzip -c "$src/live-db.sql.gz" | rssh_in "wp db import - --path='$ROOT'" >/dev/null || die "Live database terugzetten mislukt."; fi
+    ok "Live database teruggezet"
     flush_live || true
   fi
   if [ $lfiles = 1 ]; then
@@ -1260,10 +1309,12 @@ cmd_restore() {
     confirm "Bestanden op $LIVEHOST terugzetten naar de staat van vóór $id?" || die "Afgebroken."
     step "Live-bestanden terugzetten…"
     local saved; saved=$(mktemp)
-    (cd "$src/live-files" && find . -type f -printf '%P\n') > "$saved"
+    (cd "$src/live-files" && find . \( -type f -o -type l \) -printf '%P\n') > "$saved"
     [ -s "$saved" ] && { by_root put_files "$src/live-files" "$saved" || { rm -f "$saved"; die "Terugzetten mislukt."; }; }
     rm -f "$saved"
-    [ -s "$src/new-files" ] && by_root rm_files "$src/live-files" "$src/new-files"
+    if [ -s "$src/new-files" ]; then
+      by_root rm_files "$src/live-files" "$src/new-files" || die "Kon de bij de push toegevoegde live-bestanden niet opruimen."
+    fi
     base=$(sed -n 's/^base=//p' "$src/meta" | head -1)
     [ -n "$base" ] && [ -d "$LWPC/.git" ] && git -C "$LWPC" tag -f deployed "$base" >/dev/null 2>&1 || true
     ok "Live-bestanden teruggezet ($(find "$src/live-files" -type f | wc -l) bestand(en))"
@@ -1330,7 +1381,7 @@ init_git() {  # .gitignore automatisch: actief (child)thema + plugins van dezelf
 fetch_db_ssh() {   # echo pad naar .sql (SSH-sites: via WP-CLI)
   local tmp
   tmp=$(mktemp -d) || return 1
-  if ! live_wp db export - --single-transaction --quick > "$tmp/db.sql"; then
+  if ! rssh "wp db export - --single-transaction --quick --path=$(printf '%q' "$ROOT")" > "$tmp/db.sql"; then
     rm -rf "$tmp"; return 1
   fi
   if [ ! -s "$tmp/db.sql" ]; then
@@ -1816,16 +1867,17 @@ fix_site() {   # $1=refresh: live-constanten opnieuw ophalen
 }
 
 pull_sftp() {
-  mkdir -p "$LWPC"
-  local pid=""
+  local dest="${1:-$LWPC}" pid rc=0
+  mkdir -p "$dest" || return 1
   # voortgang: elke 10 sec het aantal lokale bestanden tonen
-  ( while sleep 10; do echo "  … $(find "$LWPC" -type f 2>/dev/null | wc -l) bestanden binnen"; done ) &
+  ( while sleep 10; do echo "  … $(find "$dest" -type f 2>/dev/null | wc -l) bestanden binnen"; done ) &
   pid=$!
-  lf "set sftp:max-packets-in-flight 64
+  lf_strict "set sftp:max-packets-in-flight 64
 set sftp:size-read 32768
-mirror --parallel=6 -x '^(uploads|cache|upgrade|backups?|backup-db|ai1wm-backups|updraft|wflogs)(/|\$)' -x '(^|/)(node_modules|\\.git)(/|\$)' -x '^(object|advanced)-cache\\.php\$' -x '\\.(zip|tar|gz|sql|log)\$' '$REMOTE' '$LWPC'" || true
-  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
-  ok "$(find "$LWPC" -type f | wc -l) bestanden opgehaald"
+mirror --parallel=6 -x '^(uploads|cache|upgrade|backups?|backup-db|ai1wm-backups|updraft|wflogs)(/|\$)' -x '(^|/)(node_modules|\\.git)(/|\$)' -x '^(object|advanced)-cache\\.php\$' -x '\\.(zip|tar|gz|sql|log)\$' '$REMOTE' '$dest'" || rc=$?
+  kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
+  [ "$rc" = 0 ] || return "$rc"
+  ok "$(find "$dest" -type f | wc -l) bestanden opgehaald"
 }
 
 bootstrap_sftp() {   # alleen SFTP: code ophalen, database via tijdelijk exportbestand (of --db bestand)
@@ -1839,7 +1891,7 @@ bootstrap_sftp() {   # alleen SFTP: code ophalen, database via tijdelijk exportb
   ddev_up
   [ -f wp-load.php ] || ddev wp core download ${ver:+--version="$ver"} --skip-content
   [ -f wp-config.php ] || ddev wp config create --dbname=db --dbuser=db --dbpass=db --dbhost=db --dbprefix="$prefix" --skip-check
-  step "Code ophalen via SFTP…"; pull_sftp; pull_avia
+  step "Code ophalen via SFTP…"; pull_sftp || die "Code ophalen via SFTP mislukt."; pull_avia
   local auto=0
   if [ -z "${DBFILE:-}" ]; then DBFILE=$(fetch_db_sftp) && auto=1 || DBFILE=""; fi
   if [ -n "${DBFILE:-}" ]; then
@@ -1859,16 +1911,25 @@ bootstrap_sftp() {   # alleen SFTP: code ophalen, database via tijdelijk exportb
 
 # main = laatst bekende live-staat, tag 'deployed' wijst daarop; dev = jouw werk
 ensure_dev() { git -C "$LWPC" rev-parse --verify -q dev >/dev/null && git -C "$LWPC" checkout -q dev || git -C "$LWPC" checkout -q -b dev; }
-pull_code() {
+pull_code() (
+  local tmp
   cd "$LWPC"
   [ -z "$(git status --porcelain)" ] || die "Eerst committen: ophalen van live zou lokale wijzigingen overschrijven."
-  git checkout -q main
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
   step "Code van live ophalen…"
-  if is_laravel; then laravel_pull_files
+  if is_laravel; then
+    laravel_pull_files "$tmp" || die "Code ophalen mislukt. Controleer de overdrachtsmelding hierboven."
+  elif [ "$MODE" = sftp ]; then
+    pull_sftp "$tmp" || die "Code ophalen via SFTP mislukt."
   else
-    if [ "$MODE" = sftp ]; then pull_sftp; else rsync -az -e "$SSHE" "${EXC[@]}" "$TARGET:$REMOTE/" "$LWPC/"; fi
-    pull_avia
+    rsync -az -e "$SSHE" "${EXC[@]}" "$TARGET:$REMOTE/" "$tmp/" || die "Code ophalen via SSH mislukt."
   fi
+  [ -z "$(git status --porcelain)" ] || die "Tijdens het ophalen zijn lokale bestanden gewijzigd. Commit ze en haal opnieuw op."
+  git checkout -q main
+  chmod --reference="$LWPC" "$tmp"
+  cp -a -- "$tmp/." "$LWPC/" || die "De opgehaalde code lokaal toepassen is mislukt."
+  if ! is_laravel; then pull_avia; fi
   git add -A
   if git diff --cached --quiet; then note "Live was gelijk aan main"
   else gitc commit -qm "Live-staat $(date '+%Y-%m-%d %H:%M')"; ok "Live-wijzigingen vastgelegd op main"; fi
@@ -1876,7 +1937,7 @@ pull_code() {
   ensure_dev
   gitc merge -q --no-edit main 2>/dev/null || { git merge --abort 2>/dev/null || true; die "dev botst met de nieuwe live-staat. Voeg main handmatig samen met dev (bv. in VS Code)."; }
   ok "Code van live opgehaald (main → dev)"
-}
+)
 replace_wordpress_db() (  # bestaande lokale database vervangen, via live of een bestand
   local f="${1:-}"
   mkdir -p "$BACKUPS/$SLUG"
@@ -1919,6 +1980,7 @@ cmd_open() {
     code --remote "ssh-remote+$TARGET" "$REMOTE"; return
   fi
   if is_local && { [ $pull = 1 ] || [ $dbpull = 1 ]; }; then need_live; fi
+  if [ $pull = 1 ] || [ $dbpull = 1 ] || [ -n "$DBFILE" ] || [ ! -f "$PROJ/.wpopen-ready" ]; then lock_site_sync; fi
 
   local built=0
   if [ ! -f "$PROJ/.wpopen-ready" ]; then
@@ -1954,9 +2016,10 @@ cmd_pull() {
   local code=0 db=0 uploads=0
   [ $# -gt 0 ] || code=1
   while [ $# -gt 0 ]; do case "$1" in --code) code=1;; --db) db=1;; --uploads) uploads=1;; *) die "Onbekende optie: $1";; esac; shift; done
+  lock_site_sync
   cd "$PROJ"; ddev_up >/dev/null
-  [ $code = 1 ] && pull_code
   [ $db = 0 ] || no_multisite_db "database ophalen"
+  [ $code = 1 ] && pull_code
   [ $db = 1 ] && pull_db
   [ $uploads = 1 ] && pull_uploads
   cd "$PROJ"; fix_site
@@ -1966,6 +2029,7 @@ cmd_reset() {   # "refreshen met main": dev gelijk aan de laatste live-staat, hu
   [ $# -ge 1 ] || die "Gebruik: wpopen reset <naam> [--pull]"
   need git; get "$1"; shift; built
   local pull=0; [ "${1:-}" = --pull ] && pull=1
+  lock_site_sync
   cd "$LWPC"
   confirm "Lokale wijzigingen van $NAME vervangen door main (de laatste live-staat)?" || die "Afgebroken."
   local ts; ts=$(date +%Y%m%d-%H%M%S)
@@ -1983,6 +2047,7 @@ cmd_reset() {   # "refreshen met main": dev gelijk aan de laatste live-staat, hu
 cmd_rebuild() {   # opnieuw migreren vanaf live, voor als er lokaal iets kapot is
   [ $# -ge 1 ] || die "Gebruik: wpopen rebuild <naam>"
   need ddev git; get "$1"; shift; need_live; no_multisite_db "opnieuw migreren vanaf live"
+  lock_site_sync
   confirm "Lokale site $NAME volledig opnieuw opbouwen vanaf live? (eerst wordt een back-up gemaakt)" || die "Afgebroken."
   if [ -d "$PROJ" ]; then
     new_backup rebuild
@@ -2094,10 +2159,10 @@ laravel_pull_files() {  # lokale-map (standaard het project)
   local dest="${1:-$PROJ}"
   if [ -z "$PUBDIR" ]; then
     if [ "$MODE" = sftp ]; then
-      need lftp; lf "set sftp:max-packets-in-flight 64
-mirror --parallel=6 $LARAVEL_LFTP_EXC '$REMOTE' '$dest'" || true
+      need lftp; lf_strict "set sftp:max-packets-in-flight 64
+mirror --parallel=6 $LARAVEL_LFTP_EXC '$REMOTE' '$dest'" || return 1
     else
-      rsync -az -e "$SSHE" "${LARAVEL_EXC[@]}" "$TARGET:$REMOTE/" "$dest/"
+      rsync -az -e "$SSHE" "${LARAVEL_EXC[@]}" "$TARGET:$REMOTE/" "$dest/" || return 1
     fi
     return 0
   fi
@@ -2105,13 +2170,13 @@ mirror --parallel=6 $LARAVEL_LFTP_EXC '$REMOTE' '$dest'" || true
   # Alleen public/index.php van het project gaat mee: die van de webmap wijst naar de map op de server.
   local inproj; [[ "$REMOTE/" == "$PUBDIR/"* ]] && inproj="${REMOTE#"$PUBDIR"/}"
   if [ "$MODE" = sftp ]; then
-    need lftp; lf "set sftp:max-packets-in-flight 64
+    need lftp; lf_strict "set sftp:max-packets-in-flight 64
 mirror --parallel=6 $LARAVEL_LFTP_EXC -x '^public/' '$REMOTE' '$dest'
 mkdir -p -f '$dest/public'
 get -O '$dest/public' '$REMOTE/public/index.php'
-mirror --parallel=6 -x '^index\.php\$' -x '^(storage|hot)(/|\$)' ${inproj:+-x '^$inproj(/|\$)'} '$PUBDIR' '$dest/public'" || true
+mirror --parallel=6 -x '^index\.php\$' -x '^(storage|hot)(/|\$)' ${inproj:+-x '^$inproj(/|\$)'} '$PUBDIR' '$dest/public'"
   else
-    rsync -az -e "$SSHE" --include=/public/ --include=/public/index.php --exclude='/public/*' "${LARAVEL_EXC[@]}" "$TARGET:$REMOTE/" "$dest/"
+    rsync -az -e "$SSHE" --include=/public/ --include=/public/index.php --exclude='/public/*' "${LARAVEL_EXC[@]}" "$TARGET:$REMOTE/" "$dest/" || return 1
     rsync -az -e "$SSHE" --exclude=/index.php --exclude=/storage --exclude=/hot ${inproj:+--exclude="/$inproj"} "$TARGET:$PUBDIR/" "$dest/public/"
   fi
 }
@@ -2187,7 +2252,7 @@ laravel_after_push() {  # lijstbestand met geüploade paden
   if grep -qE '^composer\.(json|lock)$' "$list"; then
     step "Composer-pakketten bijwerken op live…"
     rssh "cd '$ROOT' && if command -v composer >/dev/null; then composer install --no-dev --optimize-autoloader --no-interaction --no-progress; else php composer.phar install --no-dev --optimize-autoloader --no-interaction --no-progress; fi" \
-      || warn "composer install op live mislukt; draai het zelf op de server."
+      || die "composer install op live mislukt. Herstel de live-bestanden vanuit back-up $(basename "$BK") of herstel Composer op de server."
   fi
   if grep -q '^database/migrations/' "$list"; then
     step "Migraties draaien op live…"
@@ -2212,8 +2277,8 @@ laravel_push_assets() {
   [ -d "$PROJ/public/build" ] || return 0
   local web="${PUBDIR:-$REMOTE/public}"
   step "Assets uploaden (public/build)…"
-  if [ "$MODE" = sftp ]; then lf "mirror -R --no-perms --delete '$PROJ/public/build' '$web/build'" >/dev/null
-  else rsync -az --delete -e "$SSHE" "$PROJ/public/build/" "$TARGET:$web/build/"; fi
+  if [ "$MODE" = sftp ]; then lf_strict "mirror -R --no-perms --delete '$PROJ/public/build' '$web/build'" >/dev/null || return 1
+  else rsync -az --delete -e "$SSHE" "$PROJ/public/build/" "$TARGET:$web/build/" || return 1; fi
   ok "Assets staan live"
 }
 
@@ -2380,16 +2445,16 @@ pull_uploads() {  # alle media lokaal, nodig voor een verhuizing (normaal komen 
   step "Alle uploads van live ophalen…"
   if is_laravel; then
     mkdir -p "$PROJ/storage/app/public"
-    if [ "$MODE" = sftp ]; then lf "mirror --parallel=6 '$REMOTE/storage/app/public' '$PROJ/storage/app/public'" >/dev/null || warn "Niet alle uploads konden worden opgehaald"
-    else rsync -az -e "$SSHE" "$TARGET:$REMOTE/storage/app/public/" "$PROJ/storage/app/public/" || warn "Niet alle uploads konden worden opgehaald"; fi
+    if [ "$MODE" = sftp ]; then lf_strict "mirror --parallel=6 '$REMOTE/storage/app/public' '$PROJ/storage/app/public'" >/dev/null || die "Niet alle uploads konden worden opgehaald. Probeer de mediaoverdracht opnieuw."
+    else rsync -az -e "$SSHE" "$TARGET:$REMOTE/storage/app/public/" "$PROJ/storage/app/public/" || die "Niet alle uploads konden worden opgehaald. Probeer de mediaoverdracht opnieuw."; fi
     ok "Uploads lokaal ($(du -sh "$PROJ/storage/app/public" 2>/dev/null | cut -f1))"; return 0
   fi
   mkdir -p "$LWPC/uploads"
   if [ "$MODE" = sftp ]; then
     need lftp
-    lf "mirror --parallel=6 -x '(^|/)(cache|backups?|ai1wm-backups|updraft)(/|\$)' '$REMOTE/uploads' '$LWPC/uploads'" >/dev/null || warn "Niet alle uploads konden worden opgehaald"
+    lf_strict "mirror --parallel=6 -x '(^|/)(cache|backups?|ai1wm-backups|updraft)(/|\$)' '$REMOTE/uploads' '$LWPC/uploads'" >/dev/null || die "Niet alle uploads konden worden opgehaald. Probeer de mediaoverdracht opnieuw."
   else
-    rsync -az -e "$SSHE" --exclude=cache "$TARGET:$REMOTE/uploads/" "$LWPC/uploads/" || warn "Niet alle uploads konden worden opgehaald"
+    rsync -az -e "$SSHE" --exclude=cache "$TARGET:$REMOTE/uploads/" "$LWPC/uploads/" || die "Niet alle uploads konden worden opgehaald. Probeer de mediaoverdracht opnieuw."
   fi
   ok "Uploads lokaal ($(du -sh "$LWPC/uploads" 2>/dev/null | cut -f1))"
 }
@@ -2423,11 +2488,11 @@ backup_live_full() {  # live wp-content zonder uploads, of bij Laravel de code z
   step "Back-up van de live bestanden…"
   mkdir -p "$BK/live-full"
   if is_laravel; then
-    laravel_pull_files "$BK/live-full" >/dev/null 2>&1 || true
+    laravel_pull_files "$BK/live-full" >/dev/null || { rm -rf "$BK/live-full"; die "Back-up van live-bestanden mislukt."; }
     ok "Live code (zonder vendor en storage) bewaard"; return 0
   fi
-  if [ "$MODE" = sftp ]; then lf "mirror --parallel=4 -x '^(uploads|cache|upgrade|backups?|ai1wm-backups|updraft|wflogs)(/|\$)' '$REMOTE' '$BK/live-full'" >/dev/null || true
-  else rsync -az -e "$SSHE" "${EXC[@]}" "$TARGET:$REMOTE/" "$BK/live-full/" || true; fi
+  if [ "$MODE" = sftp ]; then lf_strict "mirror --parallel=4 -x '^(uploads|cache|upgrade|backups?|ai1wm-backups|updraft|wflogs)(/|\$)' '$REMOTE' '$BK/live-full'" >/dev/null || { rm -rf "$BK/live-full"; die "Back-up van live-bestanden mislukt."; }
+  else rsync -az -e "$SSHE" "${EXC[@]}" "$TARGET:$REMOTE/" "$BK/live-full/" || { rm -rf "$BK/live-full"; die "Back-up van live-bestanden mislukt."; }; fi
   ok "Live wp-content (zonder uploads) bewaard"
 }
 
@@ -2536,6 +2601,7 @@ cmd_migrate() {
   nhost="${url#*//}"; nhost="${nhost%/}"
   built
   [ -d "$LWPC/.git" ] || die "$NAME heeft geen git-repo. Bouw de site eerst opnieuw."
+  lock_site_sync
 
   # de oude live-server blijft bewaard als die er was
   local was_local=0 otarget="$TARGET" oopts="$OPTS" oremote="$REMOTE" omode="$MODE" oprov="$PROVIDER" ourl="$LIVEURL"
@@ -2573,7 +2639,7 @@ cmd_migrate() {
 
   new_backup migrate; meta target "$TARGET"; meta url "$url"
   step "Back-up van de nieuwe server…"
-  backup_live_db || warn "Database van de nieuwe server niet bewaard"
+  backup_live_db || die "Kon de database op de nieuwe server niet bewaren. Verhuizen afgebroken."
   backup_live_full
 
   step "Bestanden uploaden naar $nhost…"
@@ -3130,16 +3196,16 @@ drift_check() {  # base — zijn de live-versies nog gelijk aan wat we de vorige
   printf '    %s\n' "${drift[@]}" >&2
   return 1
 }
-preview_drift() {  # base lijst — al vóór het live zetten laten zien wat er op live intussen anders is
+preview_drift() (  # base lijst — al vóór het live zetten laten zien wat er op live intussen anders is
   local BK out; BK=$(mktemp -d)
+  trap 'rm -rf "$BK"' EXIT
   printf '%s\n' "$2" > "$BK/files"
-  by_root get_files "$BK/live-files" "$BK/files"
+  by_root get_files "$BK/live-files" "$BK/files" || die "Kon live-bestanden niet lezen voor de proefrun."
   if ! out=$(drift_check "$1" 2>&1); then
     echo "Op live aangepast sinds de laatste sync:"
     grep '^    ' <<<"$out" || true
   fi
-  rm -rf "$BK"
-}
+)
 flush_live() {
   step "Live cache legen…"
   if is_laravel; then
@@ -3152,11 +3218,11 @@ flush_live() {
 push_db() {  # alleen SSH: lokale database naar live, met live-plugins en live-beheerders behouden
   local tmp plugins devhash prefix admin
   step "Database naar live…"
-  backup_live_db || die "Kon geen back-up van de live database maken; database niet gepusht."
   plugins=$(live_wp option get active_plugins --format=json 2>/dev/null | tr -d '\r') || die "Kon de live plugins niet lezen."
   devhash=$(live_wp user get dev --field=user_pass 2>/dev/null | tr -d '\r' || true)
   tmp=$(mktemp -d)
   (cd "$PROJ" && ddev export-db --gzip=false --file="$tmp/local.sql" >/dev/null) || { rm -rf "$tmp"; die "Lokale database exporteren mislukt."; }
+  [ -s "$tmp/local.sql" ] || { rm -rf "$tmp"; die "De lokale database-export is leeg."; }
   rssh_in "wp db import - --path='$ROOT'" < "$tmp/local.sql" >/dev/null || { rm -rf "$tmp"; die "Importeren op live mislukt. Herstel met: wpopen restore $NAME $(basename "$BK") --live-db"; }
   rm -rf "$tmp"
   local host="${ORIGHOST:-$LIVEHOST}"
@@ -3187,6 +3253,28 @@ push_uploads() {  # alleen nieuwe uploads, live-bestanden worden nooit overschre
   else rsync -az --ignore-existing --exclude=dynamic_avia -e "$SSHE" "$LWPC/uploads/" "$TARGET:$REMOTE/uploads/"; fi
   ok "Uploads bijgewerkt"
 }
+deploy_code() (  # kandidaten samenvoegen in een tijdelijke worktree; refs pas bijwerken na de overdracht
+  local parent staged previous commit restore=''
+  previous=$(git rev-parse main)
+  parent=$(mktemp -d)
+  staged="$parent/tree"
+  trap 'git -C "$LWPC" worktree remove --force "$staged" >/dev/null 2>&1 || true; rm -rf "$parent"' EXIT
+  if [ -d "$BK/live-files" ]; then restore=" Terugdraaien: wpopen restore $NAME $(basename "$BK") --live-files"; fi
+  git worktree add --quiet --detach "$staged" "$previous" || die "Kon geen tijdelijke werkmap voor de push maken."
+  cd "$staged"
+  git merge -q --ff-only "$2" 2>/dev/null || gitc merge -q --no-edit "$2" || die "Samenvoegen van dev in main mislukt."
+  commit=$(git rev-parse HEAD)
+  step "Bestanden uploaden naar $LIVEHOST…"
+  by_root put_files "$staged" "$BK/files" || die "Uploaden mislukt.$restore"
+  if [ "$1" = 1 ]; then laravel_push_assets || die "Uploaden van gebouwde assets mislukt.$restore"; fi
+  if is_laravel; then laravel_after_push "$BK/files"; fi
+  git update-ref refs/heads/main "$commit" "$previous" || die "Bestanden geüpload, maar main is intussen lokaal gewijzigd."
+  git tag -f deployed "$commit" >/dev/null
+  ok "Bestanden staan live"
+  if git remote get-url origin >/dev/null 2>&1; then
+    git push -q origin main 2>/dev/null && ok "main gepusht naar GitHub" || note "Geen push naar GitHub (bestanden staan live)"
+  fi
+)
 cmd_live() {
   need git
   local dry=0 site="" msg="" db=0 uploads=0 nobackup=0 force=0 flush=1 n
@@ -3207,6 +3295,7 @@ cmd_live() {
   [ $db = 1 ] && [ "$MODE" = sftp ] && die "Database pushen kan alleen bij SSH-sites ($NAME heeft alleen SFTP)."
   [ $db = 0 ] || no_multisite_db "de database live zetten"
   [ $db = 1 ] && is_laravel && die "Bij Laravel gaat de database niet naar live; wijzigingen in de structuur gaan via migraties."
+  lock_site_sync
   cd "$LWPC"
   [ "$(git branch --show-current)" = dev ] || die "Je zit niet op dev (maar op '$(git branch --show-current)')."
   local dirty=0; [ -n "$(git status --porcelain)" ] && dirty=1
@@ -3214,14 +3303,15 @@ cmd_live() {
     [ -n "$msg" ] || die "Niet-gecommitte wijzigingen. Commit eerst op dev, of geef een bericht mee: wplive $NAME -m \"wat je deed\""
     git add -A; gitc commit -qm "$msg"; ok "Gecommit op dev: $msg"; dirty=0
   fi
-  local base list deleted
+  local base list deleted dev_commit
   base=$(deploy_base)
+  dev_commit=$(git rev-parse dev)
   if [ $dirty = 1 ]; then   # dry-run met openstaande wijzigingen: laat zien wat er na committen mee zou gaan
     list=$( { git diff --name-only --diff-filter=d "$base"; git ls-files --others --exclude-standard; } | sort -u | grep -vx '.gitignore' || true)
     deleted=$(git diff --name-only --diff-filter=D "$base" || true)
   else
-    list=$(git diff --name-only --diff-filter=d "$base" dev | grep -vx '.gitignore' || true)
-    deleted=$(git diff --name-only --diff-filter=D "$base" dev || true)
+    list=$(git diff --name-only --diff-filter=d "$base" "$dev_commit" | grep -vx '.gitignore' || true)
+    deleted=$(git diff --name-only --diff-filter=D "$base" "$dev_commit" || true)
   fi
   # bij Laravel gaat public/build in z'n geheel mee na een verse build, niet als losse bestanden
   if is_laravel; then list=$(grep -v '^public/build/' <<<"$list" || true); fi
@@ -3239,42 +3329,46 @@ cmd_live() {
     grep -q '^database/migrations/' <<<"$list" && note "Nieuwe migraties draaien op live (php artisan migrate --force); de live database wordt eerst bewaard."
   fi
   if [ $dry = 1 ]; then
-    [ -n "$list" ] && [ $nobackup = 0 ] && [ $force = 0 ] && preview_drift "$base" "$list"
+    if [ -n "$list" ] && [ $nobackup = 0 ] && [ $force = 0 ]; then
+      preview_drift "$base" "$list" || die "Proefrun afgebroken."
+    fi
     ok "Proefrun: er is niets veranderd."; return 0
   fi
   confirm "Dit overschrijft live ($LIVEHOST). Doorgaan?" || die "Afgebroken."
   local build_assets=0
-  if is_laravel && frontend_changed "$list"; then laravel_build_assets; build_assets=1; fi
+  if is_laravel && frontend_changed "$list"; then
+    [ "$(git rev-parse dev)" = "$dev_commit" ] || die "dev is gewijzigd tijdens de voorbereiding. Start de push opnieuw."
+    laravel_build_assets; build_assets=1
+    dev_commit=$(git rev-parse dev)
+  fi
 
-  new_backup push; meta base "$(git rev-parse "$base")"; meta commit "$(git rev-parse dev)"
-  if is_laravel && grep -q '^database/migrations/' <<<"$list"; then backup_live_db || die "Kon de live database niet bewaren; er is niets veranderd."; fi
+  new_backup push; meta base "$(git rev-parse "$base")"; meta commit "$dev_commit"
+  if [ "$db" = 1 ] || { is_laravel && grep -q '^database/migrations/' <<<"$list"; }; then
+    backup_live_db || die "Kon de live database niet bewaren; er is niets veranderd op live."
+  fi
   if [ -n "$list" ]; then
     printf '%s\n' "$list" > "$BK/files"
     if [ $nobackup = 0 ]; then
       step "Back-up van de huidige live-bestanden…"
-      backup_live_files "$BK/files"
+      backup_live_files "$BK/files" || die "Kon de live-bestanden niet bewaren. Upload afgebroken."
       if ! drift_check "$base"; then
         [ $force = 1 ] || die "Live is aangepast buiten wpopen om. Haal eerst live op (wpopen pull $NAME) of push met --force."
         warn "--force: live-wijzigingen worden overschreven (ze staan in back-up $(basename "$BK"))."
       fi
     fi
-    git checkout -q main
-    git merge -q --ff-only dev 2>/dev/null || gitc merge -q --no-edit dev || { git merge --abort 2>/dev/null || true; git checkout -q dev; die "Samenvoegen van dev in main mislukt."; }
-    if git remote get-url origin >/dev/null 2>&1; then
-      git push -q origin main 2>/dev/null && ok "main gepusht naar GitHub" || note "Geen push naar GitHub (deploy gaat door)"
-    fi
-    step "Bestanden uploaden naar $LIVEHOST…"
-    by_root put_files "$LWPC" "$BK/files" || { git checkout -q dev; die "Uploaden mislukt. Terugdraaien: wpopen restore $NAME $(basename "$BK") --live-files"; }
-    git tag -f deployed main >/dev/null
-    git checkout -q dev
-    ok "Bestanden staan live"
-    if [ $build_assets = 1 ]; then laravel_push_assets; fi
-    if is_laravel; then laravel_after_push "$BK/files"; fi
+    deploy_code "$build_assets" "$dev_commit"
   fi
   [ $db = 1 ] && push_db
   [ $uploads = 1 ] && push_uploads
   [ $flush = 1 ] && { flush_live || true; }
-  ok "Live! Back-up: $(basename "$BK")  (terugdraaien: wpopen restore $NAME $(basename "$BK") --live-files)"
+  local restore_parts=()
+  [ ! -d "$BK/live-files" ] || restore_parts+=(--live-files)
+  [ ! -f "$BK/live-db.sql.gz" ] || restore_parts+=(--live-db)
+  if [ "${#restore_parts[@]}" -gt 0 ]; then
+    ok "Live! Back-up: $(basename "$BK")  (terugdraaien: wpopen restore $NAME $(basename "$BK") ${restore_parts[*]})"
+  else
+    ok "Live!"
+  fi
 }
 
 # ───────────── updates veilig doorvoeren ─────────────
@@ -3386,36 +3480,49 @@ su_culprit() {  # nieuwe foutmeldingen → bijgewerkt onderdeel dat de fout gaf 
 
 # ── terugzetten ──
 su_rollback_local() {
-  local d
+  local d result=0
   step "Lokaal terugzetten naar de staat van live…"
-  cd "$PROJ"
+  cd "$PROJ" || return 1
   for d in "${SU_DIRS[@]}"; do
-    rm -rf "${LWPC:?}/$d"; mkdir -p "$(dirname "$LWPC/$d")"; cp -a "$BK/before/$d" "$LWPC/$d"
+    if ! { rm -rf "${LWPC:?}/$d" && mkdir -p "$(dirname "$LWPC/$d")" && cp -a "$BK/before/$d" "$LWPC/$d"; }; then
+      warn "Kon $d lokaal niet terugzetten."; result=1
+    fi
   done
   if [ -n "$SU_CORE_FROM" ] && [ "$(su_local_core)" != "$SU_CORE_FROM" ]; then
-    ddev wp core update --version="$SU_CORE_FROM" --force >/dev/null 2>&1 || warn "Lokale WordPress kon niet terug naar $SU_CORE_FROM"
+    ddev wp core update --version="$SU_CORE_FROM" --force >/dev/null 2>&1 || { warn "Lokale WordPress kon niet terug naar $SU_CORE_FROM"; result=1; }
   fi
   if [ -f "$BK/local-db.sql.gz" ]; then
-    ddev import-db --file="$BK/local-db.sql.gz" >/dev/null 2>&1 && fix_site || warn "Lokale database terugzetten mislukt; zelf doen: wpopen restore $NAME $(basename "$BK") --local-db"
+    ddev import-db --file="$BK/local-db.sql.gz" >/dev/null 2>&1 && fix_site || {
+      warn "Lokale database terugzetten mislukt; zelf doen: wpopen restore $NAME $(basename "$BK") --local-db"
+      result=1
+    }
   fi
-  ok "Lokaal teruggezet"
+  [ "$result" != 0 ] || ok "Lokaal teruggezet"
+  return "$result"
 }
 su_rollback_live() {
-  local id; id=$(basename "$BK")
+  local id result=0; id=$(basename "$BK")
   local -a parts=()
   step "Live terugzetten…"
   if [ "$SU_LIVE_CORE_DONE" = 1 ] && [ -n "$SU_LIVE_CORE" ]; then
     if live_wp core update --version="$SU_LIVE_CORE" --force >/dev/null 2>&1; then ok "WordPress op live terug naar $SU_LIVE_CORE"
-    else warn "WordPress op live kon niet terug naar $SU_LIVE_CORE"; fi
+    else warn "WordPress op live kon niet terug naar $SU_LIVE_CORE"; result=1; fi
   fi
   if [ -d "$BK/live-files" ]; then parts+=(--live-files); fi
   if [ "$SU_LIVE_CORE_DONE" = 1 ] && [ -f "$BK/live-db.sql.gz" ]; then parts+=(--live-db); fi
-  [ ${#parts[@]} -gt 0 ] || return 0
+  [ ${#parts[@]} -gt 0 ] || return "$result"
   # eigen subshell: restore maakt zelf een back-up aan en mag BK hier niet overschrijven
-  ( WPO_YES=1; cmd_restore "$NAME" "$id" "${parts[@]}" ) || warn "Live terugzetten lukte niet helemaal. Probeer: wpopen restore $NAME $id ${parts[*]}"
+  ( WPO_YES=1; cmd_restore "$NAME" "$id" "${parts[@]}" ) || {
+    warn "Live terugzetten lukte niet helemaal. Probeer: wpopen restore $NAME $id ${parts[*]}"
+    result=1
+  }
+  return "$result"
 }
 su_fail_live() {  # reden — live en lokaal terug, dan stoppen
-  su_rollback_live; su_rollback_local
+  local result=0
+  su_rollback_live || result=1
+  su_rollback_local || result=1
+  if [ "$result" != 0 ]; then die "$1; herstel was onvolledig. Zie de meldingen hierboven en back-up $(basename "$BK")."; fi
   die "$1; alles is teruggezet (de vorige live-versies staan in back-up $(basename "$BK"))."
 }
 
@@ -3510,6 +3617,7 @@ cmd_safe_update() {
     esac; shift
   done
   [ -d "$LWPC/.git" ] || die "$NAME heeft nog geen git-repo in wp-content. Draai eerst: wpopen build $NAME"
+  lock_site_sync
   [ -z "$(git -C "$LWPC" status --porcelain)" ] || die "Er staan nog niet-gecommitte wijzigingen in $NAME. Zet die eerst live (of commit ze), dan blijven de updates een losse stap."
   [ $live = 1 ] || total=4
   if is_multisite; then ms="--network"; fi
@@ -3553,7 +3661,7 @@ cmd_safe_update() {
   if [ ${#SU_ITEMS[@]} -eq 0 ]; then ok "Niets bij te werken."; return 0; fi
 
   new_backup safe-update; meta items "${SU_ITEMS[*]}"
-  backup_local
+  backup_local require-db || die "Kon de lokale database niet bewaren. Updates afgebroken."
   # lokaal moet dezelfde WordPress draaien als live, anders test je iets anders dan wat live komt
   SU_LIVE_CORE=$(su_live_core); SU_CORE_FROM=$(su_local_core)
   if [ -n "$SU_LIVE_CORE" ] && [ -n "$SU_CORE_FROM" ] && [ "$SU_LIVE_CORE" != "$SU_CORE_FROM" ]; then
@@ -3639,7 +3747,7 @@ cmd_safe_update() {
   su_file_lists
   meta base "$(git -C "$LWPC" rev-parse -q --verify refs/tags/deployed 2>/dev/null || true)"
   if [ -s "$BK/files" ]; then
-    backup_live_files "$BK/files"
+    backup_live_files "$BK/files" || { su_rollback_local; die "Kon de live-bestanden niet bewaren. Upload afgebroken."; }
     if ! su_drift; then
       if [ $force = 0 ]; then
         su_rollback_local
@@ -3664,11 +3772,9 @@ cmd_safe_update() {
   fi
   if [ -s "$BK/put" ]; then
     step "Bestanden uploaden naar $LIVEHOST…"
-    # rsync slaat een bestand met dezelfde grootte en tijd over; deze lijst is al op inhoud vergeleken
-    (cd "$LWPC" && xargs -d '\n' touch -c -- < "$BK/put")
     by_root put_files "$LWPC" "$BK/put" || su_fail_live "Uploaden mislukt"
   fi
-  if [ -s "$BK/remove" ]; then by_root rm_files "$LWPC" "$BK/remove"; fi
+  if [ -s "$BK/remove" ]; then by_root rm_files "$LWPC" "$BK/remove" || su_fail_live "Live-bestanden opruimen mislukt"; fi
   if [ -s "$BK/files" ]; then ok "$(grep -c . "$BK/put" || true) bestand(en) bijgewerkt, $(grep -c . "$BK/remove" || true) weggehaald op live"; fi
 
   step "Stap 6/$total: Live controleren…"
@@ -3678,8 +3784,7 @@ cmd_safe_update() {
     broken=$(su_broken "$BK/live-before" "$BK/live-after")
     if [ -n "$broken" ]; then
       warn "Werkte op live vóór het bijwerken wel, nu niet:"; sed 's/^/    /' <<<"$broken" >&2
-      su_rollback_live; su_rollback_local
-      die "Live gaf fouten na het bijwerken; alles is teruggezet."
+      su_fail_live "Live gaf fouten na het bijwerken"
     fi
     ok "Live-pagina's werken"
   fi

@@ -52,6 +52,13 @@ it('werkt plugins, thema en WordPress lokaal bij, test ze en zet ze live met bac
         ->and($git(['merge-base', '--is-ancestor', 'main', 'dev']) === '')->toBeTrue();
 });
 
+it('meldt onvolledig herstel als een verbroken verbinding ook de rollback blokkeert', function (): void {
+    $result = $this->server->run(['safe-update', 'demo', '--yes'], ['FAKE_PUSH_TRANSFER_FAIL' => '1']);
+
+    expect($result->failed())->toBeTrue();
+    expect($result->errorOutput())->toContain('Uploaden mislukt', 'herstel was onvolledig')->not->toContain('alles is teruggezet');
+});
+
 it('draait een veilige update terug met restore --live-files', function (): void {
     $this->server->run(['safe-update', 'demo', '--yes'])->throw();
     $id = basename(($this->backup)());

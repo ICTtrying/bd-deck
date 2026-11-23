@@ -158,6 +158,36 @@ describe('sitelijst', function (): void {
     ]);
 });
 
+describe('bestanden van live ophalen', function (): void {
+    it('behoudt dev en de lokale bestanden als de code maar deels binnenkomt', function (): void {
+        $working = $this->server->buildLocalSite();
+        $this->server->git($working, ['tag', 'deployed', 'main']);
+        $this->server->writeFile('themes/demo/functions.php', '<?php // live wijziging');
+        $this->server->writeFile('themes/demo/tijdelijk.php', '<?php // nieuw bestand');
+        $before = $this->server->git($working, ['rev-parse', 'main', 'deployed']);
+
+        $result = $this->server->run(['pull', 'demo', '--code'], ['FAKE_PULL_TRANSFER_FAIL' => '1']);
+
+        expect($result->failed())->toBeTrue();
+        expect($result->errorOutput())->toContain('Code ophalen');
+        expect($this->server->git($working, ['branch', '--show-current']))->toBe("dev\n");
+        expect($this->server->git($working, ['rev-parse', 'main', 'deployed']))->toBe($before);
+        expect(file_get_contents($working.'/themes/demo/functions.php'))->toContain('020');
+        expect($working.'/themes/demo/tijdelijk.php')->not->toBeFile();
+    });
+
+    it('meldt een onderbroken mediaoverdracht als een mislukte actie', function (): void {
+        $this->server->buildLocalSite();
+        $this->server->writeFile('uploads/foto.jpg', 'foto');
+
+        $result = $this->server->run(['pull', 'demo', '--uploads'], ['FAKE_PULL_TRANSFER_FAIL' => '1']);
+
+        expect($result->failed())->toBeTrue();
+        expect($result->errorOutput())->toContain('uploads konden worden opgehaald');
+        expect($result->output())->not->toContain('Uploads lokaal', 'bijgewerkt vanaf live');
+    });
+});
+
 describe('naar live zetten', function (): void {
     beforeEach(function (): void {
         $this->wpContent = $this->server->buildLocalSite();
@@ -225,6 +255,78 @@ describe('naar live zetten', function (): void {
 
         expect($result->successful())->toBeTrue()
             ->and($this->server->readFile('themes/demo/functions.php'))->toContain('0638386827');
+    });
+
+    it('weigert een push met force wanneer de live back-up niet kan worden opgehaald', function (): void {
+        $result = $this->server->run(['push', 'demo', '--yes', '--force'], ['FAKE_BACKUP_TRANSFER_FAIL' => '1']);
+
+        expect($result->failed())->toBeTrue();
+        expect($result->errorOutput())->toContain('Kon de live-bestanden niet bewaren');
+        expect($this->server->readFile('themes/demo/functions.php'))->toContain('020');
+        expect($this->server->readFile('themes/demo/nieuw.php'))->toBeNull();
+    });
+
+    it('pusht gewijzigde inhoud ook als bestandsgrootte en wijzigingstijd gelijk zijn', function (): void {
+        $relative = 'themes/demo/functions.php';
+        $original = $this->server->readFile($relative);
+        $intended = str_replace('020', '010', $original);
+        file_put_contents($this->wpContent.'/'.$relative, $intended);
+        $this->server->git($this->wpContent, ['add', $relative]);
+        $this->server->git($this->wpContent, ['commit', '-qm', 'Netnummer corrigeren']);
+
+        $result = $this->server->run(['push', 'demo', '--yes'], ['FAKE_PUSH_EQUAL_MTIME' => '1']);
+
+        expect($result->successful())->toBeTrue($result->errorOutput());
+        expect($this->server->readFile($relative))->toBe($intended);
+    });
+
+    it('schuift main en deployed pas door als de upload slaagt', function (): void {
+        $this->server->git($this->wpContent, ['tag', 'deployed', 'main']);
+        $before = $this->server->git($this->wpContent, ['rev-parse', 'main', 'deployed']);
+
+        $result = $this->server->run(['push', 'demo', '--yes'], ['FAKE_PUSH_TRANSFER_FAIL' => '1']);
+
+        expect($result->failed())->toBeTrue();
+        expect($result->errorOutput())->toContain('Uploaden mislukt', '--live-files');
+        expect($this->server->git($this->wpContent, ['rev-parse', 'main', 'deployed']))->toBe($before);
+        expect($this->server->git($this->wpContent, ['branch', '--show-current']))->toBe("dev\n");
+    });
+
+    it('weigert de site te wijzigen als de databaseback-up leeg is', function (): void {
+        $result = $this->server->run(['push', 'demo', '--yes', '--db'], ['FAKE_DB_EXPORT' => 'empty']);
+
+        expect($result->failed())->toBeTrue();
+        expect($result->errorOutput())->toContain('lege database-export');
+        expect($this->server->readFile('themes/demo/functions.php'))->toContain('020');
+        expect($this->server->imported())->toBeNull();
+    });
+
+    it('stopt een SFTP-push als het lezen van de live-mappen mislukt', function (): void {
+        $this->server->fakeWordPressUpdates([]);
+        $this->server->useSftp();
+
+        $result = $this->server->run(['push', 'demo', '--yes', '--force'], ['FAKE_SFTP_LIST_FAIL' => '1']);
+
+        expect($result->failed())->toBeTrue();
+        expect($result->errorOutput())->toContain('SFTP: listing failed', 'Kon de live-bestanden niet bewaren');
+        expect($this->server->readFile('themes/demo/functions.php'))->toContain('020');
+    });
+
+    it('weigert te pushen terwijl dezelfde site al wordt bijgewerkt', function (): void {
+        $backups = $this->server->sites.'/.wpopen-backups/demo';
+        File::ensureDirectoryExists($backups);
+        $lock = fopen($backups.'/.sync.lock', 'w');
+        flock($lock, LOCK_EX);
+
+        try {
+            $result = $this->server->run(['push', 'demo', '--yes']);
+        } finally {
+            fclose($lock);
+        }
+
+        expect($result->failed())->toBeTrue();
+        expect($result->errorOutput())->toContain('Er loopt al een overdracht of herstelactie voor demo.');
+        expect($this->server->readFile('themes/demo/functions.php'))->toContain('020');
     });
 
     it('draait een push terug vanuit de back-up', function (): void {

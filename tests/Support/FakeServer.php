@@ -60,15 +60,35 @@ final class FakeServer
 
         $server->stub('rsync', <<<'BASH'
             #!/usr/bin/env bash
+            original=("$@")
+            files=''
             args=()
             while [ $# -gt 0 ]; do
               case "$1" in
                 -e) shift 2;;
+                --files-from=*) files="${1#*=}"; args+=("$1"); shift;;
                 *@*:*) args+=("${1#*:}"); shift;;
                 *) args+=("$1"); shift;;
               esac
             done
             echo "rsync ${args[*]}" >> "$FAKE_LOG"
+            if [ -n "$files" ]; then
+              if [[ "${FAKE_BACKUP_TRANSFER_FAIL:-0}" == 1 && "${original[*]}" == *--ignore-missing-args* ]]; then
+                echo 'rsync: connection lost while reading live files' >&2; exit 12
+              fi
+              if [[ "${FAKE_PUSH_TRANSFER_FAIL:-0}" == 1 && "${original[-1]}" == *@*:* ]]; then
+                echo 'rsync: connection lost while uploading' >&2; exit 12
+              fi
+              if [[ "${FAKE_PUSH_EQUAL_MTIME:-0}" == 1 && "${original[-1]}" == *@*:* ]]; then
+                while IFS= read -r file; do
+                  if [ -f "${args[-1]}$file" ]; then touch -r "$file" "${args[-1]}$file"; fi
+                done < "$files"
+              fi
+            fi
+            if [[ "${FAKE_PULL_TRANSFER_FAIL:-0}" == 1 && "${original[-2]}" == *@*:*/* ]]; then
+              /usr/bin/rsync "${args[@]}"
+              echo 'rsync: incomplete transfer' >&2; exit 23
+            fi
             exec /usr/bin/rsync "${args[@]}"
             BASH);
 
@@ -556,7 +576,10 @@ final class FakeServer
                 get) mkdir -p "$2"; cp "$3" "$2/" 2>/dev/null || rc=1;;
                 rm) rm -f "${!#}";;
                 cat) cat "$1" 2>/dev/null || rc=1;;
-                cls) ls -1 "${!#}" || rc=1;;
+                cls)
+                  if [[ "${FAKE_SFTP_LIST_FAIL:-0}" == 1 ]]; then echo 'SFTP: listing failed' >&2; exit 1; fi
+                  if [ "$1" = -1aB ]; then ls -1a --indicator-style=slash "${!#}" || rc=1
+                  else ls -1 "${!#}" || rc=1; fi;;
                 mirror)
                   paths=()
                   while [ $# -gt 0 ]; do case "$1" in -x) shift;; -*) ;; *) paths+=("$1");; esac; shift; done
